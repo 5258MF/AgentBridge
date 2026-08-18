@@ -47,10 +47,6 @@ npx @vscode/vsce package --skip-license --allow-missing-repository
 code --install-extension agentbridge-0.1.0.vsix
 ```
 
-### 用 `_deploy.cjs` 旁加载
-
-`_deploy.cjs` 位于工作区根目录（`agentbridge-extension/` 上一级），原子地把刚 build 出的 `dist/` 和 `media/` 复制到目标 VS Code 安装中。适合无法走应用市场的自部署场景。
-
 ## 隧道供应商
 
 | 模式 | 公网 URL 稳定性 | 要求 |

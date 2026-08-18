@@ -47,10 +47,6 @@ npx @vscode/vsce package --skip-license --allow-missing-repository
 code --install-extension agentbridge-0.1.0.vsix
 ```
 
-### Sideload via `node _deploy.cjs`
-
-`_deploy.cjs` lives at the workspace root (one level above `agentbridge-extension/`). It atomically copies the freshly-built `dist/` and `media/` into a target VS Code install. Useful for self-hosted deployments where marketplace install isn't an option.
-
 ## Tunnel providers
 
 | Mode | Public URL stability | Requirements |
