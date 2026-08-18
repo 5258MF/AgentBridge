@@ -1,0 +1,27 @@
+# Don't ship dev-time source, configs, private scripts, or build's dev side artifacts
+.vscode/**
+.vscode-test/**
+.vscode-test-web/**
+src/**
+node_modules/**
+build.mjs
+tsconfig.json
+tsconfig.json.orig
+package.json.orig
+package-lock.json
+_*.cjs
+build-args-*.txt
+**/*.map
+*.orig
+*.vsix
+media/icon.bak.png
+
+# VCS / CI / cache — never ship
+.gitignore
+.gitattributes
+.git/**
+.github/**
+tsconfig.tsbuildinfo
+*.log
+.DS_Store
+Thumbs.db

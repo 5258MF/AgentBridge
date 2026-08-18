@@ -1,0 +1,227 @@
+{
+  "name": "agentbridge",
+  "displayName": "AgentBridge",
+  "description": "Expose your VS Code workspace tools (files, terminal, LSP, diagnostics) to ChatGPT and other remote MCP clients via a public HTTPS tunnel.",
+  "version": "0.1.0",
+  "publisher": "agentbridge",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/5258MF/agentbridge"
+  },
+  "homepage": "https://github.com/5258MF/agentbridge#readme",
+  "bugs": {
+    "url": "https://github.com/5258MF/agentbridge/issues"
+  },
+  "keywords": [
+    "mcp",
+    "chatgpt",
+    "claude",
+    "cursor",
+    "cline",
+    "tunnel",
+    "cloudflare",
+    "ngrok",
+    "remote-agent",
+    "vision"
+  ],
+  "preview": true,
+  "galleryBanner": {
+    "color": "#0e0e10",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:agentbridge.bridge.start",
+    "onCommand:agentbridge.bridge.stop",
+    "onCommand:agentbridge.bridge.checkTunnel",
+    "onCommand:agentbridge.bridge.checkNgrok",
+    "onCommand:agentbridge.bridge.installCloudflared",
+    "onCommand:agentbridge.bridge.configure",
+    "onCommand:agentbridge.bridge.configureNamedTunnel",
+    "onCommand:agentbridge.bridge.clearNamedTunnelToken",
+    "onCommand:agentbridge.bridge.setTunnelProvider",
+    "onCommand:agentbridge.bridge.rotateEndpoint",
+    "onCommand:agentbridge.bridge.getStatus",
+    "onCommand:agentbridge.bridge.showOutput",
+    "onCommand:agentbridge.bridge.openResource",
+    "onCommand:agentbridge.bridge.openDiff",
+    "onCommand:agentbridge.bridge.openTerminal",
+    "onView:agentbridge.bridge.panel"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentbridge",
+          "title": "AgentBridge",
+          "icon": "media/agentbridge.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentbridge": [
+        {
+          "type": "webview",
+          "id": "agentbridge.bridge.panel",
+          "name": "Bridge"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agentbridge.bridge.start",
+        "title": "AgentBridge: Start",
+        "icon": "$(radio-tower)"
+      },
+      {
+        "command": "agentbridge.bridge.stop",
+        "title": "AgentBridge: Stop",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "agentbridge.bridge.checkTunnel",
+        "title": "AgentBridge: Check Tunnel",
+        "icon": "$(check)"
+      },
+      {
+        "command": "agentbridge.bridge.installCloudflared",
+        "title": "AgentBridge: Install cloudflared",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "agentbridge.bridge.configureNamedTunnel",
+        "title": "AgentBridge: Configure Cloudflare Named Tunnel",
+        "icon": "$(cloud)"
+      },
+      {
+        "command": "agentbridge.bridge.clearNamedTunnelToken",
+        "title": "AgentBridge: Clear Cloudflare Tunnel Token",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "agentbridge.bridge.setTunnelProvider",
+        "title": "AgentBridge: Set Tunnel Provider",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "agentbridge.bridge.rotateEndpoint",
+        "title": "AgentBridge: Rotate Endpoint",
+        "icon": "$(key)"
+      },
+      {
+        "command": "agentbridge.bridge.showOutput",
+        "title": "AgentBridge: Show Output",
+        "icon": "$(output)"
+      },
+      {
+        "command": "agentbridge.bridge.configure",
+        "title": "AgentBridge: Configure ngrok Domain",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "agentbridge.bridge.checkNgrok",
+        "title": "AgentBridge: Check ngrok",
+        "icon": "$(check)"
+      }
+    ],
+    "configuration": {
+      "title": "AgentBridge",
+      "properties": {
+        "agentbridge.bridge.ngrokDomain": {
+          "type": "string",
+          "default": "",
+          "description": "Reserved ngrok HTTPS hostname used by the Bridge, for example your-name.ngrok-free.dev."
+        },
+        "agentbridge.bridge.cloudflareNamedDomain": {
+          "type": "string",
+          "default": "",
+          "description": "Fixed HTTPS hostname configured as a Cloudflare Tunnel published application, for example mcp.example.com."
+        },
+        "agentbridge.bridge.cloudflareNamedLocalPort": {
+          "type": "integer",
+          "default": 48271,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Fixed localhost port used by Cloudflare Named Tunnel. Configure the Cloudflare published application Service URL as http://127.0.0.1:<port>."
+        },
+        "agentbridge.bridge.managedShell.windows": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Absolute path to the shell executable that AgentBridge managed PTY terminals will launch on Windows (e.g. C:\\Program Files\\PowerShell\\7\\pwsh.exe for PowerShell 7+, or C:\\Windows\\System32\\cmd.exe for cmd). Leave empty to use the default system Windows PowerShell (powershell.exe). AgentBridge validates the path at apply time and silently falls back to the default with a warning in the panel when the override cannot be launched."
+        },
+        "agentbridge.bridge.managedShell.unix": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Absolute path or PATH-resolvable name of the shell executable that AgentBridge managed PTY terminals will launch on POSIX systems (e.g. /bin/zsh, /usr/bin/fish, or simply bash). Leave empty to use the default /bin/bash (or /bin/sh when bash is unavailable). AgentBridge resolves the binary via PATH when the value is not absolute and silently falls back to the default with a warning in the panel when the override cannot be launched."
+        },
+        "agentbridge.bridge.openInternalBrowser": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "all",
+            "external"
+          ],
+          "enumDescriptions": [
+            "ChatGPT and arena.ai open inside the VS Code Simple Browser; other external links jump to the OS default browser. Matches the original ShunCode Bridge widget behavior.",
+            "Every external link opens inside the VS Code Simple Browser, including Cloudflare/ngrok dashboards. OAuth login flows may be blocked by iframe X-Frame-Options restrictions.",
+            "Every external link jumps to the OS default browser. Equivalent to the pre-stage-14 behavior."
+          ],
+          "default": "auto",
+          "scope": "machine-overridable",
+          "description": "Decides how external URL links clicked in the AgentBridge panel (ChatGPT/Arena buttons, Cloudflare/ngrok dashboard buttons, etc.) are opened."
+        },
+        "agentbridge.bridge.tunnelProvider": {
+          "type": "string",
+          "enum": [
+            "cloudflare",
+            "cloudflare-named",
+            "ngrok"
+          ],
+          "enumDescriptions": [
+            "Cloudflare Quick Tunnel. No account or domain required; the public URL changes after restart.",
+            "Cloudflare Named Tunnel. Stable hostname; requires a Cloudflare account, managed domain, Tunnel Token, and published application route.",
+            "ngrok reserved domain. Requires an ngrok account, Authtoken, and configured domain."
+          ],
+          "default": "cloudflare",
+          "scope": "application",
+          "description": "Public tunnel provider used by AgentBridge."
+        },
+        "agentbridge.bridge.persistentMode": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Automatically start the Bridge after the extension activates."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "build:watch": "node build.mjs --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@vscode/ripgrep": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.95.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.5.0"
+  }
+}

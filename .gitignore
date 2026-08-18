@@ -1,0 +1,23 @@
+# Node
+node_modules/
+package-lock.json.orig
+tsconfig.tsbuildinfo
+
+# Build artifacts
+dist/
+*.vsix
+*.log
+
+# Private dev scripts (not in marketplace package)
+_*.cjs
+build-args-*.txt
+*.orig
+
+# Backup assets
+media/icon.bak.png
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
