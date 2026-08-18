@@ -7,11 +7,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/5258MF/agentbridge"
+    "url": "https://github.com/5258MF/AgentBridge"
   },
-  "homepage": "https://github.com/5258MF/agentbridge#readme",
+  "homepage": "https://github.com/5258MF/AgentBridge#readme",
   "bugs": {
-    "url": "https://github.com/5258MF/agentbridge/issues"
+    "url": "https://github.com/5258MF/AgentBridge/issues"
   },
   "keywords": [
     "mcp",
