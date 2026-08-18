@@ -25,27 +25,45 @@
 
 ## 安装
 
-### 开发模式（推荐首次试水）
+### 方式 A — 下载预构建 vsix(推荐)
+
+大多数用户不需要装 Node.js 或构建工具链,直接下载预构建 vsix 装入 VS Code 即可。
+
+1. 打开 [最新 Release 页](https://github.com/5258MF/AgentBridge/releases/latest)
+2. 下载 `agentbridge-0.1.0.vsix` 到本地
+3. 安装:
+
+   ```bash
+   code --install-extension /path/to/agentbridge-0.1.0.vsix
+   ```
+
+   或者图形操作:VS Code → 扩展面板 → `⋯` 菜单 → "从 VSIX 安装..." → 选中下载的文件。
+
+### 方式 B — 从源码构建(开发者方式)
+
+需要 Node 22+ 和 npm。
 
 ```bash
-git clone <your-fork>
-cd agentbridge-extension
+git clone https://github.com/5258MF/AgentBridge.git
+cd AgentBridge
 npm install
 npm run build
 ```
 
-再启动一个带开发扩展的 VS Code 实例：
+然后以开发扩展运行,或打包 vsix 旁加载:
 
 ```bash
-"Code.exe" --extensionDevelopmentPath="/absolute/path/to/agentbridge-extension"
-```
+# 开发模式
+"Code.exe" --extensionDevelopmentPath="$PWD"
 
-### 打包 vsix
-
-```bash
+# 或本地打包 vsix
 npx @vscode/vsce package --skip-license --allow-missing-repository
 code --install-extension agentbridge-0.1.0.vsix
 ```
+
+### 方式 C — 从 VS Code Marketplace(待发布)
+
+publisher 注册完成后,你也可以直接在 VS Code 扩展面板搜索 "AgentBridge" 安装。
 
 ## 隧道供应商
 

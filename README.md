@@ -25,27 +25,45 @@ Expose your VS Code workspace's tools — files, terminal, LSP, diagnostics, and
 
 ## Installation
 
-### Dev mode (recommended for first try)
+### Option A — Download prebuilt vsix (recommended)
+
+Most users don't need Node.js or build toolchain. Just grab the prebuilt vsix and install it into VS Code.
+
+1. Open the [latest release page](https://github.com/5258MF/AgentBridge/releases/latest)
+2. Download `agentbridge-0.1.0.vsix` to your computer
+3. Install it:
+
+   ```bash
+   code --install-extension /path/to/agentbridge-0.1.0.vsix
+   ```
+
+   Or graphically: VS Code → Extensions panel → `⋯` menu → "Install from VSIX..." → pick the downloaded file.
+
+### Option B — Build from source (for developers)
+
+Requires Node 22+ and npm.
 
 ```bash
-git clone <your-fork>
-cd agentbridge-extension
+git clone https://github.com/5258MF/AgentBridge.git
+cd AgentBridge
 npm install
 npm run build
 ```
 
-Launch a second VS Code instance with the extension loaded as a development extension:
+Then either run it as a dev extension or sideload the packaged vsix:
 
 ```bash
-"Code.exe" --extensionDevelopmentPath="/absolute/path/to/agentbridge-extension"
-```
+# Dev mode
+"Code.exe" --extensionDevelopmentPath="$PWD"
 
-### Packaged vsix
-
-```bash
+# Or package a vsix locally
 npx @vscode/vsce package --skip-license --allow-missing-repository
 code --install-extension agentbridge-0.1.0.vsix
 ```
+
+### Option C — From VS Code Marketplace (pending)
+
+Once publisher registration is complete, you'll also be able to install directly from the Extensions panel by searching "AgentBridge".
 
 ## Tunnel providers
 
