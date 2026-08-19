@@ -1797,7 +1797,7 @@ export class BridgeManager implements vscode.Disposable {
 
   private createSession(): { transport: StreamableHTTPServerTransport; server: McpServer } {
     const server = new McpServer(
-      { name: "agentbridge", version: "0.1.0" },
+      { name: "agentbridge", version: "0.1.1" },
       { capabilities: { tools: {}, logging: {} }, instructions: BRIDGE_SERVER_INSTRUCTIONS },
     );
     let transport!: StreamableHTTPServerTransport;
