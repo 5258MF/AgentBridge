@@ -6,7 +6,7 @@ Expose your VS Code workspace's tools — files, terminal, LSP, diagnostics, and
 
 ## Status
 
-**v0.1.0 — first stable release.** Built and tested on Windows with VS Code 1.95+ and Node 22+. All fourteen development phases are landed and verified end-to-end against ChatGPT Connectors.
+**v0.1.0 — first stable release.** Published to the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=agentbridge.vsc-agentbridge). Built and tested on Windows with VS Code 1.95+ and Node 22+. All fourteen development phases are landed and verified end-to-end against ChatGPT Connectors.
 
 ## Features
 
@@ -25,9 +25,23 @@ Expose your VS Code workspace's tools — files, terminal, LSP, diagnostics, and
 
 ## Installation
 
-### Option A — Download prebuilt vsix (recommended)
+### Option A — From VS Code Marketplace (recommended)
 
-Most users don't need Node.js or build toolchain. Just grab the prebuilt vsix and install it into VS Code.
+The extension is published on the VS Code Marketplace, so you can install it directly from the Extensions panel.
+
+1. Open VS Code → Extensions panel (`Ctrl+Shift+X` / `Cmd+Shift+X`)
+2. Search `VSC AgentBridge` (or visit the [Marketplace page](https://marketplace.visualstudio.com/items?itemName=agentbridge.vsc-agentbridge))
+3. Click **Install**
+
+Or from the command line:
+
+```bash
+code --install-extension agentbridge.vsc-agentbridge
+```
+
+### Option B — Download prebuilt vsix (offline / VSCodium)
+
+For environments without Marketplace access (VSCodium, internal networks, manual installer distribution), grab the prebuilt vsix from GitHub Release and sideload.
 
 1. Open the [latest release page](https://github.com/5258MF/AgentBridge/releases/latest)
 2. Download `vsc-agentbridge-0.1.0.vsix` to your computer
@@ -39,7 +53,7 @@ Most users don't need Node.js or build toolchain. Just grab the prebuilt vsix an
 
    Or graphically: VS Code → Extensions panel → `⋯` menu → "Install from VSIX..." → pick the downloaded file.
 
-### Option B — Build from source (for developers)
+### Option C — Build from source (for developers)
 
 Requires Node 22+ and npm.
 
@@ -60,10 +74,6 @@ Then either run it as a dev extension or sideload the packaged vsix:
 npx @vscode/vsce package --skip-license --allow-missing-repository
 code --install-extension vsc-agentbridge-0.1.0.vsix
 ```
-
-### Option C — From VS Code Marketplace (pending)
-
-Once publisher registration is complete, you'll also be able to install directly from the Extensions panel by searching "AgentBridge".
 
 ## Tunnel providers
 

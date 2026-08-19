@@ -6,7 +6,7 @@
 
 ## 状态
 
-**v0.1.0 · 首个稳定版。** 在 Windows 上基于 VS Code 1.95+ 与 Node 22+ 构建验证。14 个开发阶段已全部完成，对 ChatGPT Connectors 端到端打通。
+**v0.1.0 · 首个稳定版。** 已发布到 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=agentbridge.vsc-agentbridge)。在 Windows 上基于 VS Code 1.95+ 与 Node 22+ 构建验证。14 个开发阶段已全部完成，对 ChatGPT Connectors 端到端打通。
 
 ## 核心特性
 
@@ -25,9 +25,23 @@
 
 ## 安装
 
-### 方式 A — 下载预构建 vsix(推荐)
+### 方式 A — 从 VS Code Marketplace 安装(推荐)
 
-大多数用户不需要装 Node.js 或构建工具链,直接下载预构建 vsix 装入 VS Code 即可。
+扩展已发布到 VS Code Marketplace,可直接在扩展面板安装。
+
+1. 打开 VS Code → 扩展面板(`Ctrl+Shift+X` / `Cmd+Shift+X`)
+2. 搜索 `VSC AgentBridge`(或直接访问 [Marketplace 页](https://marketplace.visualstudio.com/items?itemName=agentbridge.vsc-agentbridge))
+3. 点击 **Install**
+
+或命令行:
+
+```bash
+code --install-extension agentbridge.vsc-agentbridge
+```
+
+### 方式 B — 下载预构建 vsix(离线 / VSCodium)
+
+无 Marketplace 访问的环境(VSCodium、内网、需手动分发安装包),从 GitHub Release 下载预构建 vsix 旁加载。
 
 1. 打开 [最新 Release 页](https://github.com/5258MF/AgentBridge/releases/latest)
 2. 下载 `vsc-agentbridge-0.1.0.vsix` 到本地
@@ -39,7 +53,7 @@
 
    或者图形操作:VS Code → 扩展面板 → `⋯` 菜单 → "从 VSIX 安装..." → 选中下载的文件。
 
-### 方式 B — 从源码构建(开发者方式)
+### 方式 C — 从源码构建(开发者方式)
 
 需要 Node 22+ 和 npm。
 
@@ -60,10 +74,6 @@ npm run build
 npx @vscode/vsce package --skip-license --allow-missing-repository
 code --install-extension vsc-agentbridge-0.1.0.vsix
 ```
-
-### 方式 C — 从 VS Code Marketplace(待发布)
-
-publisher 注册完成后,你也可以直接在 VS Code 扩展面板搜索 "AgentBridge" 安装。
 
 ## 隧道供应商
 
