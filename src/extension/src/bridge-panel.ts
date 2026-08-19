@@ -255,7 +255,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this.view?.webview.cspSource ?? ""} 'unsafe-inline'; script-src 'unsafe-inline';">
 <style>
   html { height: 100%; margin: 0; padding: 0; }
-  body { box-sizing: border-box; width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: none; padding: 0 0 24px; overflow: auto; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
+  body { box-sizing: border-box; width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: none; padding: 0 0 24px; display: flex; flex-direction: column; overflow: hidden; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
   .agentbridge-card h2, .agentbridge-card h3, .agentbridge-advanced-section h4, .agentbridge-setup-step h4 { margin: 0; font-weight: 600; }
   .agentbridge-hero-description { max-width: 720px; margin: 7px 0 0; color: var(--vscode-descriptionForeground); line-height: 1.4; }
   .agentbridge-security-note { display: flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.4; }
@@ -365,7 +365,8 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   .agentbridge-tab:hover { background: var(--vscode-list-hoverBackground, transparent); }
   .agentbridge-tab:focus { outline: none; }
   .agentbridge-tab.active { color: var(--vscode-foreground); border-bottom-color: var(--vscode-focusBorder, var(--vscode-button-background)); }
-  .agentbridge-session-view { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+  .agentbridge-session-view { display: flex; flex-direction: column; min-height: 0; flex: 1 1 0; }
+  #configSection { flex: 1; min-height: 0; overflow: auto; }
   .agentbridge-session-todos-region { max-width: 950px; margin: 0 auto; width: 100%; padding: 14px 12px 0; box-sizing: border-box; }
   .agentbridge-session-scroll { flex: 1; min-height: 0; overflow: auto; }
   .agentbridge-session-timeline { max-width: 950px; margin: 0 auto; display: flex; flex-direction: column; }
