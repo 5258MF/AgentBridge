@@ -106,6 +106,8 @@ Runtime toggles for managed shell and open-internally-browser live on the Bridge
 
 See [docs/cloudflare-named-tunnel-setup.md](docs/cloudflare-named-tunnel-setup.md) for a step-by-step guide (install cloudflared, create the tunnel, copy the token, add the route, verify DNS, start + verify the bridge). English version: [cloudflare-named-tunnel-setup.en.md](docs/cloudflare-named-tunnel-setup.en.md).
 
+Connecting the ChatGPT web app: see [docs/chatgpt-web-connector.md](docs/chatgpt-web-connector.md) (start Bridge → copy MCP address → add Connector → grant permissions). English version: [chatgpt-web-connector.en.md](docs/chatgpt-web-connector.en.md).
+
 ## Known limitations
 
 - **Cloudflare Quick Tunnel URL is ephemeral** — rotates every restart. Use Named Tunnel (or ngrok) for stable, shareable URLs.
