@@ -27,42 +27,47 @@ AgentBridge 提供三种隧道连接方式，面板「隧道供应商」单选�
 
 > 注意：Quick Tunnel 地址每次重启都会变化，网页端需要重新更新地址。长期使用推荐 Named Tunnel 或 ngrok 固定地址。
 
-## Step 3 — 在 ChatGPT 网页版添加 Connector
+## Step 3 — 在 ChatGPT 网页版开启开发者模式并创建桥接插件
 
 1. 打开 [chatgpt.com](https://chatgpt.com/)（也可以在 VS Code 面板点「打开 ChatGPT」，AgentBridge 会用内置浏览器打开）
 2. 点击左下角个人头像 → **Settings**（设置）
-3. 找到 **Connectors**（连接器）
-4. 点右上角 **Add new connector**（添加新连接器）
-5. 在弹出的对话框里把 MCP 地址粘贴进 URL 输入框，点击 **Create**（创建）
-6. 创建成功后点 **Connect**（连接）
+3. 在设置里找到 **插件 Plugins**
+4. 继续向下滑，找到 **Developer mode**（开发者模式），把开关打开
+5. 再次点击 **插件 Plugins** 进入插件库
+6. 点击右上角搜索栏旁边的**加号**，创建一个新的桥接插件：
+   - 名字随意填写，作用描述也可以留空
+   - 最重要的是把刚才复制的 MCP 地址粘贴进 URL 输入框
+   - 下方认证方式选择 **No auth**
+   - 点击 **Create**
+7. 等待插件创建成功，再点击自动弹出页面里的 **Connect**
 
 连接成功后，AgentBridge 面板的会话区会实时显示 ChatGPT 正在调用的工具和操作。
 
 ## Step 4 — 授予权限
 
-1. 在 Connectors 列表找到刚创建的连接器
-2. 点击 **Permission**（权限）
-3. 选择 **Allow all actions**（允许全部操作）——放开后 AI 才能读取文件、搜索项目、修改代码、运行终端
-4. 也可以按需只授权部分工具
+1. 在插件页面点击 **Permission**（权限）
+2. 选择 **Allow all actions**（允许全部操作）——放开后 AI 才能读取文件、搜索项目、修改代码、运行终端
+3. 也可以按需只授权部分工具
+4. 刷新页面
 
 ## Step 5 — 开始使用
 
-1. 刷新或新建一个对话
-2. 直接选择刚才创建的连接器，或在输入框输入 `@` 加连接器名称
+1. 新建一个对话
+2. 直接选择刚才创建的插件，或在输入框输入 `@` 加插件名称
 3. 把项目里的文件路径发给 AI，让它「读取并分析这个文件」
 
-AI 会在网页端完成分析和决策，AgentBridge 负责真正在本地读取、搜索、修改文件并执行终端命令，修改结果直接写回工作区。
+AI 会在网页端完成分析和决策，AgentBridge 负责真正在本地读取、搜索、修改文件并执行终端命令，修改结果直接写回工作区。这个插件在 Work 和 Chat 模式里都可以使用，不需要另外配置 API Key（实际可用额度以你的 ChatGPT 账号和订阅方案为准）。
 
 ## 常见问题
 
 **网页端看不到工具/报工具不存在**
-ChatGPT Connectors 在会话启动时缓存工具列表。新增或升级工具后，需要在 `Settings → Connectors` 里点该连接器的 **Refresh**（或 Remove 后重新 Add）。
+ChatGPT 网页端在会话启动时缓存工具列表。新增或升级工具后，需要刷新页面并重新连接插件（或 Remove 后重新 Add）。
 
 **换了网络/重启后连不上**
-Quick Tunnel 地址变化了，在 Connectors 里更新 URL 为新地址，或改用固定地址方式（Named Tunnel / ngrok）。
+Quick Tunnel 地址变化了，在插件里更新 URL 为新地址，或改用固定地址方式（Named Tunnel / ngrok）。
 
 **修改工具后 ChatGPT 端还是旧行为**
-同上，手动 Refresh Connector 即可，仅重启 Bridge 不够。
+同上，手动刷新插件即可，仅重启 Bridge 不够。
 
 **想用 API 而不是网页端？**
 网页端 Connectors 在 Work 和 Chat 模式都能用，不需要另外配置 API Key。如果你更想用 API，也可在 Claude Desktop / Cursor / Cline 等客户端里以 `streamableHttp` 类型直接填同一个 MCP 地址。

@@ -27,42 +27,47 @@ For the first try, use **Cloudflare Quick Tunnel** (the panel will auto-install 
 
 > Note: Quick Tunnel addresses change on every restart, so the web app needs the URL updated each time. For long-term use, prefer Named Tunnel or ngrok with fixed addresses.
 
-## Step 3 — Add a Connector in ChatGPT
+## Step 3 — Enable Developer mode in ChatGPT and create a bridge plugin
 
 1. Open [chatgpt.com](https://chatgpt.com/) (or click "Open ChatGPT" in the VS Code panel — AgentBridge opens it in the built-in browser)
 2. Click your avatar in the bottom-left corner → **Settings**
-3. Find **Connectors**
-4. Click **Add new connector** in the top-right
-5. Paste the MCP address into the URL field and click **Create**
-6. Once created, click **Connect**
+3. In Settings, find **Plugins**
+4. Scroll down to **Developer mode** and turn the toggle on
+5. Click **Plugins** again to enter the plugin library
+6. Click the **plus icon** next to the search bar at the top-right to create a new bridge plugin:
+   - Name can be anything; description can be left empty
+   - Most importantly, paste the MCP address you copied into the URL field
+   - Under Authentication, choose **No auth**
+   - Click **Create**
+7. Once the plugin is created, click **Connect** on the pop-up page
 
 After a successful connection, the session area in the AgentBridge panel shows the tools and actions ChatGPT is invoking in real time.
 
 ## Step 4 — Grant permissions
 
-1. In the Connectors list, find the connector you just created
-2. Click **Permission**
-3. Choose **Allow all actions** — this lets the AI read files, search the project, modify code and run terminals
-4. You can also grant only a subset of tools if preferred
+1. On the plugin page, click **Permission**
+2. Choose **Allow all actions** — this lets the AI read files, search the project, modify code and run terminals
+3. You can also grant only a subset of tools if preferred
+4. Refresh the page
 
 ## Step 5 — Start using it
 
-1. Refresh or start a new conversation
-2. Select the connector you created, or type `@` followed by the connector name
+1. Start a new conversation
+2. Select the plugin you created, or type `@` followed by the plugin name
 3. Send the AI a file path from your project and ask it to "read and analyze this file"
 
-The AI does the analysis and decision-making on the web; AgentBridge performs the actual local reads, searches, file edits and terminal commands, writing results straight back into your workspace.
+The AI does the analysis and decision-making on the web; AgentBridge performs the actual local reads, searches, file edits and terminal commands, writing results straight back into your workspace. The plugin works in both Work and Chat modes without needing an API key (actual usable quota depends on your ChatGPT account and subscription plan).
 
 ## Troubleshooting
 
 **The web app doesn't see the tools / reports tools not found**
-ChatGPT Connectors caches the tool list at session start. After adding or upgrading tools, click **Refresh** on the connector in `Settings → Connectors` (or Remove and re-add it).
+ChatGPT caches the tool list at session start. After adding or upgrading tools, refresh the page and reconnect the plugin (or Remove and re-add it).
 
 **Can't connect after switching networks or restarting**
-The Quick Tunnel address changed — update the URL in the Connector, or switch to a fixed-address provider (Named Tunnel / ngrok).
+The Quick Tunnel address changed — update the URL in the plugin, or switch to a fixed-address provider (Named Tunnel / ngrok).
 
 **ChatGPT still behaves like the old toolset after a tool change**
-Same as above: refresh the Connector manually. Restarting Bridge alone is not enough.
+Same as above: refresh the plugin manually. Restarting Bridge alone is not enough.
 
 **Prefer an API instead of the web app?**
 Web Connectors work in both Work and Chat modes without any API key. If you prefer an API, you can also use the same MCP address in Claude Desktop / Cursor / Cline with `streamableHttp` transport.
