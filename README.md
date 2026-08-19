@@ -102,6 +102,10 @@ All settings live under the `agentbridge.bridge.*` namespace.
 
 Runtime toggles for managed shell and open-internally-browser live on the Bridge panel's **advanced** card.
 
+### Cloudflare Named Tunnel walkthrough
+
+See [docs/cloudflare-named-tunnel-setup.md](docs/cloudflare-named-tunnel-setup.md) for a step-by-step guide (install cloudflared, create the tunnel, copy the token, add the route, verify DNS, start + verify the bridge). English version: [cloudflare-named-tunnel-setup.en.md](docs/cloudflare-named-tunnel-setup.en.md).
+
 ## Known limitations
 
 - **Cloudflare Quick Tunnel URL is ephemeral** — rotates every restart. Use Named Tunnel (or ngrok) for stable, shareable URLs.

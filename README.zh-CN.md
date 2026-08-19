@@ -102,6 +102,10 @@ code --install-extension vsc-agentbridge-0.1.0.vsix
 
 Managed Shell 与 打开方式 的运行时切换入口位于 Bridge 面板的 **高级卡**。
 
+### Cloudflare Named Tunnel 配置教程
+
+逐步指南见 [docs/cloudflare-named-tunnel-setup.md](docs/cloudflare-named-tunnel-setup.md)（安装 cloudflared → 创建隧道 → 复制 Token → 添加路由 → 检查 DNS → 启动并验证）。英文版：[cloudflare-named-tunnel-setup.en.md](docs/cloudflare-named-tunnel-setup.en.md)。
+
 ## 已知限制
 
 - **Cloudflare Quick Tunnel URL 易失** — 每次重启都换地址。要稳定可分享的 URL，用 Named Tunnel（或 ngrok）。
