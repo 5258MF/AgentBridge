@@ -25,7 +25,6 @@
     "remote-agent",
     "vision"
   ],
-  "preview": true,
   "galleryBanner": {
     "color": "#0e0e10",
     "theme": "dark"
