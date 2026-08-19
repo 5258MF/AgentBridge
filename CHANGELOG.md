@@ -1,5 +1,13 @@
 # Change Log
 
+## 0.1.2 (2026-08-19)
+
+Documentation revision.
+
+- **Repositioned as a web-based MCP assistant bridge** — tagline and description now target web-based AI assistants that support MCP (GPT, Arena, etc.) instead of "remote MCP clients".
+- **Dropped hardcoded version strings from README status lines** — no more stale version numbers; install steps now reference "the latest release" instead of a specific vsix filename.
+- Repackaged with the revised READMEs (Marketplace listing overview refresh).
+
 ## 0.1.1 (2026-08-19)
 
 Bug-fix and documentation release.
