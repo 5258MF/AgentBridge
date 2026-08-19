@@ -1,4 +1,4 @@
-# AgentBridge
+# VSC AgentBridge
 
 Expose your VS Code workspace's tools — files, terminal, LSP, diagnostics, and images — to remote MCP clients (ChatGPT Connectors, Claude Desktop, Cursor, Cline, Continue) over a public HTTPS tunnel.
 

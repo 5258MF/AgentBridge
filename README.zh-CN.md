@@ -1,4 +1,4 @@
-# AgentBridge
+# VSC AgentBridge
 
 把 VS Code 工作区的工具 — 文件、终端、LSP、诊断、图片 — 通过公共 HTTPS 隧道暴露给远程 MCP 客户端（ChatGPT Connectors、Claude Desktop、Cursor、Cline、Continue）。
 
