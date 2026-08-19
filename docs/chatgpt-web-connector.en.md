@@ -68,3 +68,9 @@ The Quick Tunnel address changed — update the URL in the plugin, or switch to 
 
 **ChatGPT still behaves like the old toolset after a tool change**
 Same as above: refresh the plugin manually. Restarting Bridge alone is not enough.
+
+**Can the same MCP address be used by multiple web AI models? Any conflicts?**
+Yes. At the protocol layer everything is isolated: each client (ChatGPT / Claude / Grok, etc.) gets its own independent MCP session and they don't interfere with each other (capacity up to 64 sessions). But note that they **share the same workspace and tools**:
+- If two models `apply_patch` the same file at the same time, the later write overwrites the earlier one (no file locking)
+- `run_command` terminal sessions are shared — two models running commands simultaneously and sending input to each other will interleave
+- Recommendation: assign one task per model (different files / different terminals), or use them at different times; you can also "Disconnect" a session individually in the panel session list
