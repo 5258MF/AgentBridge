@@ -68,6 +68,3 @@ Quick Tunnel 地址变化了，在插件里更新 URL 为新地址，或改用�
 
 **修改工具后 ChatGPT 端还是旧行为**
 同上，手动刷新插件即可，仅重启 Bridge 不够。
-
-**想用 API 而不是网页端？**
-网页端 Connectors 在 Work 和 Chat 模式都能用，不需要另外配置 API Key。如果你更想用 API，也可在 Claude Desktop / Cursor / Cline 等客户端里以 `streamableHttp` 类型直接填同一个 MCP 地址。

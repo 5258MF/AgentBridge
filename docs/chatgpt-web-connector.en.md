@@ -68,6 +68,3 @@ The Quick Tunnel address changed — update the URL in the plugin, or switch to 
 
 **ChatGPT still behaves like the old toolset after a tool change**
 Same as above: refresh the plugin manually. Restarting Bridge alone is not enough.
-
-**Prefer an API instead of the web app?**
-Web Connectors work in both Work and Chat modes without any API key. If you prefer an API, you can also use the same MCP address in Claude Desktop / Cursor / Cline with `streamableHttp` transport.
