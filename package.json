@@ -1,5 +1,5 @@
 {
-  "name": "agentbridge",
+  "name": "vsc-agentbridge",
   "displayName": "AgentBridge",
   "description": "Expose your VS Code workspace tools (files, terminal, LSP, diagnostics) to ChatGPT and other remote MCP clients via a public HTTPS tunnel.",
   "version": "0.1.0",

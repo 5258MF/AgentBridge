@@ -30,11 +30,11 @@ Expose your VS Code workspace's tools — files, terminal, LSP, diagnostics, and
 Most users don't need Node.js or build toolchain. Just grab the prebuilt vsix and install it into VS Code.
 
 1. Open the [latest release page](https://github.com/5258MF/AgentBridge/releases/latest)
-2. Download `agentbridge-0.1.0.vsix` to your computer
+2. Download `vsc-agentbridge-0.1.0.vsix` to your computer
 3. Install it:
 
    ```bash
-   code --install-extension /path/to/agentbridge-0.1.0.vsix
+   code --install-extension /path/to/vsc-agentbridge-0.1.0.vsix
    ```
 
    Or graphically: VS Code → Extensions panel → `⋯` menu → "Install from VSIX..." → pick the downloaded file.
@@ -58,7 +58,7 @@ Then either run it as a dev extension or sideload the packaged vsix:
 
 # Or package a vsix locally
 npx @vscode/vsce package --skip-license --allow-missing-repository
-code --install-extension agentbridge-0.1.0.vsix
+code --install-extension vsc-agentbridge-0.1.0.vsix
 ```
 
 ### Option C — From VS Code Marketplace (pending)
