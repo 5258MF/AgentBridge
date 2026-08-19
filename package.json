@@ -1,7 +1,7 @@
 {
   "name": "vsc-agentbridge",
   "displayName": "VSC AgentBridge",
-  "description": "Expose your VS Code workspace tools (files, terminal, LSP, diagnostics) to ChatGPT and other remote MCP clients via a public HTTPS tunnel.",
+  "description": "Expose your VS Code workspace tools (files, terminal, LSP, diagnostics) to web-based AI assistants that support MCP (GPT, Arena, etc.) via a public HTTPS tunnel.",
   "version": "0.1.1",
   "publisher": "agentbridge",
   "license": "MIT",

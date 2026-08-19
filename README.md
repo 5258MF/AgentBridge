@@ -1,12 +1,12 @@
 # VSC AgentBridge
 
-Expose your VS Code workspace's tools — files, terminal, LSP, diagnostics, and images — to remote MCP clients (ChatGPT Connectors, Claude Desktop, Cursor, Cline, Continue) over a public HTTPS tunnel.
+Expose your VS Code workspace's tools — files, terminal, LSP, diagnostics, and images — to web-based AI assistants that support MCP (GPT, Arena, etc.) over a public HTTPS tunnel.
 
 > [中文文档 | README.zh-CN.md](./README.zh-CN.md)
 
 ## Status
 
-**v0.1.0 — first stable release.** Published to the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=agentbridge.vsc-agentbridge). Built and tested on Windows with VS Code 1.95+ and Node 22+. All fourteen development phases are landed and verified end-to-end against ChatGPT Connectors.
+Published to the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=agentbridge.vsc-agentbridge). Built and tested on Windows with VS Code 1.95+ and Node 22+. All fourteen development phases are landed and verified end-to-end against ChatGPT Connectors.
 
 ## Features
 
@@ -44,11 +44,11 @@ code --install-extension agentbridge.vsc-agentbridge
 For environments without Marketplace access (VSCodium, internal networks, manual installer distribution), grab the prebuilt vsix from GitHub Release and sideload.
 
 1. Open the [latest release page](https://github.com/5258MF/AgentBridge/releases/latest)
-2. Download `vsc-agentbridge-0.1.0.vsix` to your computer
+2. Download the latest vsix release to your computer
 3. Install it:
 
    ```bash
-   code --install-extension /path/to/vsc-agentbridge-0.1.0.vsix
+   code --install-extension /path/to/downloaded.vsix
    ```
 
    Or graphically: VS Code → Extensions panel → `⋯` menu → "Install from VSIX..." → pick the downloaded file.

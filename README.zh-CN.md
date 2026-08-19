@@ -1,12 +1,12 @@
 # VSC AgentBridge
 
-把 VS Code 工作区的工具 — 文件、终端、LSP、诊断、图片 — 通过公共 HTTPS 隧道暴露给远程 MCP 客户端（ChatGPT Connectors、Claude Desktop、Cursor、Cline、Continue）。
+把 VS Code 工作区的工具 — 文件、终端、LSP、诊断、图片 — 通过公共 HTTPS 隧道暴露给支持 MCP 的网页端大模型（如 GPT、Arena 等）。
 
 > [English | README.md](./README.md)
 
 ## 状态
 
-**v0.1.0 · 首个稳定版。** 已发布到 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=agentbridge.vsc-agentbridge)。在 Windows 上基于 VS Code 1.95+ 与 Node 22+ 构建验证。14 个开发阶段已全部完成，对 ChatGPT Connectors 端到端打通。
+已发布到 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=agentbridge.vsc-agentbridge)。在 Windows 上基于 VS Code 1.95+ 与 Node 22+ 构建验证。14 个开发阶段已全部完成，对 ChatGPT Connectors 端到端打通。
 
 ## 核心特性
 
@@ -44,11 +44,11 @@ code --install-extension agentbridge.vsc-agentbridge
 无 Marketplace 访问的环境(VSCodium、内网、需手动分发安装包),从 GitHub Release 下载预构建 vsix 旁加载。
 
 1. 打开 [最新 Release 页](https://github.com/5258MF/AgentBridge/releases/latest)
-2. 下载 `vsc-agentbridge-0.1.0.vsix` 到本地
+2. 下载最新版本的 vsix 文件到本地
 3. 安装:
 
    ```bash
-   code --install-extension /path/to/vsc-agentbridge-0.1.0.vsix
+   code --install-extension /path/to/downloaded.vsix
    ```
 
    或者图形操作:VS Code → 扩展面板 → `⋯` 菜单 → "从 VSIX 安装..." → 选中下载的文件。
