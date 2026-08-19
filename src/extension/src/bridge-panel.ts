@@ -288,6 +288,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 
   .agentbridge-oib-radio { padding: 4px 10px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 4px; background: transparent; color: var(--vscode-foreground); font: inherit; cursor: pointer; transition: background-color 120ms ease, border-color 120ms ease; }
   .agentbridge-oib-radio[aria-checked="true"] { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: var(--vscode-button-background, transparent); }
+  .agentbridge-oib-radio[aria-checked="true"]:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
   .agentbridge-oib-radio[aria-checked="false"]:hover:not(:disabled) { background: var(--vscode-list-hoverBackground, transparent); }
   .agentbridge-oib-radio:disabled { opacity: .55; cursor: default; }
   .agentbridge-provider-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

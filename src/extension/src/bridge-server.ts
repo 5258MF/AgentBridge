@@ -36,6 +36,15 @@ const SESSION_RETRY_INTERVAL_MS = 2_000;
 const SESSION_EVENT_STORE_LIMIT = 512;
 const PUBLIC_HEALTH_STARTUP_TIMEOUT_MS = 60_000;
 const PUBLIC_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
+/** DoH endpoints used as a DNS fallback when the system resolver cannot
+ * resolve the tunnel hostname (campus/corporate DNS often fails on
+ * *.trycloudflare.com wildcard subdomains). Only the hostname is sent,
+ * never the URL path, so the route token is not exposed. */
+const PUBLIC_HEALTH_DOH_ENDPOINTS = [
+  "https://dns.alidns.com/resolve",
+  "https://doh.pub/dns-query",
+] as const;
+const PUBLIC_HEALTH_DOH_CACHE_TTL_MS = 60_000;
 const TUNNEL_RESTART_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
 const CLOUDFLARED_WINGET_PACKAGE = "Cloudflare.cloudflared";
 const DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT = 48271;
@@ -1465,15 +1474,112 @@ export class BridgeManager implements vscode.Disposable {
         headers: this.tunnelProvider === "ngrok" ? { "ngrok-skip-browser-warning": "true" } : undefined,
         signal: controller.signal,
       });
-      if (!response.ok) return false;
+      if (!response.ok) {
+        this.output.appendLine(`[bridge] health check system-DNS failed: HTTP ${response.status}`);
+        return false;
+      }
       const payload = await response.json().catch(() => undefined) as { ok?: unknown } | undefined;
+      if (payload?.ok !== true) {
+        this.output.appendLine(`[bridge] health check system-DNS failed: payload.ok !== true (${JSON.stringify(payload)})`);
+      }
       return payload?.ok === true;
-    } catch {
-      return false;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`[bridge] health check system-DNS error: ${reason}; trying DoH fallback...`);
+      const ok = await this.requestPublicHealthViaDoh();
+      this.output.appendLine(`[bridge] health check DoH fallback result: ${ok}`);
+      return ok;
     } finally {
       clearTimeout(timer);
     }
   }
+
+  /** Resolve the tunnel hostname through DoH and retry the health request
+   * against the resolved IP. Fallback for networks whose DNS cannot resolve
+   * *.trycloudflare.com wildcard subdomains (e.g. campus/corporate DNS).
+   * Uses node:https directly with SNI + Host headers so TLS verification
+   * still runs against the real hostname. */
+  private async requestPublicHealthViaDoh(): Promise<boolean> {
+    const hostname = this.domain;
+    if (!hostname) return false;
+    const ip = await this.resolveHostViaDoh(hostname);
+    if (!ip) {
+      this.output.appendLine(`[bridge] DoH fallback: could not resolve ${hostname} via any DoH endpoint`);
+      return false;
+    }
+    this.output.appendLine(`[bridge] DoH fallback: ${hostname} -> ${ip}, sending direct health request...`);
+    const { request } = await import("node:https");
+    return await new Promise<boolean>((resolve) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), PUBLIC_HEALTH_REQUEST_TIMEOUT_MS);
+      const req = request(
+        {
+          hostname: ip,
+          port: 443,
+          servername: hostname,
+          path: `/healthz/${this.routeToken}`,
+          method: "GET",
+          headers: {
+            Host: hostname,
+            ...(this.tunnelProvider === "ngrok" ? { "ngrok-skip-browser-warning": "true" } : {}),
+          },
+          signal: controller.signal,
+        },
+        (response) => {
+          if (!response.statusCode || response.statusCode >= 400) {
+            this.output.appendLine(`[bridge] DoH fallback: direct request got HTTP ${response.statusCode ?? "none"}`);
+            resolve(false);
+            return;
+          }
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => (body += chunk));
+          response.on("end", () => {
+            try {
+              const payload = JSON.parse(body) as { ok?: unknown } | undefined;
+              resolve(payload?.ok === true);
+            } catch {
+              resolve(false);
+            }
+          });
+        },
+      );
+      req.on("error", (error) => {
+        this.output.appendLine(`[bridge] DoH fallback: direct request error: ${error instanceof Error ? error.message : String(error)}`);
+        resolve(false);
+      });
+      req.on("close", () => clearTimeout(timer));
+      req.end();
+    });
+  }
+
+  /** Ask a DoH endpoint for an A record of the given hostname. Caches the
+   * result briefly to avoid hammering the DoH server during startup retries. */
+  private async resolveHostViaDoh(hostname: string): Promise<string | null> {
+    if (this.dohCache.hostname === hostname && Date.now() - this.dohCache.at < PUBLIC_HEALTH_DOH_CACHE_TTL_MS) {
+      return this.dohCache.ip;
+    }
+    for (const endpoint of PUBLIC_HEALTH_DOH_ENDPOINTS) {
+      try {
+        const url = `${endpoint}?name=${encodeURIComponent(hostname)}&type=A`;
+        const response = await fetch(url, {
+          headers: endpoint.includes("dns-query") ? { accept: "application/dns-json" } : undefined,
+        });
+        if (!response.ok) continue;
+        const payload = await response.json() as { Answer?: Array<{ type: number; data: string }> };
+        const record = payload.Answer?.find((answer) => answer.type === 1);
+        if (record?.data) {
+          this.dohCache = { hostname, ip: record.data, at: Date.now() };
+          return record.data;
+        }
+      } catch {
+        // try the next DoH endpoint
+      }
+    }
+    return null;
+  }
+
+  private dohCache: { hostname: string; ip: string; at: number } = { hostname: "", ip: "", at: 0 };
 
   private async waitForPublicHealth(child: ChildProcessWithoutNullStreams): Promise<void> {
     const deadline = Date.now() + PUBLIC_HEALTH_STARTUP_TIMEOUT_MS;
