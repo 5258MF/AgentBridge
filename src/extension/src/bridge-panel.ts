@@ -136,7 +136,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         const url = message.url;
         if (typeof url === "string" && url) {
           const mode = vscode.workspace.getConfiguration("agentbridge.bridge").get<"auto" | "all" | "external">("openInternalBrowser", "auto");
-          const isEmbeddedHost = /^https?:\/\/(?:www\.)?(?:chatgpt\.com|arena\.ai)\b/i.test(url);
+          const isEmbeddedHost = /^https?:\/\/(?:www\.)?(?:chatgpt\.com|arena\.ai|workbuddy\.cn|trae\.cn|qwenwork\.cn)\b/i.test(url);
           const useSimpleBrowser = mode === "all" || (mode === "auto" && isEmbeddedHost);
           if (useSimpleBrowser) {
             try {
@@ -265,6 +265,9 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   .agentbridge-card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .agentbridge-hero-actions { margin-top: 14px; }
   .agentbridge-hero-actions > button { width: auto; min-width: 150px; }
+  .agentbridge-more-sites { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .agentbridge-more-sites[hidden] { display: none; }
+  .agentbridge-more-sites > button { width: auto; min-width: 140px; }
   .agentbridge-connection-card, .agentbridge-advanced-card { padding: 0; }
   .agentbridge-connection-card > summary, .agentbridge-advanced-card > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; cursor: pointer; list-style-position: inside; }
   .agentbridge-connection-card > summary::marker, .agentbridge-advanced-card > summary::marker { color: var(--vscode-descriptionForeground); }
@@ -524,8 +527,14 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     <div class="agentbridge-controls agentbridge-hero-actions">
       <button class="primary" id="startStopButton">启动 Bridge</button>
       <button class="secondary" id="openChatGptButton">打开 ChatGPT</button>
-      <button class="secondary" id="openArenaButton">打开 Arena</button>
       <button class="secondary" id="copyPromptButton">复制连接提示</button>
+      <button class="secondary agentbridge-more-sites-toggle" id="moreSitesButton" type="button" aria-expanded="false">更多站点 ▾</button>
+    </div>
+    <div class="agentbridge-more-sites" id="moreSitesGroup" hidden>
+      <button class="secondary" id="openArenaButton">打开 Arena</button>
+      <button class="secondary" id="openWorkBuddyButton">打开 WorkBuddy</button>
+      <button class="secondary" id="openTraeButton">打开 Trae</button>
+      <button class="secondary" id="openQwenButton">打开 Qwen</button>
     </div>
     <div class="agentbridge-security-note">
       <span>⚠</span><span>Bridge 可以编辑文件并执行终端命令。请勿泄露 MCP 地址。</span>
@@ -1439,6 +1448,16 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   $('copyOriginButton').addEventListener('click', () => vscode.postMessage({ type: 'copy', text: $('namedOriginValue').value }));
   $('openChatGptButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://chatgpt.com/' }));
   $('openArenaButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://arena.ai/agent' }));
+  $('openWorkBuddyButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://www.workbuddy.cn/app' }));
+  $('openTraeButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://work.trae.cn' }));
+  $('openQwenButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://qwenwork.cn/app/chat' }));
+  $('moreSitesButton').addEventListener('click', () => {
+    const group = $('moreSitesGroup');
+    const expanded = group.hasAttribute('hidden');
+    group.toggleAttribute('hidden', !expanded);
+    $('moreSitesButton').setAttribute('aria-expanded', String(expanded));
+    $('moreSitesButton').textContent = expanded ? '更多站点 ▴' : '更多站点 ▾';
+  });
   $('copyPromptButton').addEventListener('click', () => vscode.postMessage({ type: 'copyPrompt' }));
   $('checkButton').addEventListener('click', () => {
     busy = true;
