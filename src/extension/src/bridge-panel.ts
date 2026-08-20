@@ -1,17 +1,21 @@
 import * as vscode from "vscode";
 import { describeManagedShell, invalidateManagedShellCache, sanityCheckManagedShellPath } from "./ide-tool-broker.js";
 import type { BridgeManager, BridgeStatus } from "./bridge-server.js";
+import { createTranslator, detectLang, zhMessages, enMessages } from "./i18n.js";
 
 const POLL_INTERVAL_MS = 1500;
 
-function buildArenaPrompt(shellPromptZH: string): string {
+const LANG = detectLang();
+const t = createTranslator(LANG);
+
+function buildArenaPrompt(shellPrompt: string): string {
   return [
-    "连接这个 MCP（URL），明确使用规则，熟悉可用工具，做好处理接下来一系列工作的准备。",
-    shellPromptZH,
+    t("promptConnect"),
+    shellPrompt,
     "",
-    "行动准则：专注当前任务，以完成功能为最高优先。只读取、修改直接相关的文件，采用最小必要改动，不主动审计、重构或优化整个项目。",
-    "可并行的读写操作应并行执行，提高效率。协作方式：你来做，我来验收；未经我明确允许，不执行全量测试、构建、部署或自动验收。",
-    "发现旁支问题，除非直接阻塞当前任务，否则不处理。沟通简短，快速交付。",
+    t("promptFocus"),
+    t("promptParallel"),
+    t("promptSide"),
   ].join("\n");
 }
 
@@ -155,7 +159,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
           canSelectFiles: false,
           canSelectFolders: true,
           canSelectMany: false,
-          openLabel: "选作工作区文件夹",
+          openLabel: t("openFolderLabel"),
         });
         if (picked && picked[0]) {
           vscode.workspace.updateWorkspaceFolders(0, 0, { uri: picked[0] });
@@ -183,16 +187,16 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         const text = message.text;
         if (typeof text === "string" && text) {
           await vscode.env.clipboard.writeText(text);
-          void vscode.window.showInformationMessage("已复制到剪贴板。");
+          void vscode.window.showInformationMessage(t("copiedToClipboard"));
         }
         return;
       }
       case "copyPrompt": {
         const status = this.bridge.getStatus();
-        if (!status.publicUrl) throw new Error("请先启动 Bridge 获取 MCP 地址。");
+        if (!status.publicUrl) throw new Error(t("needStartBridgeFirst"));
         const { chatPromptZH } = describeManagedShell();
         await vscode.env.clipboard.writeText(`${status.publicUrl}\n\n${buildArenaPrompt(chatPromptZH)}`);
-        void vscode.window.showInformationMessage("MCP 地址与连接提示已复制到剪贴板。");
+        void vscode.window.showInformationMessage(t("promptCopied"));
         return;
       }
       case "disconnectSession": {
@@ -214,7 +218,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
           const ok = await sanityCheckManagedShellPath(candidatePath);
           if (!ok) {
             void vscode.window.showErrorMessage(
-              `AgentBridge 无法以该路径启动 shell：${candidatePath}\n请检查完整可执行路径（如 C:\\Program Files\\PowerShell\\7\\pwsh.exe）。配置未保存。`
+              t("shellPathError", candidatePath)
             );
             return;
           }
@@ -226,8 +230,8 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         invalidateManagedShellCache();
         void vscode.window.showInformationMessage(
           candidatePath === ""
-            ? "Management Shell 自定义路径已清空。新 MCP 会话与新建终端将回退到默认 shell；如需所有会话立即套用，请 Stop + Start Bridge。"
-            : `Management Shell 已更新为 ${candidatePath}。新 MCP 会话与新建终端将使用它；如需所有会话立即套用，请 Stop + Start Bridge。`
+            ? t("managedShellCleared")
+            : t("managedShellUpdated", candidatePath)
         );
         return;
       }
@@ -237,7 +241,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
           key, undefined, vscode.ConfigurationTarget.Global
         );
         invalidateManagedShellCache();
-        void vscode.window.showInformationMessage("Management Shell 已重置为默认。");
+        void vscode.window.showInformationMessage(t("managedShellReset"));
         return;
       }
       default:
@@ -245,13 +249,17 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private renderHtml(): string {
+private renderHtml(): string {
+    const dict = LANG === "zh" ? zhMessages : enMessages;
     return /* html */ `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this.view?.webview.cspSource ?? ""} 'unsafe-inline'; script-src 'unsafe-inline';">
-<style>
+ <html lang="${LANG === "zh" ? "zh-CN" : "en"}">
+ <head>
+ <meta charset="UTF-8">
+ <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this.view?.webview.cspSource ?? ""} 'unsafe-inline'; script-src 'unsafe-inline';">
+ <script>
+   window.__AB_I18N__ = ${JSON.stringify(dict).replace(/</g, "\\u003c")};
+ </script>
+ <style>
   html { height: 100%; margin: 0; padding: 0; }
   body { box-sizing: border-box; width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: none; padding: 0 0 24px; display: flex; flex-direction: column; overflow: hidden; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
   .agentbridge-card h2, .agentbridge-card h3, .agentbridge-advanced-section h4, .agentbridge-setup-step h4 { margin: 0; font-weight: 600; }
@@ -501,8 +509,8 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="agentbridge-tabs" id="agentbridgeTabs" role="tablist">
-    <button class="agentbridge-tab active" id="tabConfig" role="tab" aria-selected="true" tabindex="0" type="button">配置</button>
-    <button class="agentbridge-tab" id="tabSession" role="tab" aria-selected="false" tabindex="-1" type="button">会话</button>
+    <button class="agentbridge-tab active" id="tabConfig" role="tab" aria-selected="true" tabindex="0" type="button">${t("tabConfig")}</button>
+    <button class="agentbridge-tab" id="tabSession" role="tab" aria-selected="false" tabindex="-1" type="button">${t("tabSession")}</button>
   </div>
   <div id="configSection">
   <div class="agentbridge-card agentbridge-hero">
@@ -510,195 +518,195 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       <h2>AgentBridge</h2>
       <span class="agentbridge-state state-stopped" id="stateBadge">…</span>
     </div>
-    <p class="agentbridge-hero-description">把当前工作区的工具开放为远程 Streamable HTTP MCP 端点，供 ChatGPT 等远程 MCP 客户端连接。</p>
-    <div class="agentbridge-status-details" id="stateDetails">正在检查 Bridge 状态…</div>
+    <p class="agentbridge-hero-description">${t("heroDescription")}</p>
+    <div class="agentbridge-status-details" id="stateDetails">${t("checkingBridgeStatus")}</div>
     <div class="agentbridge-open-folder-group" id="openFolderGroup" style="display:none">
-      <p class="agentbridge-open-folder-hint">Bridge 需要一个工作区文件夹作为外部工具的根目录。</p>
-      <button class="secondary" id="openFolderButton" type="button">选择文件夹…</button>
+      <p class="agentbridge-open-folder-hint">${t("openFolderHint")}</p>
+      <button class="secondary" id="openFolderButton" type="button">${t("openFolderButton")}</button>
     </div>
     <div class="agentbridge-url-section" id="publicUrlSection" style="display:none">
-      <div class="agentbridge-url-label">MCP 地址</div>
+      <div class="agentbridge-url-label">${t("mcpAddressLabel")}</div>
       <div class="agentbridge-url-row">
         <input class="agentbridge-url-value" id="publicUrlValue" type="text" readonly spellcheck="false">
-        <button class="agentbridge-copy-url" id="copyUrlButton" title="复制 MCP 地址">复制</button>
+        <button class="agentbridge-copy-url" id="copyUrlButton" title="${t("copyTitle")}">${t("copy")}</button>
       </div>
     </div>
     <div class="agentbridge-address-notice" id="addressNotice" style="display:none"></div>
     <div class="agentbridge-controls agentbridge-hero-actions">
-      <button class="primary" id="startStopButton">启动 Bridge</button>
-      <button class="secondary" id="openChatGptButton">打开 ChatGPT</button>
-      <button class="secondary" id="copyPromptButton">复制连接提示</button>
-      <button class="secondary agentbridge-more-sites-toggle" id="moreSitesButton" type="button" aria-expanded="false">更多站点 ▾</button>
+      <button class="primary" id="startStopButton">${t("startBridge")}</button>
+      <button class="secondary" id="openChatGptButton">${t("openChatGpt")}</button>
+      <button class="secondary" id="copyPromptButton">${t("copyPrompt")}</button>
+      <button class="secondary agentbridge-more-sites-toggle" id="moreSitesButton" type="button" aria-expanded="false">${t("moreSites")}</button>
     </div>
     <div class="agentbridge-more-sites" id="moreSitesGroup" hidden>
-      <button class="secondary" id="openArenaButton">打开 Arena</button>
-      <button class="secondary" id="openWorkBuddyButton">打开 WorkBuddy</button>
-      <button class="secondary" id="openTraeButton">打开 Trae</button>
-      <button class="secondary" id="openQwenButton">打开 Qwen</button>
+      <button class="secondary" id="openArenaButton">${t("openArena")}</button>
+      <button class="secondary" id="openWorkBuddyButton">${t("openWorkBuddy")}</button>
+      <button class="secondary" id="openTraeButton">${t("openTrae")}</button>
+      <button class="secondary" id="openQwenButton">${t("openQwen")}</button>
     </div>
     <div class="agentbridge-security-note">
-      <span>⚠</span><span>Bridge 可以编辑文件并执行终端命令。请勿泄露 MCP 地址。</span>
+      <span>⚠</span><span>${t("securityNote")}</span>
     </div>
   </div>
 
   <details class="agentbridge-card agentbridge-connection-card" id="connectionCard">
     <summary>
       <div class="agentbridge-connection-summary-main">
-        <h3>连接设置</h3>
-        <div class="agentbridge-connection-details" id="connectionDetails">正在检查隧道设置…</div>
+        <h3>${t("connectionSettings")}</h3>
+        <div class="agentbridge-connection-details" id="connectionDetails">${t("checkingTunnelSettings")}</div>
       </div>
-      <span class="agentbridge-state state-stopped" id="connectionBadge">检查中</span>
+      <span class="agentbridge-state state-stopped" id="connectionBadge">${t("checking")}</span>
     </summary>
     <div class="agentbridge-connection-body">
       <div class="agentbridge-field">
-        <label class="agentbridge-label">隧道模式</label>
+        <label class="agentbridge-label">${t("tunnelMode")}</label>
         <div class="agentbridge-provider-choices" role="radiogroup">
           <button class="agentbridge-provider-choice" data-provider="cloudflare" role="radio" id="quickProvider" type="button">
             <div class="agentbridge-provider-header">
-              <span class="agentbridge-provider-title">Cloudflare Quick Tunnel（免账号免域名）</span>
-              <span class="agentbridge-provider-badge">默认 · 零配置</span>
+              <span class="agentbridge-provider-title">${t("quickTitle")}</span>
+              <span class="agentbridge-provider-badge">${t("defaultZeroConfig")}</span>
             </div>
-            <div class="agentbridge-provider-summary">每次启动 Bridge 都会生成新的临时地址。适合优先简单、不要求固定地址的场景。</div>
+            <div class="agentbridge-provider-summary">${t("quickSummary")}</div>
             <ul class="agentbridge-provider-facts">
-              <li>地址：临时；重启后变化</li>
-              <li>限制：无月度请求配额上限；200 并发请求；无 SLA</li>
-              <li>配置：只需安装 cloudflared；无需账号或域名</li>
+              <li>${t("quickFactAddr")}</li>
+              <li>${t("quickFactLimit")}</li>
+              <li>${t("quickFactConfig")}</li>
             </ul>
           </button>
           <button class="agentbridge-provider-choice" data-provider="cloudflare-named" role="radio" id="namedProvider" type="button">
             <div class="agentbridge-provider-header">
-              <span class="agentbridge-provider-title">Cloudflare Named Tunnel（固定地址）</span>
-              <span class="agentbridge-provider-badge">固定地址</span>
+              <span class="agentbridge-provider-title">${t("namedTitle")}</span>
+              <span class="agentbridge-provider-badge">${t("fixedAddress")}</span>
             </div>
-            <div class="agentbridge-provider-summary">使用 Cloudflare 托管的固定域名，重启后保持不变。</div>
+            <div class="agentbridge-provider-summary">${t("namedSummary")}</div>
             <ul class="agentbridge-provider-facts">
-              <li>地址：Cloudflare 托管域名上的固定主机名</li>
-              <li>限制：无 ngrok 式每月 2 万请求配额</li>
-              <li>配置：Cloudflare 账号、域名、Tunnel Token 与已发布的应用路由</li>
+              <li>${t("namedFactAddr")}</li>
+              <li>${t("namedFactLimit")}</li>
+              <li>${t("namedFactConfig")}</li>
             </ul>
           </button>
           <button class="agentbridge-provider-choice" data-provider="ngrok" role="radio" id="ngrokProvider" type="button">
             <div class="agentbridge-provider-header">
-              <span class="agentbridge-provider-title">ngrok 开发域名（固定地址）</span>
-              <span class="agentbridge-provider-badge">固定地址</span>
+              <span class="agentbridge-provider-title">${t("ngrokTitle")}</span>
+              <span class="agentbridge-provider-badge">${t("fixedAddress")}</span>
             </div>
-            <div class="agentbridge-provider-summary">使用账号分配的保留域名，重启后可以复用，MCP 地址通常保持不变。</div>
+            <div class="agentbridge-provider-summary">${t("ngrokSummary")}</div>
             <ul class="agentbridge-provider-facts">
-              <li>地址：固定；重启后可复用</li>
-              <li>限制：免费版每月 2 万 HTTP/S 请求、1 GB 出站流量</li>
-              <li>配置：ngrok 账号、Authtoken 与分配的开发域名</li>
+              <li>${t("ngrokFactAddr")}</li>
+              <li>${t("ngrokFactLimit")}</li>
+              <li>${t("ngrokFactConfig")}</li>
             </ul>
           </button>
         </div>
-        <div class="agentbridge-help">切换隧道模式前请先停止 Bridge。</div>
+        <div class="agentbridge-help">${t("stopBeforeSwitch")}</div>
       </div>
 
       <div class="agentbridge-field" id="domainField">
-        <label class="agentbridge-label">ngrok 域名</label>
-        <input class="agentbridge-input" id="domainInput" type="text" placeholder="your-name.ngrok-free.dev" spellcheck="false">
-        <div class="agentbridge-help">填写 ngrok 控制台分配的保留域名。</div>
+        <label class="agentbridge-label">${t("ngrokDomainLabel")}</label>
+        <input class="agentbridge-input" id="domainInput" type="text" placeholder="${t("ngrokDomainPlaceholder")}" spellcheck="false">
+        <div class="agentbridge-help">${t("ngrokDomainHelp")}</div>
       </div>
 
       <div class="agentbridge-named-configuration" id="namedConfiguration" style="display:none">
-        <h4>Cloudflare Named Tunnel 配置</h4>
+        <h4>${t("namedConfigTitle")}</h4>
         <div class="agentbridge-named-grid">
           <div class="agentbridge-field">
-            <label class="agentbridge-label">公网主机名</label>
-            <input class="agentbridge-input" id="namedDomainInput" type="text" placeholder="mcp.example.com" spellcheck="false">
+            <label class="agentbridge-label">${t("publicHostname")}</label>
+            <input class="agentbridge-input" id="namedDomainInput" type="text" placeholder="${t("namedDomainPlaceholder")}" spellcheck="false">
           </div>
           <div class="agentbridge-field">
-            <label class="agentbridge-label">Tunnel Token</label>
-            <input class="agentbridge-input" id="namedTokenInput" type="password" placeholder="粘贴 Token 以设置或替换" spellcheck="false" autocomplete="off">
+            <label class="agentbridge-label">${t("tunnelToken")}</label>
+            <input class="agentbridge-input" id="namedTokenInput" type="password" placeholder="${t("pasteTokenPlaceholder")}" spellcheck="false" autocomplete="off">
             <div class="agentbridge-help" id="namedTokenStatus"></div>
           </div>
           <div class="agentbridge-field">
-            <label class="agentbridge-label">固定本地端口</label>
+            <label class="agentbridge-label">${t("fixedLocalPort")}</label>
             <input class="agentbridge-input" id="namedPortInput" type="number" min="1024" max="65535" step="1">
           </div>
           <div class="agentbridge-field">
-            <label class="agentbridge-label">Cloudflare Service URL</label>
+            <label class="agentbridge-label">${t("serviceUrlLabel")}</label>
             <div class="agentbridge-named-origin-row">
               <input class="agentbridge-input" id="namedOriginValue" type="text" readonly>
-              <button class="agentbridge-copy-url" id="copyOriginButton">复制</button>
+              <button class="agentbridge-copy-url" id="copyOriginButton">${t("copy")}</button>
             </div>
           </div>
         </div>
-        <div class="agentbridge-help">在 Cloudflare Tunnels 中，发布的应用主机名必须与上面的公网主机名一致，Service URL 必须与此本地地址完全一致。</div>
+        <div class="agentbridge-help">${t("namedHelp")}</div>
         <div class="agentbridge-controls">
-          <button class="primary" id="saveNamedTunnelButton">保存 Named Tunnel</button>
-          <button class="secondary" id="clearNamedTunnelTokenButton">清除 Token</button>
+          <button class="primary" id="saveNamedTunnelButton">${t("saveNamedTunnel")}</button>
+          <button class="secondary" id="clearNamedTunnelTokenButton">${t("clearToken")}</button>
         </div>
       </div>
 
       <div class="agentbridge-tunnel-panel" id="tunnelSetupPanel">
         <div class="agentbridge-tunnel-status-row">
           <div class="agentbridge-tunnel-status-text">
-            <div class="agentbridge-label">隧道状态</div>
-            <div class="agentbridge-tunnel-state" id="tunnelState">尚未检查隧道客户端。</div>
+            <div class="agentbridge-label">${t("tunnelStatusLabel")}</div>
+            <div class="agentbridge-tunnel-state" id="tunnelState">${t("notCheckedTunnel")}</div>
           </div>
           <div class="agentbridge-controls agentbridge-tunnel-actions">
-            <button class="secondary" id="checkButton">检查隧道</button>
-            <button class="primary" id="installCloudflaredButton" style="display:none">安装 cloudflared</button>
+            <button class="secondary" id="checkButton">${t("checkTunnel")}</button>
+            <button class="primary" id="installCloudflaredButton" style="display:none">${t("installCloudflared")}</button>
           </div>
         </div>
         <details class="agentbridge-setup" id="cloudflareSetup">
-          <summary>安装 cloudflared</summary>
+          <summary>${t("setupCloudflaredSummary")}</summary>
           <div class="agentbridge-setup-body">
-            <p>一次性安装 cloudflared。Quick Tunnel 不需要 Cloudflare 账号、Token 或域名。</p>
+            <p>${t("installCloudflaredIntro")}</p>
             <div class="agentbridge-setup-step">
-              <h4>1. 安装或更新 cloudflared</h4>
-              <div class="agentbridge-command-row"><code>winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements">复制</button></div>
-              <div class="agentbridge-command-row"><code>winget upgrade --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget upgrade --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements">复制</button></div>
+              <h4>${t("installOrUpdateCloudflared")}</h4>
+              <div class="agentbridge-command-row"><code>winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements">${t("copy")}</button></div>
+              <div class="agentbridge-command-row"><code>winget upgrade --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget upgrade --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements">${t("copy")}</button></div>
             </div>
             <div class="agentbridge-setup-step">
-              <h4>2. 验证 cloudflared</h4>
-              <div class="agentbridge-command-row"><code>cloudflared --version</code><button class="secondary" data-copy="cloudflared --version">复制</button></div>
+              <h4>${t("verifyCloudflared")}</h4>
+              <div class="agentbridge-command-row"><code>cloudflared --version</code><button class="secondary" data-copy="cloudflared --version">${t("copy")}</button></div>
             </div>
-            <p class="agentbridge-help">每次启动都会生成新的临时 MCP 地址，请在 ChatGPT 中更新地址。</p>
+            <p class="agentbridge-help">${t("tempAddressHelp")}</p>
           </div>
         </details>
         <details class="agentbridge-setup" id="cloudflareNamedSetup" style="display:none">
-          <summary>配置 Cloudflare Named Tunnel</summary>
+          <summary>${t("setupNamedSummary")}</summary>
           <div class="agentbridge-setup-body">
-            <p>创建远程托管的 Cloudflare Tunnel，复制其 Token，并将主机名发布到上面显示的固定 Service URL。</p>
+            <p>${t("setupNamedIntro")}</p>
             <div class="agentbridge-setup-step">
-              <h4>1. 安装或更新 cloudflared</h4>
-              <div class="agentbridge-command-row"><code>winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements">复制</button></div>
+              <h4>${t("installOrUpdateCloudflared")}</h4>
+              <div class="agentbridge-command-row"><code>winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements">${t("copy")}</button></div>
             </div>
             <div class="agentbridge-setup-step">
-              <h4>2. 创建或打开 Cloudflare Tunnel 并复制 Token</h4>
-              <button class="secondary" data-open="https://dash.cloudflare.com/?to=%2F%3Aaccount%2Ftunnels">打开 Cloudflare Tunnels</button>
+              <h4>${t("createOrOpenTunnel")}</h4>
+              <button class="secondary" data-open="https://dash.cloudflare.com/?to=%2F%3Aaccount%2Ftunnels">${t("openCloudflareTunnels")}</button>
             </div>
             <div class="agentbridge-setup-step">
-              <h4>3. 添加发布的应用路由</h4>
-              <p class="agentbridge-help">将公网主机名设为上面保存的值，Service URL 设为 ShunCode 显示的 http://127.0.0.1:&lt;port&gt;。</p>
+              <h4>${t("addPublishedRoute")}</h4>
+              <p class="agentbridge-help">${t("publishedRouteHelp")}</p>
             </div>
             <div class="agentbridge-setup-step">
-              <h4>4. 检查主机名 DNS 记录</h4>
-              <button class="secondary" data-open="https://dash.cloudflare.com/?to=%2F%3Aaccount%2F%3Azone%2Fdns%2Frecords">打开 Cloudflare DNS</button>
+              <h4>${t("checkDnsRecords")}</h4>
+              <button class="secondary" data-open="https://dash.cloudflare.com/?to=%2F%3Aaccount%2F%3Azone%2Fdns%2Frecords">${t("openCloudflareDns")}</button>
             </div>
           </div>
         </details>
         <details class="agentbridge-setup" id="ngrokSetup" style="display:none">
-          <summary>配置 ngrok</summary>
+          <summary>${t("setupNgrokSummary")}</summary>
           <div class="agentbridge-setup-body">
-            <p>在 Windows PowerShell 中一次性执行以下步骤。安装完成后重启 VS Code，使 ngrok 对扩展主机可用。</p>
+            <p>${t("setupNgrokIntro")}</p>
             <div class="agentbridge-setup-step">
-              <h4>1. 安装或更新 ngrok</h4>
-              <div class="agentbridge-command-row"><code>winget install --id 9MVS1J51GMK6 --source msstore --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget install --id 9MVS1J51GMK6 --source msstore --accept-package-agreements --accept-source-agreements">复制</button></div>
-              <div class="agentbridge-command-row"><code>winget upgrade --id 9MVS1J51GMK6 --source msstore --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget upgrade --id 9MVS1J51GMK6 --source msstore --accept-package-agreements --accept-source-agreements">复制</button></div>
+              <h4>${t("installOrUpdateNgrok")}</h4>
+              <div class="agentbridge-command-row"><code>winget install --id 9MVS1J51GMK6 --source msstore --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget install --id 9MVS1J51GMK6 --source msstore --accept-package-agreements --accept-source-agreements">${t("copy")}</button></div>
+              <div class="agentbridge-command-row"><code>winget upgrade --id 9MVS1J51GMK6 --source msstore --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget upgrade --id 9MVS1J51GMK6 --source msstore --accept-package-agreements --accept-source-agreements">${t("copy")}</button></div>
             </div>
             <div class="agentbridge-setup-step">
-              <h4>2. 添加 ngrok Authtoken</h4>
-              <div class="agentbridge-command-row"><code>ngrok config add-authtoken &lt;YOUR_AUTHTOKEN&gt;</code><button class="secondary" data-copy="ngrok config add-authtoken <YOUR_AUTHTOKEN>">复制</button></div>
+              <h4>${t("addAuthtoken")}</h4>
+              <div class="agentbridge-command-row"><code>ngrok config add-authtoken &lt;YOUR_AUTHTOKEN&gt;</code><button class="secondary" data-copy="ngrok config add-authtoken <YOUR_AUTHTOKEN>">${t("copy")}</button></div>
             </div>
             <div class="agentbridge-setup-step">
-              <h4>3. 验证安装与配置</h4>
-              <div class="agentbridge-command-row"><code>ngrok version; ngrok config check</code><button class="secondary" data-copy="ngrok version; ngrok config check">复制</button></div>
+              <h4>${t("verifyNgrok")}</h4>
+              <div class="agentbridge-command-row"><code>ngrok version; ngrok config check</code><button class="secondary" data-copy="ngrok version; ngrok config check">${t("copy")}</button></div>
             </div>
             <div class="agentbridge-setup-step">
-              <h4>4. 选择免费保留域名</h4>
-              <button class="secondary" data-open="https://dashboard.ngrok.com/domains">打开 Domains 页面</button>
+              <h4>${t("chooseFreeDomain")}</h4>
+              <button class="secondary" data-open="https://dashboard.ngrok.com/domains">${t("openDomainsPage")}</button>
             </div>
           </div>
         </details>
@@ -706,8 +714,8 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 
       <div class="agentbridge-persistent-row">
         <div class="agentbridge-persistent-text">
-          <label class="agentbridge-label">随 VS Code 启动 Bridge</label>
-          <div class="agentbridge-help">应用就绪后自动打开并启动 Bridge。</div>
+          <label class="agentbridge-label">${t("persistentLabel")}</label>
+          <div class="agentbridge-help">${t("persistentHelp")}</div>
         </div>
         <button class="agentbridge-switch" id="persistentModeToggle" role="switch" type="button">
           <span class="agentbridge-switch-track"></span>
@@ -717,46 +725,46 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   </details>
 
   <details class="agentbridge-card agentbridge-advanced-card" id="advancedCard">
-    <summary><h3>高级设置</h3></summary>
+    <summary><h3>${t("advancedSettings")}</h3></summary>
     <div class="agentbridge-advanced-body">
       <div class="agentbridge-static-row">
-        <div class="agentbridge-label">传输协议</div>
+        <div class="agentbridge-label">${t("transportProtocol")}</div>
         <div class="agentbridge-static-value">Streamable HTTP</div>
       </div>
       <div class="agentbridge-advanced-section">
-        <h4>安全与访问</h4>
-        <p class="agentbridge-help">若 MCP 地址泄露，可重置密钥路径。所有使用旧地址的客户端将立即失效。</p>
+        <h4>${t("securityAccess")}</h4>
+        <p class="agentbridge-help">${t("securityHelp")}</p>
         <div class="agentbridge-controls">
-          <button class="secondary" id="rotateButton">重置 MCP 地址</button>
+          <button class="secondary" id="rotateButton">${t("rotateEndpoint")}</button>
         </div>
       </div>
       <div class="agentbridge-advanced-section">
-        <h4>已开放的工具</h4>
+        <h4>${t("exposedTools")}</h4>
         <div class="agentbridge-tools" id="toolsContainer"></div>
       </div>
       <div class="agentbridge-advanced-section">
-        <h4>管理 Shell</h4>
-        <p class="agentbridge-help">AgentBridge 会以该 shell 启动每个 PTY 槽位。留空则使用默认（Windows PowerShell 5.1 / /bin/bash）。改后仅新 MCP 会话与新建终端生效；如需立即套用到所有会话，请 Stop + Start Bridge。</p>
+        <h4>${t("managedShell")}</h4>
+        <p class="agentbridge-help">${t("managedShellHelp")}</p>
         <div class="agentbridge-static-row">
-          <div class="agentbridge-label">当前</div>
-          <div class="agentbridge-static-value" id="managedShellCurrentLabel">（读取中…）</div>
+          <div class="agentbridge-label">${t("current")}</div>
+          <div class="agentbridge-static-value" id="managedShellCurrentLabel">${t("reading")}</div>
         </div>
         <div class="agentbridge-controls" style="display:flex; flex-direction:column; gap:8px; margin-top:8px;">
-          <input id="managedShellInput" type="text" placeholder="留空 = 默认 · 或输入绝对路径 (如 C:\\Program Files\\PowerShell\\7\\pwsh.exe)" style="width:100%; box-sizing:border-box; padding:6px 8px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent)); border-radius:2px;" />
+          <input id="managedShellInput" type="text" placeholder="${t("managedShellPlaceholder")}" style="width:100%; box-sizing:border-box; padding:6px 8px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent)); border-radius:2px;" />
           <div style="display:flex; gap:8px;">
-            <button class="secondary" id="managedShellSaveButton">保存</button>
-            <button class="secondary" id="managedShellResetButton">重置为默认</button>
+            <button class="secondary" id="managedShellSaveButton">${t("save")}</button>
+            <button class="secondary" id="managedShellResetButton">${t("resetToDefault")}</button>
           </div>
           <div id="managedShellWarning" style="color:var(--vscode-errorForeground); display:none; font-size:11px; line-height:1.4;"></div>
         </div>
       </div>
       <div class="agentbridge-advanced-section">
-        <h4>打开方式</h4>
-        <p class="agentbridge-help">默认「智能」:ChatGPT / Arena 在 VS Code 内置 Simple Browser 中打开，其他外链仍跳 OS 默认浏览器（与原 ShunCode 行为一致）。「全部内嵌」连 Cloudflare / ngrok 等第三方 OAuth dashboard 也强制嵌 Simple Browser，但 iframe X-Frame-Options 限制可能导致登录卡住。「全部外跳」恢复当前 agentbridge 早期所有链接走 OS 浏览器的行为。</p>
+        <h4>${t("openMode")}</h4>
+        <p class="agentbridge-help">${t("openModeHelp")}</p>
         <div class="agentbridge-controls" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">
-          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserAuto" role="radio" aria-checked="true">智能</button>
-          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserAll" role="radio" aria-checked="false">全部内嵌</button>
-          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserExternal" role="radio" aria-checked="false">全部外跳</button>
+          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserAuto" role="radio" aria-checked="true">${t("smart")}</button>
+          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserAll" role="radio" aria-checked="false">${t("embedAll")}</button>
+          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserExternal" role="radio" aria-checked="false">${t("externalAll")}</button>
         </div>
       </div>
     </div>
@@ -775,11 +783,11 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
             <span class="agentbridge-session-dot" id="connectionDot"></span>
             <strong id="connectionTitle">AgentBridge</strong>
           </div>
-          <span class="agentbridge-session-connection-description" id="connectionDescription">启动 Bridge 以监控远程活动。</span>
+          <span class="agentbridge-session-connection-description" id="connectionDescription">${t("startToMonitor")}</span>
         </div>
         <div class="agentbridge-session-connection-actions">
-          <button class="primary" id="sessionStartStopButton">连接</button>
-          <button class="secondary" id="sessionCollapseButton" title="折叠">▾</button>
+          <button class="primary" id="sessionStartStopButton">${t("connect")}</button>
+          <button class="secondary" id="sessionCollapseButton" title="${t("collapseTitle")}">▾</button>
         </div>
       </div>
       <div class="agentbridge-session-footer-details" id="footerDetails">
@@ -795,6 +803,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 (function () {
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
+  const t = (key) => (window.__AB_I18N__ && window.__AB_I18N__[key]) || key;
   let lastStatus = null;
   let busy = false;
   let installingCloudflared = false;
@@ -861,7 +870,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     details.open = todoExpanded;
     const summary = el('summary', 'agentbridge-todos-summary');
     summary.appendChild(el('span', 'agentbridge-todo-icon', '☑'));
-    summary.appendChild(el('strong', null, '任务'));
+    summary.appendChild(el('strong', null, t('todosTitle')));
     const count = todos.filter((t) => t.status === 'completed').length;
     summary.appendChild(el('span', 'agentbridge-todos-count', count + ' / ' + todos.length));
     details.appendChild(summary);
@@ -944,7 +953,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       fileButton.addEventListener('click', () => openResource({ path: file.path, line: 1 }));
       header.appendChild(fileButton);
       const openButton = el('button', 'agentbridge-mini-diff-open', '⇄');
-      openButton.title = '打开完整 diff';
+      openButton.title = t('openFullDiff');
       openButton.addEventListener('click', () => vscode.postMessage({ type: 'openDiff', value: { diff: file.diff, path: file.path } }));
       header.appendChild(openButton);
       fileCard.appendChild(header);
@@ -1019,15 +1028,15 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       return;
     }
     list.style.display = '';
-    list.appendChild(el('div', 'agentbridge-session-list-header', '活跃 MCP 会话 · ' + sessions.length));
+    list.appendChild(el('div', 'agentbridge-session-list-header', t('activeSessions', sessions.length)));
     for (const session of sessions) {
       const row = el('div', 'agentbridge-session-list-row');
       const badge = sessionBadge(session.sessionId);
       if (badge) row.appendChild(badge);
       const info = el('span', 'agentbridge-session-list-info');
-      info.textContent = session.activeRequests + ' 个活动请求 · ' + formatTime(session.lastActivity);
+      info.textContent = t('activeRequestsOf', session.activeRequests) + ' · ' + formatTime(session.lastActivity);
       row.appendChild(info);
-      const btn = el('button', 'secondary agentbridge-session-list-disconnect', '断开');
+      const btn = el('button', 'secondary agentbridge-session-list-disconnect', t('disconnect'));
       btn.addEventListener('click', () => vscode.postMessage({ type: 'disconnectSession', sessionId: session.sessionId }));
       row.appendChild(btn);
       list.appendChild(row);
@@ -1050,7 +1059,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       labels.appendChild(el('span', 'agentbridge-tool-subtitle', activity.presentation.subtitle));
     }
     summary.appendChild(labels);
-    const meta = activity.status === 'running' ? '运行中' : activity.status === 'error' ? '失败' : formatDuration(activity.durationMs);
+    const meta = activity.status === 'running' ? t('running') : activity.status === 'error' ? t('failed') : formatDuration(activity.durationMs);
     const metaEl = el('span', 'agentbridge-tool-meta', meta);
     if (activity.status === 'running' && activity.at) {
       metaEl.dataset.liveId = String(activity.id);
@@ -1067,14 +1076,14 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     if (pres.kind === 'edit' && pres.diffPreview) renderMiniDiff(pres.diffPreview, body);
     if (activity.terminalId) {
       const actions = el('div', 'agentbridge-tool-actions');
-      const button = el('button', 'agentbridge-tool-action', '打开终端');
+      const button = el('button', 'agentbridge-tool-action', t('openTerminal'));
       button.addEventListener('click', () => vscode.postMessage({ type: 'openTerminal', terminalId: activity.terminalId }));
       actions.appendChild(button);
       body.appendChild(actions);
     }
     const showRawInput = pres.kind === 'generic' || activity.tool === 'send_command_input';
-    if (showRawInput && pres.input != null) body.appendChild(renderCodeSection('输入', pres.input));
-    if (pres.output != null) body.appendChild(renderCodeSection('输出', pres.output));
+    if (showRawInput && pres.input != null) body.appendChild(renderCodeSection(t('inputLabel'), pres.input));
+    if (pres.output != null) body.appendChild(renderCodeSection(t('outputLabel'), pres.output));
     if (activity.status === 'error' && activity.message && activity.message !== pres.output) {
       body.appendChild(el('div', 'agentbridge-tool-error', activity.message));
     }
@@ -1091,8 +1100,8 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     if (!activities || activities.length === 0) {
       const empty = el('div', 'agentbridge-session-empty');
       empty.appendChild(el('div', 'agentbridge-session-empty-icon', '◌'));
-      empty.appendChild(el('strong', null, '暂无远程活动'));
-      empty.appendChild(el('span', null, '启动 Bridge 后，远程 AI 的每一次操作都会显示在这里。'));
+      empty.appendChild(el('strong', null, t('noRemoteActivity')));
+      empty.appendChild(el('span', null, t('noRemoteActivityHint')));
       timelineEl.appendChild(empty);
       return;
     }
@@ -1107,30 +1116,30 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     const state = status.state;
     const dot = $('connectionDot');
     dot.className = 'agentbridge-session-dot state-' + (connected ? 'connected' : state);
-    $('connectionTitle').textContent = 'AgentBridge' + (connected ? ' · 已连接' : '');
+    $('connectionTitle').textContent = 'AgentBridge' + (connected ? ' · ' + t('connected') : '');
     const desc = $('connectionDescription');
     if (footerCollapsed) {
       const parts = [];
-      parts.push(connected ? '已连接' : state === 'running' ? '等待连接' : state);
-      if (status.stats && status.stats.toolCalls != null) parts.push(status.stats.toolCalls + ' 次调用');
-      if (status.stats && status.stats.averageDurationMs != null) parts.push(formatDuration(status.stats.averageDurationMs) + ' 均值');
-      if (status.stats && status.stats.successRate != null) parts.push(Math.round(status.stats.successRate) + '% 成功');
+      parts.push(connected ? t('connected') : state === 'running' ? t('waitingForConnection') : state);
+      if (status.stats && status.stats.toolCalls != null) parts.push(t('calls', status.stats.toolCalls));
+      if (status.stats && status.stats.averageDurationMs != null) parts.push(t('average', formatDuration(status.stats.averageDurationMs)));
+      if (status.stats && status.stats.successRate != null) parts.push(t('success', Math.round(status.stats.successRate)));
       desc.textContent = parts.join(' · ');
       $('footerDetails').style.display = 'none';
     } else {
-      desc.textContent = connected ? '远程客户端已连接，正在监控活动…'
-        : state === 'running' ? '等待远程客户端连接。'
-        : state === 'error' ? (status.lastError || 'Bridge 无法启动。')
-        : '启动 Bridge 以监控远程活动。';
+      desc.textContent = connected ? t('clientConnected')
+        : state === 'running' ? t('waitingClient')
+        : state === 'error' ? (status.lastError || t('bridgeFailed'))
+        : t('startToMonitor');
       $('footerDetails').style.display = '';
       renderSessionList(status.sessions || []);
       const stats = $('sessionStats');
       stats.textContent = '';
       const statDefs = [
-        ['工具调用', status.stats ? status.stats.toolCalls : null, ''],
-        ['平均时长', status.stats ? status.stats.averageDurationMs : null, formatDuration],
-        ['失败', status.stats ? status.stats.failedToolCalls : null, ''],
-        ['成功率', status.stats ? status.stats.successRate : null, (v) => v == null ? '' : Math.round(v) + '%'],
+        [t('statToolCalls'), status.stats ? status.stats.toolCalls : null, ''],
+        [t('statAverage'), status.stats ? status.stats.averageDurationMs : null, formatDuration],
+        [t('statFailed'), status.stats ? status.stats.failedToolCalls : null, ''],
+        [t('statSuccess'), status.stats ? status.stats.successRate : null, (v) => v == null ? '' : Math.round(v) + '%'],
       ];
       for (const [label, value, fmt] of statDefs) {
         const stat = el('div', 'agentbridge-session-stat');
@@ -1139,15 +1148,15 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         stats.appendChild(stat);
       }
       const meta = [];
-      if (status.activeRequests) meta.push(status.activeRequests + ' 个活动请求');
-      if (status.stats && status.stats.lastTool) meta.push('最近: ' + status.stats.lastTool);
+      if (status.activeRequests) meta.push(t('activeRequests', status.activeRequests));
+      if (status.stats && status.stats.lastTool) meta.push(t('recent') + status.stats.lastTool);
       if (status.stats && status.stats.lastToolAt) meta.push(formatTime(status.stats.lastToolAt));
-      $('footerMeta').textContent = meta.length ? '最近活动：' + meta.join(' · ') : '';
-      $('footerHint').textContent = connected ? '正在监控远程活动…' : state === 'running' ? '启动会话后此处将实时更新。' : '启动 Bridge 以监控远程活动。';
+      $('footerMeta').textContent = meta.length ? t('recentActivity') + meta.join(' · ') : '';
+      $('footerHint').textContent = connected ? t('monitoring') : state === 'running' ? t('sessionWillUpdate') : t('startToMonitor');
     }
     const startStop = $('sessionStartStopButton');
     startStop.disabled = busy || state === 'starting';
-    startStop.textContent = state === 'running' ? '停止' : state === 'starting' ? '启动中…' : '连接';
+    startStop.textContent = state === 'running' ? t('stop') : state === 'starting' ? t('starting') : t('connect');
   }
 
   function renderSession(status) {
@@ -1167,7 +1176,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 
   function renderStateBadge(badge, state) {
     badge.className = 'agentbridge-state state-' + state;
-    badge.textContent = state === 'running' ? '运行中' : state === 'starting' ? '启动中…' : state === 'error' ? '错误' : '已停止';
+    badge.textContent = state === 'running' ? t('running') : state === 'starting' ? t('starting') : state === 'error' ? t('error') : t('stopped');
   }
 
   function refreshStatus(status, persistentMode) {
@@ -1180,18 +1189,18 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     renderStateBadge($('stateBadge'), status.state);
     $('openFolderGroup').style.display = 'none';
     if (status.state === 'running') {
-      $('stateDetails').textContent = '远程端点已就绪 · ' + status.activeRequests + ' 个进行中的请求';
+      $('stateDetails').textContent = t('remoteEndpointReady', status.activeRequests);
     } else if (status.state === 'starting') {
-      $('stateDetails').textContent = isQuick ? '正在生成新的临时 Cloudflare MCP 地址…' : isNamed ? '正在连接固定 Cloudflare 主机名…' : '正在打开安全的 MCP 端点…';
+      $('stateDetails').textContent = isQuick ? t('generatingQuickUrl') : isNamed ? t('connectingNamedHost') : t('openingSecureEndpoint');
     } else if (status.state === 'error') {
-      $('stateDetails').textContent = status.lastError || 'Bridge 无法启动。';
+      $('stateDetails').textContent = status.lastError || t('bridgeFailed');
       if (typeof status.lastError === 'string' && status.lastError.includes('workspace folder')) {
         $('openFolderGroup').style.display = '';
       }
     } else {
-      $('stateDetails').textContent = isQuick ? '启动 Bridge 以生成临时 Cloudflare MCP 地址。'
-        : isNamed ? (status.configuredNamedDomain ? 'Bridge 已停止。固定 Cloudflare 主机名未连接。' : '先配置 Cloudflare 主机名与 Tunnel Token 再启动。')
-        : status.configuredDomain ? 'Bridge 已停止。没有开放的公共端点。' : '在连接设置中填写 ngrok 域名后再启动。';
+      $('stateDetails').textContent = isQuick ? t('startForQuickUrl')
+        : isNamed ? (status.configuredNamedDomain ? t('namedStoppedNotConnected') : t('configureNamedFirst'))
+        : status.configuredDomain ? t('ngrokStoppedNoEndpoint') : t('configureNgrokDomainFirst');
     }
 
     const providerDomainMissing = isNgrok ? !status.configuredDomain : isNamed ? !status.configuredNamedDomain : false;
@@ -1200,37 +1209,37 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     const connectionState = status.state === 'error' ? 'error' : connectionNeedsAttention ? 'stopped' : 'running';
     renderStateBadge($('connectionBadge'), connectionState);
     if (status.state === 'error') {
-      $('connectionBadge').textContent = '需要处理';
-      $('connectionDetails').textContent = 'Bridge 连接需要处理';
+      $('connectionBadge').textContent = t('needsAttention');
+      $('connectionDetails').textContent = t('bridgeConnectionNeedsAttention');
     } else if (status.tunnelInstalled === undefined) {
-      $('connectionBadge').textContent = '检查中';
-      $('connectionDetails').textContent = '正在检查隧道设置…';
+      $('connectionBadge').textContent = t('checking');
+      $('connectionDetails').textContent = t('checkingTunnel');
     } else if (!status.tunnelInstalled) {
-      $('connectionBadge').textContent = '需要配置';
-      $('connectionDetails').textContent = isQuick || isNamed ? 'cloudflared 未安装' : 'ngrok 未安装';
+      $('connectionBadge').textContent = t('needsConfig');
+      $('connectionDetails').textContent = isQuick || isNamed ? t('cloudflaredNotInstalled') : t('ngrokNotInstalled');
     } else if (!status.tunnelConfigValid) {
-      $('connectionBadge').textContent = '需要处理';
-      $('connectionDetails').textContent = isNamed ? 'Cloudflare Named Tunnel 配置需要处理' : 'ngrok 配置需要处理';
+      $('connectionBadge').textContent = t('needsAttention');
+      $('connectionDetails').textContent = isNamed ? t('namedConfigNeedsAttention') : t('ngrokConfigNeedsAttention');
     } else if (providerDomainMissing) {
-      $('connectionBadge').textContent = '需要配置';
-      $('connectionDetails').textContent = isNamed ? 'Cloudflare 主机名未设置' : '保留域名未设置';
+      $('connectionBadge').textContent = t('needsConfig');
+      $('connectionDetails').textContent = isNamed ? t('hostnameNotSet') : t('reservedDomainNotSet');
     } else {
-      $('connectionBadge').textContent = '已就绪';
-      $('connectionDetails').textContent = isQuick ? 'Cloudflare Quick Tunnel 已就绪 · 临时地址重启后变化'
-        : isNamed ? 'Cloudflare Named Tunnel 已就绪 · ' + status.configuredNamedDomain
-        : 'ngrok 已就绪 · ' + status.configuredDomain;
+      $('connectionBadge').textContent = t('ready');
+      $('connectionDetails').textContent = isQuick ? t('quickReady')
+        : isNamed ? t('namedReady', status.configuredNamedDomain)
+        : t('ngrokReady', status.configuredDomain);
     }
 
     if (status.tunnelInstalled === undefined) {
-      $('tunnelState').textContent = '尚未检查隧道客户端。';
+      $('tunnelState').textContent = t('notCheckedTunnelClient');
     } else if (!status.tunnelInstalled) {
-      $('tunnelState').textContent = isQuick || isNamed ? 'cloudflared 未安装。请完成下方的一次性配置。' : 'ngrok 未安装。请完成下方配置。';
+      $('tunnelState').textContent = isQuick || isNamed ? t('cloudflaredNeedsSetup') : t('ngrokNeedsSetup');
     } else if (!status.tunnelConfigValid) {
-      $('tunnelState').textContent = isNamed ? 'cloudflared 已安装，但主机名、Tunnel Token 或 Service URL 需要处理。' : 'ngrok 已安装，但 Authtoken 或配置需要处理。';
+      $('tunnelState').textContent = isNamed ? t('namedConfigIssues') : t('ngrokConfigIssues');
     } else if (providerDomainMissing) {
-      $('tunnelState').textContent = 'ngrok 已就绪。请填写保留域名。';
+      $('tunnelState').textContent = t('ngrokReadyFillDomain');
     } else {
-      $('tunnelState').textContent = (status.tunnelVersion || (isQuick || isNamed ? 'cloudflared' : 'ngrok')) + ' · 已就绪';
+      $('tunnelState').textContent = t('readySuffix', (status.tunnelVersion || (isQuick || isNamed ? 'cloudflared' : 'ngrok')));
     }
 
     const needsTunnelSetup = status.tunnelInstalled === false || status.tunnelConfigValid === false || providerDomainMissing;
@@ -1239,9 +1248,9 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     $('cloudflareNamedSetup').style.display = isNamed ? '' : 'none';
     $('ngrokSetup').style.display = isNgrok ? '' : 'none';
     $('installCloudflaredButton').style.display = (isQuick || isNamed) && status.tunnelInstalled === false ? '' : 'none';
-    $('cloudflareSetup').querySelector('summary').textContent = needsTunnelSetup ? '安装 cloudflared' : 'cloudflared 配置帮助';
-    $('ngrokSetup').querySelector('summary').textContent = needsTunnelSetup ? '配置 ngrok' : 'ngrok 配置帮助';
-    $('cloudflareNamedSetup').querySelector('summary').textContent = needsTunnelSetup ? '配置 Cloudflare Named Tunnel' : 'Cloudflare Named Tunnel 配置帮助';
+    $('cloudflareSetup').querySelector('summary').textContent = needsTunnelSetup ? t('setupCloudflaredSummary') : t('cloudflaredHelpSummary');
+    $('ngrokSetup').querySelector('summary').textContent = needsTunnelSetup ? t('setupNgrokSummary') : t('ngrokHelpSummary');
+    $('cloudflareNamedSetup').querySelector('summary').textContent = needsTunnelSetup ? t('setupNamedSummary') : t('namedHelpSummary');
 
     const showUrl = status.state === 'running' && status.publicUrl;
     $('publicUrlSection').style.display = showUrl ? '' : 'none';
@@ -1251,7 +1260,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     }
     if (isQuick && status.state === 'running' && status.publicUrl) {
       $('addressNotice').style.display = '';
-      $('addressNotice').textContent = '临时 MCP 地址已复制。每次重启 Bridge 后请在 ChatGPT 中更新地址。';
+      $('addressNotice').textContent = t('quickAddressCopied');
       if (status.publicUrl !== lastCopiedQuickTunnelUrl) {
         lastCopiedQuickTunnelUrl = status.publicUrl;
         vscode.postMessage({ type: 'copy', text: status.publicUrl });
@@ -1265,7 +1274,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       const badge = document.createElement('span');
       badge.className = 'agentbridge-tool' + (tool === 'report_progress' || tool === 'set_todos' ? ' bridge-only' : '');
       badge.textContent = tool;
-      if (tool === 'set_todos' || tool === 'report_progress') badge.title = '仅 Bridge 可用的工具';
+      if (tool === 'set_todos' || tool === 'report_progress') badge.title = t('bridgeOnlyTool');
       $('toolsContainer').appendChild(badge);
     }
 
@@ -1288,17 +1297,17 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         $('namedPortInput').value = String(status.namedTunnelLocalPort || 48271);
       }
     }
-    $('namedTokenStatus').textContent = status.namedTunnelTokenConfigured ? 'Token 已安全保存。留空则保持不变。' : '尚未保存 Token。';
+    $('namedTokenStatus').textContent = status.namedTunnelTokenConfigured ? t('tokenSaved') : t('tokenNotSaved');
     if (typeof persistentMode === 'boolean') {
       $('persistentModeToggle').setAttribute('aria-checked', String(persistentMode));
-      $('persistentModeToggle').title = persistentMode ? '重启后将自动打开并启动 Bridge' : 'Bridge 将仅在手动启动时运行';
+      $('persistentModeToggle').title = persistentMode ? t('persistentOnTitle') : t('persistentOffTitle');
     }
     if (typeof status.openInternalBrowser === 'string' && ['auto','all','external'].includes(status.openInternalBrowser)) {
       $('openInternalBrowserAuto').setAttribute('aria-checked', String(status.openInternalBrowser === 'auto'));
       $('openInternalBrowserAll').setAttribute('aria-checked', String(status.openInternalBrowser === 'all'));
       $('openInternalBrowserExternal').setAttribute('aria-checked', String(status.openInternalBrowser === 'external'));
     }
-    $('managedShellCurrentLabel').textContent = status.managedShellPath || '（未知）';
+    $('managedShellCurrentLabel').textContent = status.managedShellPath || t('unknown');
     const managedShellWarnEl = $('managedShellWarning');
     const managedShellWarn = status.managedShellOverrideWarning;
     if (managedShellWarn && typeof managedShellWarn === 'string' && managedShellWarn) {
@@ -1320,7 +1329,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 
   function renderLocalError(message) {
     $('stateBadge').className = 'agentbridge-state state-error';
-    $('stateBadge').textContent = '错误';
+    $('stateBadge').textContent = t('error');
     $('stateDetails').textContent = message;
   }
 
@@ -1343,10 +1352,10 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     $('clearNamedTunnelTokenButton').disabled = busy || running || starting || !isNamed || lastStatus.namedTunnelTokenConfigured !== true;
     $('checkButton').disabled = busy || starting;
     $('installCloudflaredButton').disabled = busy || running || starting || !(isQuick || isNamed) || lastStatus.tunnelInstalled === true;
-    $('installCloudflaredButton').textContent = installingCloudflared ? '安装中…' : '安装 cloudflared';
+    $('installCloudflaredButton').textContent = installingCloudflared ? t('installing') : t('installCloudflared');
     $('rotateButton').disabled = busy || running || starting;
     $('startStopButton').disabled = busy || starting || (!running && busy);
-    $('startStopButton').textContent = running ? '停止 Bridge' : starting ? '启动中…' : '启动 Bridge';
+    $('startStopButton').textContent = running ? t('stopBridge') : starting ? t('starting') : t('startBridge');
     $('persistentModeToggle').disabled = busy;
   }
 
@@ -1382,17 +1391,17 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     const token = $('namedTokenInput').value.trim();
     const localPort = Number($('namedPortInput').value);
     if (!domain) {
-      renderLocalError('请输入 Cloudflare 公网主机名。');
+      renderLocalError(t('enterHostname'));
       $('namedDomainInput').focus();
       return;
     }
     if (!Number.isInteger(localPort) || localPort < 1024 || localPort > 65535) {
-      renderLocalError('请输入 1024 到 65535 之间的本地端口。');
+      renderLocalError(t('enterPortRange'));
       $('namedPortInput').focus();
       return;
     }
     if (!token && lastStatus.namedTunnelTokenConfigured !== true) {
-      renderLocalError('保存前请粘贴 Cloudflare Tunnel Token。');
+      renderLocalError(t('pasteTokenFirst'));
       $('namedTokenInput').focus();
       return;
     }
@@ -1419,13 +1428,13 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     const domain = $('domainInput').value.trim();
     if (provider === 'ngrok' && !domain) {
       $('connectionCard').open = true;
-      renderLocalError('启动 Bridge 前请先填写 ngrok 保留域名。');
+      renderLocalError(t('enterNgrokDomainFirst'));
       $('domainInput').focus();
       return;
     }
     if (provider === 'cloudflare-named' && (!lastStatus || !lastStatus.configuredNamedDomain || !lastStatus.namedTunnelTokenConfigured)) {
       $('connectionCard').open = true;
-      renderLocalError('启动 Bridge 前请先保存 Cloudflare 主机名与 Tunnel Token。');
+      renderLocalError(t('saveNamedConfigFirst'));
       (lastStatus && lastStatus.configuredNamedDomain ? $('namedTokenInput') : $('namedDomainInput')).focus();
       return;
     }
@@ -1456,7 +1465,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     const expanded = group.hasAttribute('hidden');
     group.toggleAttribute('hidden', !expanded);
     $('moreSitesButton').setAttribute('aria-expanded', String(expanded));
-    $('moreSitesButton').textContent = expanded ? '更多站点 ▴' : '更多站点 ▾';
+    $('moreSitesButton').textContent = expanded ? t('moreSitesOpen') : t('moreSites');
   });
   $('copyPromptButton').addEventListener('click', () => vscode.postMessage({ type: 'copyPrompt' }));
   $('checkButton').addEventListener('click', () => {
@@ -1479,7 +1488,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   $('persistentModeToggle').addEventListener('click', () => {
     const enabled = $('persistentModeToggle').getAttribute('aria-checked') !== 'true';
     $('persistentModeToggle').setAttribute('aria-checked', String(enabled));
-    $('persistentModeToggle').title = enabled ? '重启后将自动打开并启动 Bridge' : 'Bridge 将仅在手动启动时运行';
+    $('persistentModeToggle').title = enabled ? t('persistentOnTitle') : t('persistentOffTitle');
     vscode.postMessage({ type: 'setPersistentMode', enabled });
   });
   $('managedShellSaveButton').addEventListener('click', () => {
@@ -1523,7 +1532,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   $('saveNamedTunnelButton').addEventListener('click', saveNamedTunnel);
   $('clearNamedTunnelTokenButton').addEventListener('click', () => {
     if (busy || !lastStatus || !lastStatus.namedTunnelTokenConfigured) return;
-    if (window.confirm('清除 Cloudflare Tunnel Token？')) {
+    if (window.confirm(t('confirmClearToken'))) {
       busy = true;
       updateControls();
       vscode.postMessage({ type: 'clearNamedTunnelToken' });
