@@ -802,6 +802,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 
   function formatDuration(durationMs) {
     if (durationMs == null) return '';
+    if (durationMs < 1000) return (Math.round(durationMs / 100) / 10) + 's';
     const s = Math.round(durationMs / 1000);
     if (s < 60) return s + 's';
     const m = Math.floor(s / 60);
@@ -1043,7 +1044,12 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     }
     summary.appendChild(labels);
     const meta = activity.status === 'running' ? '运行中' : activity.status === 'error' ? '失败' : formatDuration(activity.durationMs);
-    summary.appendChild(el('span', 'agentbridge-tool-meta', meta));
+    const metaEl = el('span', 'agentbridge-tool-meta', meta);
+    if (activity.status === 'running' && activity.at) {
+      metaEl.dataset.liveId = String(activity.id);
+      metaEl.dataset.startedAt = String(new Date(activity.at).getTime());
+    }
+    summary.appendChild(metaEl);
     if (activity.presentation && activity.presentation.kind === 'edit' && activity.presentation.items && activity.presentation.items.length) {
       renderEditSummaryItems(activity, summary);
     }
@@ -1565,6 +1571,13 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       resetBusy();
     }
   });
+  setInterval(() => {
+    const now = Date.now();
+    document.querySelectorAll('.agentbridge-tool-meta[data-live-id]').forEach((el) => {
+      const started = Number(el.dataset.startedAt);
+      if (Number.isFinite(started)) el.textContent = formatDuration(now - started);
+    });
+  }, 1000);
   vscode.postMessage({ type: 'refresh' });
 })();
 </script>
