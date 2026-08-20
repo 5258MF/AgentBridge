@@ -2,6 +2,8 @@ import * as vscode from "vscode";
 
 export type Lang = "zh" | "en";
 
+// Message catalogs are serialized into the webview with JSON.stringify.
+// Keep every value as a string and use {0}, {1}, ... for runtime arguments.
 export const zhMessages = {
   // buildArenaPrompt
   promptConnect: "连接这个 MCP（URL），明确使用规则，熟悉可用工具，做好处理接下来一系列工作的准备。",
@@ -14,9 +16,9 @@ export const zhMessages = {
   copiedToClipboard: "已复制到剪贴板。",
   needStartBridgeFirst: "请先启动 Bridge 获取 MCP 地址。",
   promptCopied: "MCP 地址与连接提示已复制到剪贴板。",
-  shellPathError: (candidatePath: string) => `AgentBridge 无法以该路径启动 shell：${candidatePath}\n请检查完整可执行路径（如 C:\\Program Files\\PowerShell\\7\\pwsh.exe）。配置未保存。`,
+  shellPathError: "AgentBridge 无法以该路径启动 shell：{0}\n请检查完整可执行路径（如 C:\\Program Files\\PowerShell\\7\\pwsh.exe）。配置未保存。",
   managedShellCleared: "Management Shell 自定义路径已清空。新 MCP 会话与新建终端将回退到默认 shell；如需所有会话立即套用，请 Stop + Start Bridge。",
-  managedShellUpdated: (candidatePath: string) => `Management Shell 已更新为 ${candidatePath}。新 MCP 会话与新建终端将使用它；如需所有会话立即套用，请 Stop + Start Bridge。`,
+  managedShellUpdated: "Management Shell 已更新为 {0}。新 MCP 会话与新建终端将使用它；如需所有会话立即套用，请 Stop + Start Bridge。",
   managedShellReset: "Management Shell 已重置为默认。",
 
   // tabs
@@ -137,8 +139,8 @@ export const zhMessages = {
   collapseTitle: "折叠",
   todosTitle: "任务",
   openFullDiff: "打开完整 diff",
-  activeSessions: (n: number) => `活跃 MCP 会话 · ${n}`,
-  activeRequestsOf: (n: number) => `${n} 个活动请求`,
+  activeSessions: "活跃 MCP 会话 · {0}",
+  activeRequestsOf: "{0} 个活动请求",
   disconnect: "断开",
   running: "运行中",
   failed: "失败",
@@ -149,9 +151,9 @@ export const zhMessages = {
   noRemoteActivityHint: "启动 Bridge 后，远程 AI 的每一次操作都会显示在这里。",
   connected: "已连接",
   waitingForConnection: "等待连接",
-  calls: (n: number) => `${n} 次调用`,
-  average: (d: string) => `${d} 均值`,
-  success: (p: number) => `${p}% 成功`,
+  calls: "{0} 次调用",
+  average: "{0} 均值",
+  success: "{0}% 成功",
   clientConnected: "远程客户端已连接，正在监控活动…",
   waitingClient: "等待远程客户端连接。",
   bridgeFailed: "Bridge 无法启动。",
@@ -159,7 +161,7 @@ export const zhMessages = {
   statAverage: "平均时长",
   statFailed: "失败",
   statSuccess: "成功率",
-  activeRequests: (n: number) => `${n} 个活动请求`,
+  activeRequests: "{0} 个活动请求",
   recent: "最近: ",
   recentActivity: "最近活动：",
   monitoring: "正在监控远程活动…",
@@ -180,9 +182,9 @@ export const zhMessages = {
   hostnameNotSet: "Cloudflare 主机名未设置",
   reservedDomainNotSet: "保留域名未设置",
   quickReady: "Cloudflare Quick Tunnel 已就绪 · 临时地址重启后变化",
-  namedReady: (d: string) => `Cloudflare Named Tunnel 已就绪 · ${d}`,
-  ngrokReady: (d: string) => `ngrok 已就绪 · ${d}`,
-  remoteEndpointReady: (n: number) => `远程端点已就绪 · ${n} 个进行中的请求`,
+  namedReady: "Cloudflare Named Tunnel 已就绪 · {0}",
+  ngrokReady: "ngrok 已就绪 · {0}",
+  remoteEndpointReady: "远程端点已就绪 · {0} 个进行中的请求",
   generatingQuickUrl: "正在生成新的临时 Cloudflare MCP 地址…",
   connectingNamedHost: "正在连接固定 Cloudflare 主机名…",
   openingSecureEndpoint: "正在打开安全的 MCP 端点…",
@@ -197,7 +199,7 @@ export const zhMessages = {
   namedConfigIssues: "cloudflared 已安装，但主机名、Tunnel Token 或 Service URL 需要处理。",
   ngrokConfigIssues: "ngrok 已安装，但 Authtoken 或配置需要处理。",
   ngrokReadyFillDomain: "ngrok 已就绪。请填写保留域名。",
-  readySuffix: (name: string) => `${name} · 已就绪`,
+  readySuffix: "{0} · 已就绪",
   quickAddressCopied: "临时 MCP 地址已复制。每次重启 Bridge 后请在 ChatGPT 中更新地址。",
   tokenSaved: "Token 已安全保存。留空则保持不变。",
   tokenNotSaved: "尚未保存 Token。",
@@ -212,9 +214,11 @@ export const zhMessages = {
   confirmClearToken: "清除 Cloudflare Tunnel Token？",
   workspaceRootHint: "Bridge 需要一个工作区文件夹作为外部工具的根目录。",
   sessionIdRequired: "sessionId must be a string.",
-} as const;
+} as const satisfies Record<string, string>;
 
-export const enMessages: Record<keyof typeof zhMessages, string | ((...args: unknown[]) => string)> = {
+export type MessageKey = keyof typeof zhMessages;
+
+export const enMessages: Record<MessageKey, string> = {
   promptConnect: "Connect to this MCP (URL), understand the usage rules, get familiar with the available tools, and prepare for the upcoming work.",
   promptFocus: "Action guidelines: stay focused on the current task, prioritize completing the feature. Only read and modify directly relevant files, make minimal necessary changes, and do not proactively audit, refactor, or optimize the whole project.",
   promptParallel: "Parallelizable read/write operations should be executed in parallel for efficiency. Collaboration style: you do the work, I review. Without my explicit approval, do not run full test suites, builds, deployments, or automated acceptance.",
@@ -224,9 +228,9 @@ export const enMessages: Record<keyof typeof zhMessages, string | ((...args: unk
   copiedToClipboard: "Copied to clipboard.",
   needStartBridgeFirst: "Please start the Bridge first to get the MCP address.",
   promptCopied: "MCP address and connection prompt copied to clipboard.",
-  shellPathError: (candidatePath: unknown) => `AgentBridge cannot start a shell with that path: ${String(candidatePath)}\nPlease check the full executable path (e.g. C:\\Program Files\\PowerShell\\7\\pwsh.exe). Configuration not saved.`,
+  shellPathError: "AgentBridge cannot start a shell with that path: {0}\nPlease check the full executable path (e.g. C:\\Program Files\\PowerShell\\7\\pwsh.exe). Configuration not saved.",
   managedShellCleared: "Management Shell custom path cleared. New MCP sessions and new terminals will fall back to the default shell; to apply to all sessions immediately, Stop + Start Bridge.",
-  managedShellUpdated: (candidatePath: unknown) => `Management Shell updated to ${String(candidatePath)}. New MCP sessions and new terminals will use it; to apply to all sessions immediately, Stop + Start Bridge.`,
+  managedShellUpdated: "Management Shell updated to {0}. New MCP sessions and new terminals will use it; to apply to all sessions immediately, Stop + Start Bridge.",
   managedShellReset: "Management Shell reset to default.",
 
   tabConfig: "Config",
@@ -342,8 +346,8 @@ export const enMessages: Record<keyof typeof zhMessages, string | ((...args: unk
   collapseTitle: "Collapse",
   todosTitle: "Tasks",
   openFullDiff: "Open full diff",
-  activeSessions: (n: unknown) => `Active MCP sessions · ${String(n)}`,
-  activeRequestsOf: (n: unknown) => `${String(n)} active requests`,
+  activeSessions: "Active MCP sessions · {0}",
+  activeRequestsOf: "{0} active requests",
   disconnect: "Disconnect",
   running: "Running",
   failed: "Failed",
@@ -354,9 +358,9 @@ export const enMessages: Record<keyof typeof zhMessages, string | ((...args: unk
   noRemoteActivityHint: "Every remote AI operation will show up here once the Bridge is running.",
   connected: "Connected",
   waitingForConnection: "Waiting for connection",
-  calls: (n: unknown) => `${String(n)} calls`,
-  average: (d: unknown) => `${String(d)} avg`,
-  success: (p: unknown) => `${String(p)}% success`,
+  calls: "{0} calls",
+  average: "{0} avg",
+  success: "{0}% success",
   clientConnected: "Remote client connected, monitoring activity…",
   waitingClient: "Waiting for a remote client to connect.",
   bridgeFailed: "Bridge failed to start.",
@@ -364,7 +368,7 @@ export const enMessages: Record<keyof typeof zhMessages, string | ((...args: unk
   statAverage: "Avg Duration",
   statFailed: "Failed",
   statSuccess: "Success Rate",
-  activeRequests: (n: unknown) => `${String(n)} active requests`,
+  activeRequests: "{0} active requests",
   recent: "Recent: ",
   recentActivity: "Recent activity: ",
   monitoring: "Monitoring remote activity…",
@@ -385,9 +389,9 @@ export const enMessages: Record<keyof typeof zhMessages, string | ((...args: unk
   hostnameNotSet: "Cloudflare hostname not set",
   reservedDomainNotSet: "Reserved domain not set",
   quickReady: "Cloudflare Quick Tunnel ready · temporary address changes on restart",
-  namedReady: (d: unknown) => `Cloudflare Named Tunnel ready · ${String(d)}`,
-  ngrokReady: (d: unknown) => `ngrok ready · ${String(d)}`,
-  remoteEndpointReady: (n: unknown) => `Remote endpoint ready · ${String(n)} in-flight requests`,
+  namedReady: "Cloudflare Named Tunnel ready · {0}",
+  ngrokReady: "ngrok ready · {0}",
+  remoteEndpointReady: "Remote endpoint ready · {0} in-flight requests",
   generatingQuickUrl: "Generating a new temporary Cloudflare MCP address…",
   connectingNamedHost: "Connecting to the fixed Cloudflare hostname…",
   openingSecureEndpoint: "Opening a secure MCP endpoint…",
@@ -402,7 +406,7 @@ export const enMessages: Record<keyof typeof zhMessages, string | ((...args: unk
   namedConfigIssues: "cloudflared installed, but the hostname, Tunnel Token or Service URL needs attention.",
   ngrokConfigIssues: "ngrok installed, but the Authtoken or config needs attention.",
   ngrokReadyFillDomain: "ngrok ready. Enter your reserved domain.",
-  readySuffix: (name: unknown) => `${String(name)} · ready`,
+  readySuffix: "{0} · ready",
   quickAddressCopied: "Temporary MCP address copied. Update the address in ChatGPT after every Bridge restart.",
   tokenSaved: "Token saved securely. Leave empty to keep unchanged.",
   tokenNotSaved: "No token saved yet.",
@@ -419,14 +423,37 @@ export const enMessages: Record<keyof typeof zhMessages, string | ((...args: unk
   sessionIdRequired: "sessionId must be a string.",
 };
 
+function placeholderSignature(template: string): string {
+  return [...template.matchAll(/[{]([0-9]+)[}]/g)]
+    .map((match) => match[1])
+    .sort((left, right) => Number(left) - Number(right))
+    .join(",");
+}
+
+function validateMessageCatalogs(): void {
+  for (const key of Object.keys(zhMessages) as MessageKey[]) {
+    const zhSignature = placeholderSignature(zhMessages[key]);
+    const enSignature = placeholderSignature(enMessages[key]);
+    if (zhSignature !== enSignature) {
+      throw new Error(`AgentBridge i18n placeholder mismatch for "${key}": zh={${zhSignature}}, en={${enSignature}}`);
+    }
+  }
+}
+
+function formatMessage(template: string, args: readonly unknown[]): string {
+  return template.replace(/[{]([0-9]+)[}]/g, (placeholder, indexText: string) => {
+    const index = Number(indexText);
+    return index < args.length ? String(args[index]) : placeholder;
+  });
+}
+
+validateMessageCatalogs();
+
 export function detectLang(): Lang {
   return vscode.env.language.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
 
 export function createTranslator(lang: Lang) {
   const dict = lang === "zh" ? zhMessages : enMessages;
-  return (key: keyof typeof zhMessages, ...args: unknown[]): string => {
-    const entry = dict[key];
-    return typeof entry === "function" ? entry(...args) : entry;
-  };
+  return (key: MessageKey, ...args: unknown[]): string => formatMessage(dict[key], args);
 }

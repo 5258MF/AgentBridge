@@ -140,7 +140,14 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         const url = message.url;
         if (typeof url === "string" && url) {
           const mode = vscode.workspace.getConfiguration("agentbridge.bridge").get<"auto" | "all" | "external">("openInternalBrowser", "auto");
-          const isEmbeddedHost = /^https?:\/\/(?:www\.)?(?:chatgpt\.com|arena\.ai|workbuddy\.cn|trae\.cn|qwenwork\.cn)\b/i.test(url);
+          let isEmbeddedHost = false;
+          try {
+            const hostname = new URL(url).hostname.toLowerCase();
+            const embeddedDomains = ["chatgpt.com", "arena.ai", "workbuddy.cn", "trae.cn", "qwenwork.cn"];
+            isEmbeddedHost = embeddedDomains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+          } catch {
+            // Malformed or non-HTTP URLs retain the external-browser fallback.
+          }
           const useSimpleBrowser = mode === "all" || (mode === "auto" && isEmbeddedHost);
           if (useSimpleBrowser) {
             try {
@@ -803,7 +810,13 @@ private renderHtml(): string {
 (function () {
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
-  const t = (key) => (window.__AB_I18N__ && window.__AB_I18N__[key]) || key;
+  const t = (key, ...args) => {
+    const template = (window.__AB_I18N__ && window.__AB_I18N__[key]) || key;
+    return String(template).replace(/[{]([0-9]+)[}]/g, (placeholder, indexText) => {
+      const index = Number(indexText);
+      return index < args.length ? String(args[index]) : placeholder;
+    });
+  };
   let lastStatus = null;
   let busy = false;
   let installingCloudflared = false;
