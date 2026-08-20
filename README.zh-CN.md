@@ -106,6 +106,10 @@ Managed Shell 与 打开方式 的运行时切换入口位于 Bridge 面板的 *
 
 逐步指南见 [docs/cloudflare-named-tunnel-setup.md](docs/cloudflare-named-tunnel-setup.md)（安装 cloudflared → 创建隧道 → 复制 Token → 添加路由 → 检查 DNS → 启动并验证）。英文版：[cloudflare-named-tunnel-setup.en.md](docs/cloudflare-named-tunnel-setup.en.md)。
 
+### ngrok 开发域名配置教程
+
+逐步指南见 [docs/ngrok-development-domain.md](docs/ngrok-development-domain.md)（安装 ngrok → 复制固定域名 → 配置 Authtoken → 检查 → 启动并验证）。英文版：[ngrok-development-domain.en.md](docs/ngrok-development-domain.en.md)。
+
 ChatGPT 网页版连接见 [docs/chatgpt-web-connector.md](docs/chatgpt-web-connector.md)（启动 Bridge → 复制 MCP 地址 → 添加 Connector → 授予权限）。英文版：[chatgpt-web-connector.en.md](docs/chatgpt-web-connector.en.md)。
 
 ## 已知限制
