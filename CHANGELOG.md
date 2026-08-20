@@ -1,5 +1,14 @@
 # Change Log
 
+## 0.1.3 (2026-08-20)
+
+Bug-fix release.
+
+- **Session view overflow fix** — the panel body now uses a flex column layout (`display: flex; flex-direction: column; overflow: hidden`) with the session view as a flex item (`flex: 1 1 0`), so the sessions timeline no longer overflows and the footer stays pinned at the viewport bottom without double scrollbars.
+- **Real average tool duration** — `formatDuration` now renders sub-second calls in milliseconds (e.g. `0.9s`); the footer average reflects the true mean instead of rounding every fast call down to `0s`.
+- **Live elapsed time for running tools** — a running tool card now ticks its elapsed time every second (`data-live-id` / `data-started-at` + a 1s `setInterval`), instead of showing a static "running" label until the activity ends.
+- **Open Arena button fix** — the `ARENA_URL` constant lived at module scope in `bridge-panel.ts` but was referenced inside the webview template-string script (a separate sandbox scope); esbuild tree-shook the constant and the button threw a `ReferenceError` at runtime. The URL is now inlined next to the button like the ChatGPT one.
+
 ## 0.1.2 (2026-08-19)
 
 Documentation revision.
