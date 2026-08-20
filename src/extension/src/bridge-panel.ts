@@ -73,6 +73,14 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private pushStatus(): void {
     if (!this.view) return;
     const status = this.bridge.getStatus();
+    if (status.tunnelProvider === "cloudflare" && status.state === "running" && status.publicUrl && status.publicUrl !== this.lastCopiedQuickTunnelUrl) {
+      const url = status.publicUrl;
+      this.lastCopiedQuickTunnelUrl = url;
+      void vscode.env.clipboard.writeText(url).then(undefined, (error) => {
+        if (this.lastCopiedQuickTunnelUrl === url) this.lastCopiedQuickTunnelUrl = "";
+        console.error(`[AgentBridge panel] Failed to copy Quick Tunnel URL: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
     const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
     void this.view.webview.postMessage({ type: "status", status, persistentMode });
   }
@@ -1301,10 +1309,6 @@ private renderHtml(): string {
     if (isQuick && status.state === 'running' && status.publicUrl) {
       $('addressNotice').style.display = '';
       $('addressNotice').textContent = t('quickAddressCopied');
-      if (status.publicUrl !== lastCopiedQuickTunnelUrl) {
-        lastCopiedQuickTunnelUrl = status.publicUrl;
-        vscode.postMessage({ type: 'copy', text: status.publicUrl });
-      }
     } else {
       $('addressNotice').style.display = 'none';
     }

@@ -1,5 +1,15 @@
 # Change Log
 
+## 0.1.4 (2026-08-20)
+
+Feature and reliability release. The MCP tool surface remains unchanged at 13 tools.
+
+- **Bilingual Bridge panel** — the panel now follows the VS Code display language (`zh-*` → Chinese, everything else → English). Dynamic labels use serializable `{0}` templates with catalog key/type/placeholder checks, so session counts, request counts, duration, success rate, and tunnel-ready messages render correctly after crossing the Webview boundary.
+- **More web-assistant shortcuts** — a collapsible `More Sites` group adds Arena, WorkBuddy, Trae, and Qwen alongside ChatGPT. Smart link routing now parses real hostnames and accepts legitimate subdomains such as `work.trae.cn` without matching lookalike domains.
+- **Panel state synchronization hardening** — critical Start/Stop controls update before non-critical timeline rendering; render failures are isolated and reported to Extension Host logs; showing or rebuilding the view restarts polling without an old view disposing the new timer.
+- **Quick Tunnel clipboard reliability** — fixed the Webview-scope `lastCopiedQuickTunnelUrl` `ReferenceError`, and moved once-per-URL copy state into the long-lived Extension Host so switching away from and back to AgentBridge no longer overwrites the clipboard repeatedly.
+- **Bilingual ngrok development-domain guides** — added complete Chinese and English walkthroughs for installation, reserved domain, Authtoken, checks, startup, endpoint verification, troubleshooting, and security, linked from both READMEs.
+
 ## 0.1.3 (2026-08-20)
 
 Bug-fix release.

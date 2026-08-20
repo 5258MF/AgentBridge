@@ -71,8 +71,8 @@ npm run build
 "Code.exe" --extensionDevelopmentPath="$PWD"
 
 # 或本地打包 vsix
-npx @vscode/vsce package --skip-license --allow-missing-repository
-code --install-extension vsc-agentbridge-0.1.0.vsix
+npx @vscode/vsce package --out vsc-agentbridge-latest.vsix --skip-license --allow-missing-repository
+code --install-extension vsc-agentbridge-latest.vsix
 ```
 
 ## 隧道供应商
