@@ -47,7 +47,14 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       });
     });
     this.startPolling();
-    webviewView.onDidDispose(() => this.stopPolling());
+    webviewView.onDidChangeVisibility(() => {
+      if (this.view === webviewView && webviewView.visible) this.startPolling();
+    });
+    webviewView.onDidDispose(() => {
+      if (this.view !== webviewView) return;
+      this.view = undefined;
+      this.stopPolling();
+    });
   }
 
   private startPolling(): void {
@@ -74,6 +81,11 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     switch (message.type) {
       case "refresh":
         return;
+      case "panelRenderError": {
+        const detail = typeof message.detail === "string" ? message.detail : "Unknown webview render error.";
+        console.error(`[AgentBridge panel] ${detail}`);
+        return;
+      }
       case "start": {
         const domain = message.domain;
         if (domain !== undefined && typeof domain !== "string") throw new Error("Bridge ngrok domain must be a string.");
@@ -1194,6 +1206,21 @@ private renderHtml(): string {
 
   function refreshStatus(status, persistentMode) {
     lastStatus = status;
+    // Keep the primary action synchronized before rendering non-critical session/UI details.
+    // If any later renderer fails, the visible label and click action must still agree.
+    updateControls();
+    try {
+      renderStatus(status, persistentMode);
+    } catch (error) {
+      const detail = error instanceof Error ? (error.stack || error.message) : String(error);
+      console.error('[AgentBridge panel] status render failed', error);
+      vscode.postMessage({ type: 'panelRenderError', detail });
+    } finally {
+      updateControls();
+    }
+  }
+
+  function renderStatus(status, persistentMode) {
     renderSession(status);
     const isNgrok = status.tunnelProvider === 'ngrok';
     const isNamed = status.tunnelProvider === 'cloudflare-named';
@@ -1331,7 +1358,6 @@ private renderHtml(): string {
       managedShellWarnEl.textContent = '';
     }
     updateNamedTunnelOriginPreview();
-    updateControls();
   }
 
   function updateNamedTunnelOriginPreview() {
