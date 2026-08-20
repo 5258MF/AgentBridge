@@ -4,8 +4,6 @@ import type { BridgeManager, BridgeStatus } from "./bridge-server.js";
 
 const POLL_INTERVAL_MS = 1500;
 
-const ARENA_URL = "https://arena.ai/agent";
-
 function buildArenaPrompt(shellPromptZH: string): string {
   return [
     "连接这个 MCP（URL），明确使用规则，熟悉可用工具，做好处理接下来一系列工作的准备。",
@@ -1440,7 +1438,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   });
   $('copyOriginButton').addEventListener('click', () => vscode.postMessage({ type: 'copy', text: $('namedOriginValue').value }));
   $('openChatGptButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://chatgpt.com/' }));
-  $('openArenaButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: ARENA_URL }));
+  $('openArenaButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://arena.ai/agent' }));
   $('copyPromptButton').addEventListener('click', () => vscode.postMessage({ type: 'copyPrompt' }));
   $('checkButton').addEventListener('click', () => {
     busy = true;
