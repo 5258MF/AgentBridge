@@ -41,10 +41,20 @@ const PUBLIC_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
  * *.trycloudflare.com wildcard subdomains). Only the hostname is sent,
  * never the URL path, so the route token is not exposed. */
 const PUBLIC_HEALTH_DOH_ENDPOINTS = [
+  // Cloudflare's own resolver first: zero propagation lag for its own
+  // *.trycloudflare.com zone, which third-party recursives may lag on.
+  "https://cloudflare-dns.com/dns-query",
   "https://dns.alidns.com/resolve",
   "https://doh.pub/dns-query",
 ] as const;
 const PUBLIC_HEALTH_DOH_CACHE_TTL_MS = 60_000;
+/** Pinned Cloudflare anycast IPs serving *.trycloudflare.com, used only as a
+ * last resort for Quick Tunnels when every DoH endpoint fails (e.g. the
+ * account-less control plane lagging behind its own DNS record creation).
+ * Cloudflare's edge routes by Host header and TLS stays validated against the
+ * real hostname, so a stale IP fails safe. Two IPs to avoid a single point of
+ * failure; values observed from historical successful resolutions. */
+const PUBLIC_HEALTH_CF_ANYCAST_IPS = ["104.16.230.132", "104.16.231.132"] as const;
 const TUNNEL_RESTART_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
 const CLOUDFLARED_WINGET_PACKAGE = "Cloudflare.cloudflared";
 const DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT = 48271;
@@ -1522,18 +1532,35 @@ export class BridgeManager implements vscode.Disposable {
 
   /** Resolve the tunnel hostname through DoH and retry the health request
    * against the resolved IP. Fallback for networks whose DNS cannot resolve
-   * *.trycloudflare.com wildcard subdomains (e.g. campus/corporate DNS).
-   * Uses node:https directly with SNI + Host headers so TLS verification
-   * still runs against the real hostname. */
+   * *.trycloudflare.com wildcard subdomains (e.g. campus/corporate DNS). If
+   * every DoH endpoint fails on a Quick Tunnel hostname (including the window
+   * where Cloudflare's control plane has not yet published the DNS record),
+   * retries against pinned Cloudflare anycast IPs. Uses node:https directly
+   * with SNI + Host headers so TLS verification still runs against the real
+   * hostname either way. */
   private async requestPublicHealthViaDoh(): Promise<boolean> {
     const hostname = this.domain;
     if (!hostname) return false;
     const ip = await this.resolveHostViaDoh(hostname);
-    if (!ip) {
+    if (ip) {
+      this.output.appendLine(`[bridge] DoH fallback: ${hostname} -> ${ip}, sending direct health request...`);
+      return this.sendPublicHealthRequest(hostname, ip);
+    }
+    if (this.tunnelProvider !== "cloudflare" || !hostname.endsWith(".trycloudflare.com")) {
       this.output.appendLine(`[bridge] DoH fallback: could not resolve ${hostname} via any DoH endpoint`);
       return false;
     }
-    this.output.appendLine(`[bridge] DoH fallback: ${hostname} -> ${ip}, sending direct health request...`);
+    for (const anycastIp of PUBLIC_HEALTH_CF_ANYCAST_IPS) {
+      this.output.appendLine(`[bridge] DoH fallback exhausted, trying pinned Cloudflare anycast for *.trycloudflare.com: ${anycastIp}`);
+      if (await this.sendPublicHealthRequest(hostname, anycastIp)) return true;
+    }
+    this.output.appendLine(`[bridge] DoH fallback: pinned anycast health checks failed for ${hostname}`);
+    return false;
+  }
+
+  /** Send one health request straight to an IP while keeping TLS verification
+   * and routing anchored to the real hostname (SNI servername + Host header). */
+  private async sendPublicHealthRequest(hostname: string, ip: string): Promise<boolean> {
     const { request } = await import("node:https");
     return await new Promise<boolean>((resolve) => {
       const controller = new AbortController();
@@ -1587,8 +1614,9 @@ export class BridgeManager implements vscode.Disposable {
     }
     for (const endpoint of PUBLIC_HEALTH_DOH_ENDPOINTS) {
       try {
-        const url = `${endpoint}?name=${encodeURIComponent(hostname)}&type=A`;
+        const url = `${endpoint}?name=${encodeURIComponent(hostname)}&type=A&rand=${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const response = await fetch(url, {
+          cache: "no-store",
           headers: endpoint.includes("dns-query") ? { accept: "application/dns-json" } : undefined,
         });
         if (!response.ok) continue;
