@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
 import { getIdeToolDefinition } from "./ide-tool-definitions.js";
@@ -17,6 +18,8 @@ const MAX_ECHO_HUNT_BYTES = 1024 * 1024;
 const MANAGED_TERMINAL_NAME = /^AgentBridge · \d+$/;
 const CHAT_CAPTURE_COLUMNS = 1000;
 const CHAT_CAPTURE_INPUT_KEY = "__agentbridgeChatCapture";
+/** Shell kinds with a per-prompt hook that can emit the OSC 633 protocol marker. */
+const RUN_COMMAND_SHELLS: ReadonlySet<ShellChoice["kind"]> = new Set(["ps51", "pwsh", "bash", "zsh"]);
 
 interface TerminalSlot {
   id: string;
@@ -55,6 +58,8 @@ interface ManagedShellSpec {
   env?: Record<string, string>;
   description: string;
   syntaxHint: string;
+  /** Directory created for zsh ZDOTDIR injection; the pseudoterminal removes it on dispose. */
+  tempDir?: string;
 }
 
 /**
@@ -366,36 +371,16 @@ function managedShellSpec(protocolToken: string): ManagedShellSpec {
         syntaxHint: choice.syntaxHint,
       };
     }
-    case "cmd": {
-      // cmd.exe 不能像 PowerShell/bash 那样在每次提示符写 OSC 633 marker（cmd 的 PROMPT 环境变量
-      // 不支持任意表达式），所以 cmd 模式下 prompt-sequence 协议关闭；ManagedCommandPseudoterminal
-      // 会退回到 echo gate + 超时模式。基础命令执行仍然可用，仅序列化完成状态精度有限。
-      return {
-        executable: choice.executable,
-        args: ["/K"],
-        env: { PROMPT: "$P$G" },
-        description: choice.description,
-        syntaxHint: choice.syntaxHint,
-      };
-    }
-    case "bash":
-    case "zsh":
-    case "sh":
-    case "fish": {
+    case "bash": {
       const promptCommand = [
         "__agentbridge_ec=$?",
         "__agentbridge_seq=$((${__agentbridge_seq:-0}+1))",
         "__agentbridge_cwd=$(printf '%s' \"$PWD\" | base64 | tr -d '\\r\\n')",
         `printf '\\033]633;AgentBridge;${protocolToken};%s;%s;%s\\007' \"$__agentbridge_seq\" \"$__agentbridge_ec\" \"$__agentbridge_cwd\"`,
       ].join("; ");
-      const args =
-        choice.kind === "bash" ? ["--noprofile", "--norc", "-i"] :
-        choice.kind === "zsh"  ? ["--no-rcs", "-i"] :
-        choice.kind === "fish" ? ["--no-config", "-i"] :
-                                 ["-i"];
       return {
         executable: choice.executable,
-        args,
+        args: ["--noprofile", "--norc", "-i"],
         env: {
           PROMPT_COMMAND: promptCommand,
           PS1: "$ ",
@@ -404,6 +389,39 @@ function managedShellSpec(protocolToken: string): ManagedShellSpec {
         syntaxHint: choice.syntaxHint,
       };
     }
+    case "zsh": {
+      // zsh has no PROMPT_COMMAND; the per-prompt hook is `precmd`, which must be defined
+      // from a startup file. Point ZDOTDIR at a generated temp dir so zsh sources our
+      // .zshrc (and only ours — user rc files under $ZDOTDIR are isolated automatically).
+      // The marker payload order (seq;ec;cwd) must match handleProtocolMarker's split().
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentbridge-zsh-"));
+      const zshrc = [
+        "PROMPT='$ '",
+        "__agentbridge_seq=0",
+        "precmd() {",
+        "  __agentbridge_ec=$?",
+        "  __agentbridge_seq=$((__agentbridge_seq + 1))",
+        "  __agentbridge_cwd=$(printf '%s' \"$PWD\" | base64 | tr -d '\\r\\n')",
+        `  printf '\\033]633;AgentBridge;${protocolToken};%s;%s;%s\\007' \"$__agentbridge_seq\" \"$__agentbridge_ec\" \"$__agentbridge_cwd\"`,
+        "}",
+        "",
+      ].join("\n");
+      fs.writeFileSync(path.join(tempDir, ".zshrc"), zshrc, "utf8");
+      return {
+        executable: choice.executable,
+        args: ["-i"],
+        env: { ZDOTDIR: tempDir },
+        tempDir,
+        description: choice.description,
+        syntaxHint: choice.syntaxHint,
+      };
+    }
+    default:
+      // Unreachable via run_command: TerminalCommandManager.run() rejects unsupported
+      // shells before any PTY is spawned. Kept as defense in depth for exhaustive match.
+      throw new Error(
+        `Managed shell "${choice.description}" does not support the AgentBridge prompt protocol.`,
+      );
   }
 }
 
@@ -470,6 +488,7 @@ class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disp
   private cols = 80;
   private rows = 24;
   private disposed = false;
+  private tempDir: string | undefined;
 
   constructor(private readonly initialCwd: string) {
     this.currentCwdValue = initialCwd;
@@ -600,6 +619,7 @@ class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disp
     await this.openPromise;
     if (this.disposed) throw new Error("The AgentBridge managed terminal is closed.");
     const shell = managedShellSpec(this.protocolToken);
+    this.tempDir = shell.tempDir;
     const env = { ...managedProcessEnvironment(), ...shell.env };
     const ptyProcess = getNodePty().spawn(shell.executable, shell.args, {
       name: process.platform === "win32" ? "cmd" : "xterm-256color",
@@ -921,6 +941,14 @@ class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disp
     this.disposed = true;
     this.terminateActiveProcess();
     this.activePty = undefined;
+    if (this.tempDir) {
+      try {
+        fs.rmSync(this.tempDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup of the zsh ZDOTDIR scratch dir.
+      }
+      this.tempDir = undefined;
+    }
     if (this.activeCommand?.finishTimer) {
       clearTimeout(this.activeCommand.finishTimer);
       this.activeCommand.finishTimer = undefined;
@@ -1332,6 +1360,14 @@ class TerminalCommandManager implements vscode.Disposable {
   }
 
   async run(input: Record<string, unknown>): Promise<string> {
+    const shellChoice = getManagedShellChoice();
+    if (!RUN_COMMAND_SHELLS.has(shellChoice.kind)) {
+      throw new Error(
+        `Managed shell "${shellChoice.description}" does not support run_command. ` +
+        `Supported: PowerShell (Windows), bash (Linux), zsh (macOS). ` +
+        `Switch via the agentbridge.bridge.managedShell.* settings.`,
+      );
+    }
     const command = asString(input.command).trim();
     if (!command) throw new Error("command must be a non-empty string");
     const background = asBoolean(input.background, false);

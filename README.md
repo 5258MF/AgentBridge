@@ -16,7 +16,7 @@ Published to the [Visual Studio Marketplace](https://marketplace.visualstudio.co
   - **LSP / diagnostics** — `get_diagnostics`, `lsp`
   - **Bridge state** — `set_todos`, `report_progress`
 - **3 tunnel providers** — Cloudflare Quick Tunnel (default, zero-config), Cloudflare Named Tunnel (stable hostname), ngrok (reserved domain).
-- **9 managed shells** — Windows PowerShell 5.1, PowerShell 7+, cmd; POSIX bash, zsh, sh, fish. The description shown to the AI updates automatically when you switch shells.
+- **Managed shell support matrix** — PowerShell 5.1 / PowerShell 7+ (Windows), bash (Linux) and zsh (macOS) fully support `run_command` via per-prompt protocol hooks; cmd, sh and fish are rejected up front with a clear error instead of timing out. The syntax hint shown to the AI updates automatically when you switch shells.
 - **Vision-capable `read_image_file`** — returns MCP `ImageContent` blocks (PNG / JPEG / GIF / WebP / BMP) up to 5 MiB so vision-capable clients see pixels natively. SVG stays text via `read_files`.
 - **External link routing** — `agentbridge.bridge.openInternalBrowser` (`auto` / `all` / `external`) controls whether ChatGPT / Arena open inside VS Code's Simple Browser or in the OS default browser. Default `auto` matches the original in-editor experience.
 - **Bridge panel** — Activity Bar view with tunnel provider radio, status hero, persistent toggle, sessions timeline with mini diffs, and an advanced card covering managed shell, link routing, copy-MCP-prompt, and reset routeToken.

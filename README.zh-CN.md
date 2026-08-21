@@ -16,7 +16,7 @@
   - **LSP / 诊断** — `get_diagnostics`、`lsp`
   - **Bridge 状态** — `set_todos`、`report_progress`
 - **3 种公共隧道供应商** — Cloudflare Quick Tunnel（默认，零配置）、Cloudflare Named Tunnel（固定主机名）、ngrok（保留域名）。
-- **9 种受管 shell** — Windows PowerShell 5.1 / PowerShell 7+ / cmd；POSIX bash / zsh / sh / fish。切换 shell 后 AI 看到的运行时描述自动更新。
+- **托管 shell 支持矩阵** — Windows PowerShell 5.1 / PowerShell 7+（Windows）、bash（Linux）、zsh（macOS）通过每提示符协议钩子完整支持 `run_command`；cmd/sh/fish 会被直接拒绝并返回明确错误，而不是挂到超时。切换 shell 时 AI 看到的运行时语法提示自动更新。
 - **可识别像素的 `read_image_file`** — 返回 MCP `ImageContent` block（PNG / JPEG / GIF / WebP / BMP，上限 5 MiB），让自带 vision 的客户端（ChatGPT、Claude）直接看到图像内容。SVG 仍走 `read_files` 按文本读。
 - **外链打开方式三选一** — `agentbridge.bridge.openInternalBrowser`（`auto` / `all` / `external`）决定 ChatGPT / Arena 等外链在 VS Code 内置 Simple Browser 还是 OS 默认浏览器中打开。默认 `auto` 还原在编辑器内嵌的体验。
 - **Bridge 面板** — 活动栏视图 + 隧道供应商单选卡 + 状态 hero + 自动启动 toggle + 会话时间线（含 mini diff）+ 高级卡（Managed Shell / 打开方式 / 复制 MCP 提示词 / 重置 routeToken）。
