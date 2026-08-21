@@ -149,6 +149,13 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         await vscode.workspace.getConfiguration("agentbridge.bridge").update("persistentMode", enabled, vscode.ConfigurationTarget.Global);
         return;
       }
+      case "setReadOnlyMode": {
+        const enabled = message.enabled;
+        if (typeof enabled !== "boolean") throw new Error("Bridge read-only mode must be a boolean.");
+        await vscode.workspace.getConfiguration("agentbridge.bridge").update("readOnlyMode", enabled, vscode.ConfigurationTarget.Global);
+        this.bridge.setReadOnlyMode(enabled);
+        return;
+      }
       case "openExternal": {
         const url = message.url;
         if (typeof url === "string" && url) {
@@ -535,7 +542,10 @@ private renderHtml(): string {
   <div class="agentbridge-card agentbridge-hero">
     <div class="agentbridge-card-header">
       <h2>AgentBridge</h2>
-      <span class="agentbridge-state state-stopped" id="stateBadge">…</span>
+      <span style="display:flex; gap:6px; align-items:center;">
+        <span class="agentbridge-state state-stopped" id="readOnlyBadge" style="display:none;">${t("readOnlyBadge")}</span>
+        <span class="agentbridge-state state-stopped" id="stateBadge">…</span>
+      </span>
     </div>
     <p class="agentbridge-hero-description">${t("heroDescription")}</p>
     <div class="agentbridge-status-details" id="stateDetails">${t("checkingBridgeStatus")}</div>
@@ -755,6 +765,15 @@ private renderHtml(): string {
         <p class="agentbridge-help">${t("securityHelp")}</p>
         <div class="agentbridge-controls">
           <button class="secondary" id="rotateButton">${t("rotateEndpoint")}</button>
+        </div>
+        <div class="agentbridge-persistent-row" style="margin-top:10px;">
+          <div class="agentbridge-persistent-text">
+            <label class="agentbridge-label">${t("readOnlyLabel")}</label>
+            <div class="agentbridge-help">${t("readOnlyHelp")}</div>
+          </div>
+          <button class="agentbridge-switch" id="readOnlyToggle" role="switch" type="button">
+            <span class="agentbridge-switch-track"></span>
+          </button>
         </div>
       </div>
       <div class="agentbridge-advanced-section">
@@ -1338,6 +1357,10 @@ private renderHtml(): string {
       $('persistentModeToggle').setAttribute('aria-checked', String(persistentMode));
       $('persistentModeToggle').title = persistentMode ? t('persistentOnTitle') : t('persistentOffTitle');
     }
+    const readOnlyActive = status.readOnlyMode === true;
+    $('readOnlyToggle').setAttribute('aria-checked', String(readOnlyActive));
+    $('readOnlyToggle').title = readOnlyActive ? t('readOnlyOnTitle') : t('readOnlyOffTitle');
+    $('readOnlyBadge').style.display = readOnlyActive ? '' : 'none';
     if (typeof status.openInternalBrowser === 'string' && ['auto','all','external'].includes(status.openInternalBrowser)) {
       $('openInternalBrowserAuto').setAttribute('aria-checked', String(status.openInternalBrowser === 'auto'));
       $('openInternalBrowserAll').setAttribute('aria-checked', String(status.openInternalBrowser === 'all'));
@@ -1525,6 +1548,16 @@ private renderHtml(): string {
     $('persistentModeToggle').setAttribute('aria-checked', String(enabled));
     $('persistentModeToggle').title = enabled ? t('persistentOnTitle') : t('persistentOffTitle');
     vscode.postMessage({ type: 'setPersistentMode', enabled });
+  });
+  $('readOnlyToggle').addEventListener('click', () => {
+    const enabled = $('readOnlyToggle').getAttribute('aria-checked') !== 'true';
+    $('readOnlyToggle').setAttribute('aria-checked', String(enabled));
+    $('readOnlyToggle').title = enabled ? t('readOnlyOnTitle') : t('readOnlyOffTitle');
+    $('readOnlyBadge').style.display = enabled ? '' : 'none';
+    const notice = $('addressNotice');
+    notice.textContent = enabled ? t('readOnlyEnabledNotice') : t('readOnlyDisabledNotice');
+    notice.style.display = '';
+    vscode.postMessage({ type: 'setReadOnlyMode', enabled });
   });
   $('managedShellSaveButton').addEventListener('click', () => {
     const raw = $('managedShellInput').value.trim();

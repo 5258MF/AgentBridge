@@ -205,6 +205,12 @@
           "default": false,
           "scope": "application",
           "description": "Automatically start the Bridge after the extension activates."
+        },
+        "agentbridge.bridge.readOnlyMode": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Enable read-only mode. When active, tools that modify the local environment (apply_patch, run_command, send_command_input) are hidden from tools/list and hard-blocked at call time. Takes effect immediately; connected clients see the change after they refresh their tool list."
         }
       }
     }

@@ -142,6 +142,17 @@ export const BRIDGE_TOOL_DEFINITIONS = [
   REPORT_PROGRESS_TOOL,
 ] as const;
 
+/**
+ * Tools that modify or drive the local environment. Hidden from tools/list
+ * and hard-blocked at call time while read-only mode is active.
+ * - apply_patch: writes workspace files.
+ * - run_command: executes arbitrary commands in a managed terminal.
+ * - send_command_input: feeds input into running processes (defense in depth —
+ *   it depends on command ids produced by run_command, but blocking it closes
+ *   the "drive an already-running REPL" bypass completely).
+ */
+const READ_ONLY_BLOCKED_TOOL_NAMES = new Set<string>(["apply_patch", "run_command", "send_command_input"]);
+
 export interface BridgeActivity {
   readonly id: number;
   readonly at: string;
@@ -272,6 +283,13 @@ export interface BridgeStatus {
    * handler at request time — no cache, so changes apply immediately without `onDidChangeConfiguration`.
    */
   readonly openInternalBrowser: "auto" | "all" | "external";
+  /**
+   * When true, tools that modify the local environment (apply_patch,
+   * run_command, send_command_input) are hidden from tools/list and
+   * hard-blocked at call time. Backed by `agentbridge.bridge.readOnlyMode`
+   * (application scope so workspace settings cannot override it).
+   */
+  readonly readOnlyMode: boolean;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -786,6 +804,7 @@ export class BridgeManager implements vscode.Disposable {
   private namedTunnelToken = "";
   private namedTunnelLocalPort = DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT;
   private routeToken = "";
+  private readOnlyMode = false;
   private readonly sessions = new Map<string, McpSession>();
   private httpServer: HttpServer | undefined;
   private tunnelProcess: ChildProcessWithoutNullStreams | undefined;
@@ -827,6 +846,7 @@ export class BridgeManager implements vscode.Disposable {
       await this.context.secrets.store(ROUTE_TOKEN_SECRET, this.routeToken);
     }
     this.tunnelProvider = this.readTunnelProvider();
+    this.readOnlyMode = this.readReadOnlyMode();
     this.namedTunnelToken = await this.context.secrets.get(CLOUDFLARE_NAMED_TOKEN_SECRET) ?? "";
     this.namedTunnelLocalPort = this.readNamedTunnelLocalPort();
     await this.restorePersistedDomain();
@@ -861,7 +881,7 @@ export class BridgeManager implements vscode.Disposable {
       tunnelVersion: this.tunnelVersion,
       tunnelConfigValid: this.tunnelConfigValid,
       lastError: this.lastError,
-      toolNames: BRIDGE_TOOL_DEFINITIONS.map((tool) => tool.name),
+      toolNames: BRIDGE_TOOL_DEFINITIONS.map((tool) => tool.name).filter((name) => !this.readOnlyMode || !READ_ONLY_BLOCKED_TOOL_NAMES.has(name)),
       toolCount: BRIDGE_TOOL_DEFINITIONS.length,
       activeRequests: this.activeRequests,
       connected: this.sessions.size > 0,
@@ -886,6 +906,7 @@ export class BridgeManager implements vscode.Disposable {
       managedShellPath: managedShellExecutable(),
       managedShellOverrideWarning: managedShellOverrideWarning(),
       openInternalBrowser: vscode.workspace.getConfiguration("agentbridge.bridge").get<"auto" | "all" | "external">("openInternalBrowser", "auto"),
+      readOnlyMode: this.readOnlyMode,
     };
   }
 
@@ -913,6 +934,21 @@ export class BridgeManager implements vscode.Disposable {
   private readTunnelProvider(): BridgeTunnelProvider {
     const provider = vscode.workspace.getConfiguration("agentbridge").get<BridgeTunnelProvider>(TUNNEL_PROVIDER_SETTING, "cloudflare");
     return provider === "ngrok" || provider === "cloudflare-named" ? provider : "cloudflare";
+  }
+
+  private readReadOnlyMode(): boolean {
+    return vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("readOnlyMode", false);
+  }
+
+  /**
+   * Hot-apply read-only mode without restarting the Bridge. The tools/list
+   * filter takes effect for the next list request; the hard block in
+   * handleToolCall covers clients that cached the old tool list, so toggling
+   * is safe at any time.
+   */
+  setReadOnlyMode(enabled: boolean): void {
+    this.readOnlyMode = enabled;
+    this.output.appendLine(`[bridge] read-only mode ${enabled ? "enabled" : "disabled"}`);
   }
 
   private readPersistedDomain(): string {
@@ -1796,9 +1832,12 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   private createSession(): { transport: StreamableHTTPServerTransport; server: McpServer } {
+    const instructions = this.readOnlyMode
+      ? `${BRIDGE_SERVER_INSTRUCTIONS}\n\nRead-only mode is ACTIVE: apply_patch, run_command, and send_command_input are disabled. Do not attempt file modifications or command execution; report findings and proposed changes to the user instead.`
+      : BRIDGE_SERVER_INSTRUCTIONS;
     const server = new McpServer(
       { name: "agentbridge", version: "0.1.4" },
-      { capabilities: { tools: {}, logging: {} }, instructions: BRIDGE_SERVER_INSTRUCTIONS },
+      { capabilities: { tools: {}, logging: {} }, instructions },
     );
     let transport!: StreamableHTTPServerTransport;
     transport = new StreamableHTTPServerTransport({
@@ -1826,13 +1865,15 @@ export class BridgeManager implements vscode.Disposable {
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       const shell = getManagedShellChoice();
       return {
-        tools: BRIDGE_TOOL_DEFINITIONS.map((tool) => ({
-          name: tool.name,
-          description: tool.description
-            .replace("${RUNTIME_SHELL_DESCRIPTION}", shell.description)
-            .replace("${RUNTIME_SHELL_SYNTAX_HINT}", shell.syntaxHint),
-          inputSchema: tool.inputSchema,
-        })),
+        tools: BRIDGE_TOOL_DEFINITIONS
+          .filter((tool) => !this.readOnlyMode || !READ_ONLY_BLOCKED_TOOL_NAMES.has(tool.name))
+          .map((tool) => ({
+            name: tool.name,
+            description: tool.description
+              .replace("${RUNTIME_SHELL_DESCRIPTION}", shell.description)
+              .replace("${RUNTIME_SHELL_SYNTAX_HINT}", shell.syntaxHint),
+            inputSchema: tool.inputSchema,
+          })),
       };
     });
 
@@ -1859,6 +1900,20 @@ export class BridgeManager implements vscode.Disposable {
     args: Record<string, unknown>,
     extra: { signal?: AbortSignal; sessionId?: string },
   ): Promise<{ content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean; structuredContent?: Record<string, unknown> }> {
+    if (this.readOnlyMode && READ_ONLY_BLOCKED_TOOL_NAMES.has(toolName)) {
+      const errorMsg = `Tool ${toolName} is disabled in read-only mode. AgentBridge is currently running with modifications and command execution blocked.`;
+      const activityId = this.pushActivity({
+        tool: toolName,
+        status: "running",
+        presentation: bridgePresentation(toolName, args),
+        sessionId: extra.sessionId,
+      });
+      this.finishActivity(activityId, "error", 0, errorMsg, bridgePresentation(toolName, args, errorMsg, undefined, true));
+      return {
+        content: [{ type: "text" as const, text: errorMsg }],
+        isError: true,
+      };
+    }
     if (toolName === SET_TODOS_TOOL.name) {
       return this.handleSetTodos(args);
     }

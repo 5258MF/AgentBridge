@@ -188,6 +188,14 @@ export const zhMessages = {
   persistentOnTitle: "重启后将自动打开并启动 Bridge",
   persistentOffTitle: "Bridge 将仅在手动启动时运行",
 
+  readOnlyLabel: "只读模式",
+  readOnlyHelp: "禁用 apply_patch、run_command 和 send_command_input,远程 AI 只能读取和分析,不能修改文件或执行命令。切换立即生效。",
+  readOnlyOnTitle: "只读模式已启用:修改与执行类工具已被拦截",
+  readOnlyOffTitle: "只读模式未启用:AI 可修改文件并执行命令",
+  readOnlyBadge: "只读模式",
+  readOnlyEnabledNotice: "只读模式已开启并即时生效;已连接的客户端重新拉取工具列表后,被禁工具将不再显示。",
+  readOnlyDisabledNotice: "只读模式已关闭;客户端重新拉取工具列表后恢复全部工具。",
+
   // advanced
   advancedSettings: "高级设置",
   transportProtocol: "传输协议",
@@ -472,6 +480,14 @@ export const enMessages: Record<MessageKey, string> = {
   persistentHelp: "Automatically open and start the Bridge when the app is ready.",
   persistentOnTitle: "Bridge will automatically open and start after restart",
   persistentOffTitle: "Bridge will only run when started manually",
+
+  readOnlyLabel: "Read-only mode",
+  readOnlyHelp: "Disables apply_patch, run_command, and send_command_input. The remote AI can read and analyze but cannot modify files or execute commands. Changes take effect immediately.",
+  readOnlyOnTitle: "Read-only mode is on: modification and execution tools are blocked",
+  readOnlyOffTitle: "Read-only mode is off: the AI can modify files and run commands",
+  readOnlyBadge: "Read-only",
+  readOnlyEnabledNotice: "Read-only mode is on and takes effect immediately; connected clients stop listing the blocked tools after they refresh their tool list.",
+  readOnlyDisabledNotice: "Read-only mode is off; clients list all tools again after they refresh their tool list.",
 
   advancedSettings: "Advanced Settings",
   transportProtocol: "Transport Protocol",

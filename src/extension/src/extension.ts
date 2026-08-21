@@ -83,6 +83,9 @@ export function activate(context: vscode.ExtensionContext): void {
       if (event.affectsConfiguration("agentbridge.bridge.managedShell")) {
         invalidateManagedShellCache();
       }
+      if (event.affectsConfiguration("agentbridge.bridge.readOnlyMode")) {
+        bridge.setReadOnlyMode(vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("readOnlyMode", false));
+      }
     }),
     vscode.window.registerWebviewViewProvider("agentbridge.bridge.panel", bridgePanel),
     statusBarItem,
