@@ -42,8 +42,7 @@ function bridgeDiffSnippet(diff: string, filePath?: string): { before: string; a
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("AgentBridge");
   const ideToolBroker = new IdeToolBroker();
-  const authorizeBridgeStart = async () => {};
-  const bridge = new BridgeManager(context, output, ideToolBroker, authorizeBridgeStart);
+  const bridge = new BridgeManager(context, output, ideToolBroker);
   activeBridge = bridge;
   const bridgeReady = bridge.initialize();
 

@@ -836,7 +836,6 @@ export class BridgeManager implements vscode.Disposable {
     private readonly context: vscode.ExtensionContext,
     private readonly output: vscode.OutputChannel,
     private readonly ideToolBroker: IdeToolBroker,
-    private readonly authorizeStart: () => Promise<void>,
   ) {}
 
   async initialize(): Promise<void> {
@@ -1293,15 +1292,6 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   private async startInternal(domain?: string): Promise<BridgeStatus> {
-    // Final defense-in-depth boundary. Authorization happens before state changes,
-    // local TCP listeners, MCP sessions, or tunnel processes are created.
-    try {
-      await this.authorizeStart();
-    } catch (error) {
-      this.lastError = error instanceof Error ? error.message : String(error);
-      this.state = "error";
-      throw error;
-    }
     this.stoppingResources = false;
     this.state = "starting";
     this.lastError = undefined;
