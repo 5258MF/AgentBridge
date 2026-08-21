@@ -914,9 +914,12 @@ class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disp
   private stripPromptText(text: string): string {
     // Managed shells render a fixed-shape prompt right after the exit marker:
     //   PowerShell: "PS <cwd>> "   bash/sh: "$ "
+    // Anchored to the tail of the chunk so real output lines that merely start with
+    // "PS " or "$ " elsewhere in the stream are preserved. ConPTY chunks typically end
+    // with trailing spaces/CRLF after the prompt, hence the tolerant tail.
     return text
-      .replace(/(^|[\r\n])PS [^\r\n]*?>/g, "$1")
-      .replace(/(^|[\r\n])\$ /g, "$1");
+      .replace(/(^|[\r\n])PS [^\r\n]*?>(?:[ \t]|\r?\n)*$/, "$1")
+      .replace(/(^|[\r\n])\$ (?:[ \t]|\r?\n)*$/, "$1");
   }
 
   terminateActiveProcess(): void {
