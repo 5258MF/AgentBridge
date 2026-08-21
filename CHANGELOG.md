@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.1.5 (2026-08-21)
+
+Feature release.
+
+- **Read-only mode** — a new `agentbridge.bridge.readOnlyMode` setting (application scope, so workspace settings cannot override it) disables every tool that can modify or drive the local environment: `apply_patch`, `run_command`, and `send_command_input`. Defense in depth: blocked tools disappear from `tools/list` (13 → 10), and any client that cached the old list gets an `isError` response ("disabled in read-only mode") plus a "Blocked by Read-Only Mode" entry in the activity timeline if it tries anyway. Toggling takes effect immediately via configuration watching — no Bridge restart needed; connected clients see the change after they refresh their tool list. The panel adds a switch in Advanced Settings → Security & Access (next to Rotate MCP Address), a hero badge while active, and the per-session server instructions tell remote agents up front not to attempt writes.
+- **MCP discovery workflow prompt** — Copy Prompt now emits a modern discovery guide instead of a fixed assistant prompt: probe `server/discover` with `MCP-Protocol-Version: 2026-07-28` headers, handle version negotiation errors (-32022 UnsupportedProtocolVersion, -32020 HeaderMismatch), fall back on JSON-RPC -32601 / HTTP 400·404·405 to the legacy `initialize` flow (protocolVersion 2025-11-25), and never fall back on 401/403/429/5xx. The old Arena-specific prompt builder was removed along with the now-unused `chatPromptZH` field.
+
 ## 0.1.4 (2026-08-20)
 
 Feature and reliability release. The MCP tool surface remains unchanged at 13 tools.
