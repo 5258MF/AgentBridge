@@ -147,11 +147,20 @@ interface StagedWrite {
 
 class Mutex {
   private tail: Promise<void> = Promise.resolve();
+  /** Number of held or queued acquisitions; 0 means the lock can be evicted from fileLocks. */
+  holders = 0;
 
   async acquire(): Promise<() => void> {
+    this.holders++;
+    let released = false;
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
-      release = resolve;
+      release = () => {
+        if (released) return;
+        released = true;
+        this.holders--;
+        resolve();
+      };
     });
     const previous = this.tail;
     this.tail = previous.then(() => current);
@@ -172,13 +181,22 @@ function lockFor(filePath: string): Mutex {
 }
 
 async function withFileLocks<T>(paths: string[], fn: () => Promise<T>): Promise<T> {
-  const releases: Array<() => void> = [];
+  const locks: Array<{ key: string; mutex: Mutex; release: () => void }> = [];
   const keys = [...new Set(paths)].sort((a, b) => a.localeCompare(b));
   try {
-    for (const key of keys) releases.push(await lockFor(key).acquire());
+    for (const key of keys) {
+      const mutex = lockFor(key);
+      locks.push({ key, mutex, release: await mutex.acquire() });
+    }
     return await fn();
   } finally {
-    for (let index = releases.length - 1; index >= 0; index -= 1) releases[index]!();
+    for (let index = locks.length - 1; index >= 0; index -= 1) {
+      const { key, mutex, release } = locks[index]!;
+      release();
+      // Safe to evict at zero: any concurrent acquirer increments holders synchronously
+      // between lockFor() and acquire(), so no pending reference can exist here.
+      if (mutex.holders === 0) fileLocks.delete(key);
+    }
   }
 }
 
