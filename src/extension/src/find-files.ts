@@ -270,7 +270,10 @@ function buildRipgrepArgs(options: NormalizedOptions, config: FindFilesConfig): 
     for (const glob of config.commonExcludes) args.push("--glob", `!${glob}`);
   }
   for (const pattern of options.exclude) args.push("--glob", `!${pattern}`);
-  args.push("--", options.scopeRealPath);
+  // Search root is "." because the child process runs with cwd = scopeRealPath.
+  // ripgrep matches --glob patterns against paths as walked from the given root, so an
+  // absolute root would make relative globs like "src/**/*.ts" and "!dist/**" never match.
+  args.push("--", ".");
   return args;
 }
 
@@ -282,6 +285,7 @@ async function tryFindWithRipgrep(
 ): Promise<CandidateResult | null> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, buildRipgrepArgs(options, config), {
+      cwd: options.scopeRealPath,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       signal,

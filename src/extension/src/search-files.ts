@@ -538,7 +538,10 @@ function buildRipgrepArgs(options: NormalizedOptions, config: SearchFilesConfig)
   }
   for (const glob of options.include) args.push("--glob", glob);
   for (const glob of options.exclude) args.push("--glob", `!${glob}`);
-  args.push("--", options.pattern, options.scopeRealPath);
+  // Search root is "." because the child process runs with cwd = scopeRealPath.
+  // ripgrep matches --glob patterns against paths as walked from the given root, so an
+  // absolute root would make relative globs like "extension/**/*.ts" and "!dist/**" never match.
+  args.push("--", options.pattern, ".");
   return args;
 }
 
@@ -550,7 +553,7 @@ async function trySearchWithRipgrep(
 ): Promise<EngineResult | null> {
   return new Promise((resolve, reject) => {
     const args = buildRipgrepArgs(options, config);
-    const child = spawn(executable, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], signal });
+    const child = spawn(executable, args, { cwd: options.scopeRealPath, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], signal });
     const matches: RawMatch[] = [];
     const perFile = new Map<string, number>();
     const truncationReasons = new Set<SearchTruncationReason>();
