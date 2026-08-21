@@ -54,7 +54,6 @@ interface ManagedShellSpec {
   env?: Record<string, string>;
   description: string;
   syntaxHint: string;
-  chatPromptZH: string;
 }
 
 /**
@@ -69,7 +68,6 @@ export interface ShellChoice {
   readonly executable: string;
   readonly description: string;
   readonly syntaxHint: string;
-  readonly chatPromptZH: string;
 }
 
 let cachedShellChoice: ShellChoice | null = null;
@@ -118,7 +116,6 @@ function describePwshShell(executable: string): ShellChoice {
     executable,
     description: "long-lived PowerShell 7+ (pwsh.exe) with -NoProfile per terminal slot",
     syntaxHint: "Prefer PowerShell 7+ syntax; you may use && and || as pipeline chain operators, ternary conditionals ( cond ? a : b ), null-coalescing assignment ??=, Get-Uptime, Get-Date -AsUTC.",
-    chatPromptZH: "「终端是 PowerShell 7+ (pwsh.exe -NoProfile，长驻会话)，所有命令必须遵循 PowerShell 语法；可使用 7+ 新特性：&& / || 链式、三元、??=、Get-Uptime 等，禁止使用 Bash 专属写法：不要用 export、source、ls -la、rm -rf 等，改用 ; 分隔语句、$env:VAR=\"x\" 设置环境变量、Get-ChildItem/cd 等 PowerShell 写法。」",
   };
 }
 
@@ -128,7 +125,6 @@ function describePs51Shell(executable: string): ShellChoice {
     executable,
     description: "long-lived system Windows PowerShell 5.1 (powershell.exe) with -NoProfile per terminal slot",
     syntaxHint: "Prefer Windows PowerShell 5.1 syntax; avoid PowerShell 7+-only operators (&& and ||, ternary, ??=, Get-Uptime). Use semicolons ; to sequence commands and $LASTEXITCODE for native exit handling.",
-    chatPromptZH: "「终端是 Windows PowerShell 5.1（powershell.exe -NoProfile，长驻会话），所有命令必须遵循 PowerShell 5.1 语法，禁止使用 Bash 专属写法与 PowerShell 7+ 新增操作符：不要用 &&、||、export、source、ls -la、rm -rf 等，改用 ; 分隔语句、$env:VAR=\"x\" 设置环境变量、Get-ChildItem/cd 等 PowerShell 写法，不要使用 ??=、三元等 7+ 新增语法。」",
   };
 }
 
@@ -138,7 +134,6 @@ function describeCmdShell(executable: string): ShellChoice {
     executable,
     description: "long-lived Windows Command Prompt (cmd.exe /K) per terminal slot",
     syntaxHint: "Prefer cmd.exe syntax: %VAR% for environment variables (no $VAR), & for sequential commands, && and || for conditional, REM or :: for comments; no pipelines, no here-strings.",
-    chatPromptZH: "「终端是 Windows 命令提示符 cmd.exe（长驻会话），所有命令必须遵循 cmd 语法：%FOO% 引用环境变量，& / && / || 序列，REM 或 :: 注释；禁止 PowerShell、Bash 语法。」",
   };
 }
 
@@ -149,18 +144,11 @@ function describePosixShell(executable: string, kind: "bash" | "zsh" | "sh" | "f
     sh: "Prefer POSIX sh syntax (subset of bash); you may use && / || / pipelines, $VAR, export. Avoid Bash-only syntax.",
     fish: "Prefer fish syntax; use && / || / pipelines, $VAR, set -x VAR value. Avoid Bash-style arrays and subshells.",
   };
-  const chatByKind: Record<typeof kind, string> = {
-    bash: "「终端是 /bin/bash（无 profile 长驻会话），所有命令必须遵循 POSIX bash 语法：$VAR、export、&& / || 等。」",
-    zsh: "「终端是 zsh（无 profile 长驻会话），所有命令必须遵循 zsh 语法：$VAR、export、&& / ||，可用 zsh 特性。」",
-    sh: "「终端是 /bin/sh（长驻会话），所有命令必须遵循 POSIX sh 语法：$VAR、export、&& / ||，避免 Bash 专属写法。」",
-    fish: "「终端是 fish（长驻会话），所有命令必须遵循 fish 语法：$VAR、set -x、&& / ||，避免 Bash/zsh 数组与子壳写法。」",
-  };
   return {
     kind,
     executable,
     description: `long-lived native PTY with ${path.basename(executable)} (-noprofile -i) per terminal slot`,
     syntaxHint: syntaxByKind[kind],
-    chatPromptZH: chatByKind[kind],
   };
 }
 
@@ -237,11 +225,6 @@ function resolveManagedShellChoiceHardFallback(): ShellChoice {
 export function invalidateManagedShellCache(): void {
   cachedShellChoice = null;
   cachedShellWarning = null;
-}
-
-export function describeManagedShell(): { chatPromptZH: string; warning: string | null; executable: string } {
-  const choice = getManagedShellChoice();
-  return { chatPromptZH: choice.chatPromptZH, warning: cachedShellWarning, executable: choice.executable };
 }
 
 export function managedShellExecutable(): string {
@@ -360,7 +343,6 @@ function managedShellSpec(protocolToken: string): ManagedShellSpec {
         ],
         description: choice.description,
         syntaxHint: choice.syntaxHint,
-        chatPromptZH: choice.chatPromptZH,
       };
     }
     case "cmd": {
@@ -373,7 +355,6 @@ function managedShellSpec(protocolToken: string): ManagedShellSpec {
         env: { PROMPT: "$P$G" },
         description: choice.description,
         syntaxHint: choice.syntaxHint,
-        chatPromptZH: choice.chatPromptZH,
       };
     }
     case "bash":
@@ -400,7 +381,6 @@ function managedShellSpec(protocolToken: string): ManagedShellSpec {
         },
         description: choice.description,
         syntaxHint: choice.syntaxHint,
-        chatPromptZH: choice.chatPromptZH,
       };
     }
   }

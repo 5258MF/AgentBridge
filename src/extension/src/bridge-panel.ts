@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { describeManagedShell, invalidateManagedShellCache, sanityCheckManagedShellPath } from "./ide-tool-broker.js";
+import { invalidateManagedShellCache, sanityCheckManagedShellPath } from "./ide-tool-broker.js";
 import type { BridgeManager, BridgeStatus } from "./bridge-server.js";
 import { createTranslator, detectLang, zhMessages, enMessages } from "./i18n.js";
 
@@ -8,15 +8,8 @@ const POLL_INTERVAL_MS = 1500;
 const LANG = detectLang();
 const t = createTranslator(LANG);
 
-function buildArenaPrompt(shellPrompt: string): string {
-  return [
-    t("promptConnect"),
-    shellPrompt,
-    "",
-    t("promptFocus"),
-    t("promptParallel"),
-    t("promptSide"),
-  ].join("\n");
+function buildConnectionPrompt(): string {
+  return t("connectionPrompt");
 }
 
 interface PanelMessage {
@@ -221,8 +214,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       case "copyPrompt": {
         const status = this.bridge.getStatus();
         if (!status.publicUrl) throw new Error(t("needStartBridgeFirst"));
-        const { chatPromptZH } = describeManagedShell();
-        await vscode.env.clipboard.writeText(`${status.publicUrl}\n\n${buildArenaPrompt(chatPromptZH)}`);
+        await vscode.env.clipboard.writeText(`${status.publicUrl}\n\n${buildConnectionPrompt()}`);
         void vscode.window.showInformationMessage(t("promptCopied"));
         return;
       }

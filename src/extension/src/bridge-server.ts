@@ -11,7 +11,7 @@ import * as vscode from "vscode";
 import { FILE_TOOL_DEFINITIONS, invokeFileTool, isFileToolName } from "./file-tool-registry.js";
 import { BRIDGE_EXCLUDED_TOOL_NAMES, getIdeToolDefinition, IDE_TOOL_DEFINITIONS } from "./ide-tool-definitions.js";
 import { getManagedShellChoice } from "./ide-tool-broker.js";
-import { describeManagedShell, managedShellExecutable, managedShellOverrideWarning } from "./ide-tool-broker.js";
+import { managedShellExecutable, managedShellOverrideWarning } from "./ide-tool-broker.js";
 import type { IdeToolBroker } from "./ide-tool-broker.js";
 
 const execFileAsync = promisify(execFile);
