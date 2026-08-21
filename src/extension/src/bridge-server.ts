@@ -1854,7 +1854,7 @@ export class BridgeManager implements vscode.Disposable {
       ? `${BRIDGE_SERVER_INSTRUCTIONS}\n\nRead-only mode is ACTIVE: apply_patch, run_command, and send_command_input are disabled. Do not attempt file modifications or command execution; report findings and proposed changes to the user instead.`
       : BRIDGE_SERVER_INSTRUCTIONS;
     const server = new McpServer(
-      { name: "agentbridge", version: "0.1.5" },
+      { name: "agentbridge", version: "0.1.6" },
       { capabilities: { tools: {}, logging: {} }, instructions },
     );
     let transport!: StreamableHTTPServerTransport;

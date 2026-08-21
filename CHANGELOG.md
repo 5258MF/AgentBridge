@@ -1,5 +1,16 @@
 # Change Log
 
+## 0.1.6 (2026-08-22)
+
+Reliability release. The MCP tool surface remains unchanged at 13 tools.
+
+- **Fixed scoped file searches with glob patterns** — `find_files` / `search_files` passed an absolute path as ripgrep's search root, but `--glob` patterns match traversal-relative paths, so any search that combined a directory scope with a glob (`src/**/*.ts`, exclude filters) silently returned nothing. Both tools now spawn ripgrep with the scope directory as the working directory and `.` as the root.
+- **Fixed `run_command` eating real output lines** — two prompt-stripping passes could remove genuine content: leading lines starting with `$ ` or `PS ...` were dropped from the first captured chunk, and trailing prompt removal could eat real lines when a command's output ended near a prompt boundary. Stripping is now tail-anchored to the end of the output, and the leading pass only trims blank lines.
+- **Capped retained finished command states** — long-running Bridges kept every finished `run_command` state forever. States are now pruned to the 32 most recent (running/background commands are never evicted).
+- **Honest shell support matrix** — `run_command`'s persistent-shell protocol is now officially supported on PowerShell (Windows), bash (Linux), and zsh (macOS via ZDOTDIR injection). cmd, plain sh, and fish are no longer attempted: selecting one fails fast with a clear error naming the supported shells, instead of hanging ~8 s waiting for protocol markers that never arrive.
+- **Layered DoH hardening for Quick Tunnel health checks** — on networks whose DNS cannot resolve `*.trycloudflare.com` subdomains (campus/corporate resolvers), startup no longer times out after 60 s. Cloudflare's own DoH endpoint is tried first (zero propagation lag for its own zone), DoH queries carry a cache-buster with `no-store`, and if every resolver fails — including the window where the account-less control plane has not yet published its DNS record — the health check falls back to pinned Cloudflare anycast IPs with SNI + Host headers while TLS stays validated against the real hostname. A new `[bridge] DoH fallback exhausted, ...` log line makes the fallback path visible in the Output panel. First successful starts on affected networks drop from ~60 s to a few seconds.
+- **Housekeeping** — file locks now use reference counting so idle mutexes are evicted; removed a misleading empty authorization hook from the Bridge start path.
+
 ## 0.1.5 (2026-08-21)
 
 Feature release.
