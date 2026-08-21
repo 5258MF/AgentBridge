@@ -7,6 +7,7 @@ import { invokeLspTool } from "./lsp-tool.js";
 
 const COMMON_EXCLUDES = new Set([".git", "node_modules", "dist", "build", "coverage", ".next", "target", "vendor"]);
 const MAX_CAPTURED_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_COMPLETED_STATES = 32;
 const DEFAULT_OUTPUT_BYTES = 32 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_IDLE_TERMINALS = 4;
@@ -75,6 +76,26 @@ let cachedShellWarning: string | null = null;
 
 const MANAGED_SHELL_WINDOWS_SETTING = "managedShell.windows";
 const MANAGED_SHELL_UNIX_SETTING = "managedShell.unix";
+
+/**
+ * Evict oldest finished command states (Map insertion order = start order) until at most
+ * `cap` finished entries remain. Running states — including in-flight background commands,
+ * whose `status` stays "running" until they finish — are never evicted.
+ */
+export function pruneFinishedCommandStates(states: Map<string, CommandState>, cap: number): void {
+  let finished = 0;
+  for (const state of states.values()) {
+    if (state.status !== "running") finished++;
+  }
+  if (finished <= cap) return;
+  let excess = finished - cap;
+  for (const [id, state] of states) {
+    if (excess <= 0) break;
+    if (state.status === "running") continue;
+    states.delete(id);
+    excess--;
+  }
+}
 
 function resolveOverrideManagedShell(): string {
   const section = process.platform === "win32" ? MANAGED_SHELL_WINDOWS_SETTING : MANAGED_SHELL_UNIX_SETTING;
@@ -1280,6 +1301,7 @@ class TerminalCommandManager implements vscode.Disposable {
     if (state.slot.busyCommandId === state.id) state.slot.busyCommandId = undefined;
     state.resolveDone();
     this.pruneIdleTerminals();
+    pruneFinishedCommandStates(this.states, MAX_COMPLETED_STATES);
   }
 
   private readOutput(state: CommandState, requestedOffset = 0, maxBytes = DEFAULT_OUTPUT_BYTES): Record<string, unknown> {
@@ -1389,7 +1411,7 @@ class TerminalCommandManager implements vscode.Disposable {
   getOutput(input: Record<string, unknown>): string {
     const id = asString(input.command_id);
     const state = this.states.get(id);
-    if (!state) throw new Error(`Unknown command_id: ${id}`);
+    if (!state) throw new Error(`Unknown command_id: ${id}. Only the ${MAX_COMPLETED_STATES} most recent finished commands are retained.`);
     const offset = asInteger(input.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const maxBytes = asInteger(input.max_bytes, DEFAULT_OUTPUT_BYTES, 1, MAX_OUTPUT_BYTES);
     const snapshot = this.readOutput(state, offset, maxBytes);
@@ -1416,7 +1438,7 @@ class TerminalCommandManager implements vscode.Disposable {
   sendInput(input: Record<string, unknown>): string {
     const id = asString(input.command_id);
     const state = this.states.get(id);
-    if (!state) throw new Error(`Unknown command_id: ${id}`);
+    if (!state) throw new Error(`Unknown command_id: ${id}. Only the ${MAX_COMPLETED_STATES} most recent finished commands are retained.`);
     if (state.status !== "running") throw new Error(`Command ${id} is not running (status=${state.status}).`);
     const text = asString(input.input);
     const appendNewline = asBoolean(input.append_newline, true);
