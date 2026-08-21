@@ -1306,12 +1306,11 @@ class TerminalCommandManager implements vscode.Disposable {
     // each backspace, mirroring the terminal's delete semantics.
     clean = clean.replace(/.?\u0008/g, "");
     if (state.output.length === 0) {
-      // Defense in depth: strip a stale prompt or leading blank lines that leaked past the
-      // gate before the first real byte of captured output.
-      clean = clean.replace(/^(?:\r?\n|[ \t])*/, "")
-        .replace(/^PS [^\r\n]*> ?/, "")
-        .replace(/^\$ /, "")
-        .replace(/^(?:\r?\n|[ \t])*/, "");
+      // Strip leading blank lines that leaked past the gate before the first real byte of
+      // captured output. Deliberately NOT stripping prompt-shaped text here: commands whose
+      // genuine output starts with "$ " or "PS ..." (e.g. echo '$ 100') would lose bytes.
+      // Prompts are handled by stripPromptText's tail-anchored pass instead.
+      clean = clean.replace(/^(?:\r?\n|[ \t])*/, "");
     }
     if (!clean) return;
     const bytes = Buffer.from(clean, "utf8");
