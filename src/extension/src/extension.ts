@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { BridgeManager } from "./bridge-server.js";
 import { BridgePanelProvider } from "./bridge-panel.js";
 import { IdeToolBroker, invalidateManagedShellCache } from "./ide-tool-broker.js";
+import { createTranslator, detectLang } from "./i18n.js";
 
 let activeBridge: BridgeManager | undefined;
 
@@ -40,6 +41,7 @@ function bridgeDiffSnippet(diff: string, filePath?: string): { before: string; a
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  const t = createTranslator(detectLang());
   const output = vscode.window.createOutputChannel("AgentBridge");
   const ideToolBroker = new IdeToolBroker();
   const bridge = new BridgeManager(context, output, ideToolBroker);
@@ -132,10 +134,10 @@ export function activate(context: vscode.ExtensionContext): void {
       await bridgeReady;
       const status = await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
-        title: "Installing cloudflared for AgentBridge…",
+        title: t("installingCloudflaredForAgentBridge"),
         cancellable: false,
       }, () => bridge.installCloudflared());
-      await vscode.window.showInformationMessage(`cloudflared is ready: ${status.tunnelVersion ?? "installed"}`);
+      await vscode.window.showInformationMessage(t("cloudflaredReady", status.tunnelVersion ?? t("installedVersionFallback")));
       updateStatusBar();
       return status;
     }),
