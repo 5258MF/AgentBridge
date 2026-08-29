@@ -248,6 +248,7 @@ export interface BridgeStatus {
   readonly localUrl?: string;
   readonly publicUrl?: string;
   readonly localPort?: number;
+  readonly cloudflaredInstalling: boolean;
   readonly tunnelInstalled?: boolean;
   readonly tunnelVersion?: string;
   readonly tunnelConfigValid?: boolean;
@@ -889,6 +890,7 @@ export class BridgeManager implements vscode.Disposable {
       localUrl,
       publicUrl,
       localPort: this.localPort,
+      cloudflaredInstalling: Boolean(this.installCloudflaredPromise),
       tunnelInstalled: this.tunnelInstalled,
       tunnelVersion: this.tunnelVersion,
       tunnelConfigValid: this.tunnelConfigValid,
@@ -1228,12 +1230,16 @@ export class BridgeManager implements vscode.Disposable {
 
   async installCloudflared(): Promise<BridgeStatus> {
     if (this.installCloudflaredPromise) return this.installCloudflaredPromise;
-    this.installCloudflaredPromise = this.installCloudflaredInternal();
-    try {
-      return await this.installCloudflaredPromise;
-    } finally {
-      this.installCloudflaredPromise = undefined;
-    }
+    const installation = this.installCloudflaredInternal();
+    this.installCloudflaredPromise = (async () => {
+      try {
+        await installation;
+      } finally {
+        this.installCloudflaredPromise = undefined;
+      }
+      return this.getStatus();
+    })();
+    return this.installCloudflaredPromise;
   }
 
   private async installCloudflaredInternal(): Promise<BridgeStatus> {

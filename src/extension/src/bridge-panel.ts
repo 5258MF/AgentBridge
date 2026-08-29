@@ -1212,6 +1212,14 @@ private renderHtml(): string {
     }
   }
 
+  function updateSessionStartStopControl(status) {
+    const state = status && status.state ? status.state : 'stopped';
+    const cloudflaredInstallInProgress = installingCloudflared || (status && status.cloudflaredInstalling === true);
+    const startStop = $('sessionStartStopButton');
+    startStop.disabled = busy || cloudflaredInstallInProgress || state === 'starting';
+    startStop.textContent = state === 'running' ? t('stop') : state === 'starting' ? t('starting') : t('connect');
+  }
+
   function renderSessionStatus(status) {
     const connected = status.connected;
     const state = status.state;
@@ -1255,9 +1263,7 @@ private renderHtml(): string {
       $('footerMeta').textContent = meta.length ? t('recentActivity') + meta.join(' · ') : '';
       $('footerHint').textContent = connected ? t('monitoring') : state === 'running' ? t('sessionWillUpdate') : t('startToMonitor');
     }
-    const startStop = $('sessionStartStopButton');
-    startStop.disabled = busy || state === 'starting';
-    startStop.textContent = state === 'running' ? t('stop') : state === 'starting' ? t('starting') : t('connect');
+    updateSessionStartStopControl(status);
   }
 
   function renderSession(status) {
@@ -1454,10 +1460,11 @@ private renderHtml(): string {
     const isNgrok = lastStatus && lastStatus.tunnelProvider === 'ngrok';
     const isNamed = lastStatus && lastStatus.tunnelProvider === 'cloudflare-named';
     const isQuick = lastStatus && lastStatus.tunnelProvider === 'cloudflare';
+    const cloudflaredInstallInProgress = installingCloudflared || (lastStatus && lastStatus.cloudflaredInstalling === true);
 
-    $('quickProvider').disabled = busy || running || starting;
-    $('namedProvider').disabled = busy || running || starting;
-    $('ngrokProvider').disabled = busy || running || starting;
+    $('quickProvider').disabled = busy || cloudflaredInstallInProgress || running || starting;
+    $('namedProvider').disabled = busy || cloudflaredInstallInProgress || running || starting;
+    $('ngrokProvider').disabled = busy || cloudflaredInstallInProgress || running || starting;
     $('domainInput').disabled = busy || running || starting || !isNgrok;
     $('namedDomainInput').disabled = busy || running || starting || !isNamed;
     $('namedTokenInput').disabled = busy || running || starting || !isNamed;
@@ -1465,13 +1472,14 @@ private renderHtml(): string {
     $('copyOriginButton').disabled = !$('namedOriginValue').value;
     $('saveNamedTunnelButton').disabled = busy || running || starting || !isNamed || !$('namedDomainInput').value.trim() || !Number.isInteger(Number($('namedPortInput').value));
     $('clearNamedTunnelTokenButton').disabled = busy || running || starting || !isNamed || lastStatus.namedTunnelTokenConfigured !== true;
-    $('checkButton').disabled = busy || starting;
-    $('installCloudflaredButton').disabled = busy || installingCloudflared || running || starting || !canAutoInstallCloudflared || !(isQuick || isNamed) || lastStatus.tunnelInstalled === true;
-    $('installCloudflaredButton').textContent = installingCloudflared ? t('installing') : t('installCloudflared');
+    $('checkButton').disabled = busy || cloudflaredInstallInProgress || starting;
+    $('installCloudflaredButton').disabled = busy || cloudflaredInstallInProgress || running || starting || !canAutoInstallCloudflared || !(isQuick || isNamed) || lastStatus.tunnelInstalled === true;
+    $('installCloudflaredButton').textContent = cloudflaredInstallInProgress ? t('installing') : t('installCloudflared');
     $('rotateButton').disabled = busy || running || starting;
-    $('startStopButton').disabled = busy || starting || (!running && busy);
+    $('startStopButton').disabled = busy || cloudflaredInstallInProgress || starting || (!running && busy);
     $('startStopButton').textContent = running ? t('stopBridge') : starting ? t('starting') : t('startBridge');
     $('persistentModeToggle').disabled = busy;
+    updateSessionStartStopControl(lastStatus);
   }
 
   function selectTunnelProvider(provider) {
@@ -1589,7 +1597,7 @@ private renderHtml(): string {
     vscode.postMessage({ type: 'checkTunnel' });
   });
   $('installCloudflaredButton').addEventListener('click', () => {
-    if (busy) return;
+    if (busy || (lastStatus && lastStatus.cloudflaredInstalling === true)) return;
     busy = true;
     installingCloudflared = true;
     updateControls();
@@ -1699,7 +1707,7 @@ private renderHtml(): string {
     }
   });
   $('sessionStartStopButton').addEventListener('click', () => {
-    if (busy) return;
+    if (busy || installingCloudflared || (lastStatus && lastStatus.cloudflaredInstalling === true)) return;
     busy = true;
     if (lastStatus && lastStatus.state === 'running') vscode.postMessage({ type: 'stop' });
     else vscode.postMessage({ type: 'start' });
