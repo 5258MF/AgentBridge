@@ -7,9 +7,54 @@ const POLL_INTERVAL_MS = 1500;
 
 const LANG = detectLang();
 const t = createTranslator(LANG);
+const CLOUDFLARE_DOWNLOADS_URL = "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/";
+const CAN_AUTO_INSTALL_CLOUDFLARED = process.platform === "win32" || process.platform === "darwin";
 
 function buildConnectionPrompt(): string {
   return t("connectionPrompt");
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function cloudflaredCommandRow(command: string): string {
+  const escaped = escapeHtml(command);
+  return `<div class="agentbridge-command-row"><code>${escaped}</code><button class="secondary" data-copy="${escaped}">${t("copy")}</button></div>`;
+}
+
+function cloudflaredInstallHelpHtml(): string {
+  const verify = cloudflaredCommandRow("cloudflared --version");
+  const downloads = `<button class="secondary" data-open="${CLOUDFLARE_DOWNLOADS_URL}">${t("openCloudflareDownloads")}</button>`;
+  if (process.platform === "win32") {
+    return [
+      `<p class="agentbridge-help">${t("wingetInstallHelp")}</p>`,
+      cloudflaredCommandRow("winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements"),
+      cloudflaredCommandRow("winget upgrade --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements"),
+      verify,
+      downloads,
+    ].join("\n");
+  }
+  if (process.platform === "darwin") {
+    return [
+      `<p class="agentbridge-help">${t("homebrewInstallHelp")}</p>`,
+      cloudflaredCommandRow("brew install cloudflared"),
+      cloudflaredCommandRow("brew upgrade cloudflared"),
+      verify,
+      `<p class="agentbridge-help">${t("reloadAfterInstallHelp")}</p>`,
+      downloads,
+    ].join("\n");
+  }
+  return [
+    `<p class="agentbridge-help">${t("linuxManualInstallHelp")}</p>`,
+    verify,
+    downloads,
+  ].join("\n");
 }
 
 interface PanelMessage {
@@ -35,7 +80,9 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     };
     webviewView.webview.html = this.renderHtml();
     webviewView.webview.onDidReceiveMessage((message: PanelMessage) => {
-      void this.handleMessage(message).then(() => this.pushStatus(), (error) => {
+      void this.handleMessage(message, webviewView.webview).then(() => {
+        if (message.type !== "installCloudflared" && this.view === webviewView) this.pushStatus();
+      }, (error) => {
         void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
       });
     });
@@ -78,7 +125,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     void this.view.webview.postMessage({ type: "status", status, persistentMode });
   }
 
-  private async handleMessage(message: PanelMessage): Promise<void> {
+  private async handleMessage(message: PanelMessage, sourceWebview: vscode.Webview): Promise<void> {
     switch (message.type) {
       case "refresh":
         return;
@@ -136,8 +183,21 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         await this.bridge.checkTunnel();
         return;
       case "installCloudflared":
-        await this.bridgeReady;
-        await this.bridge.installCloudflared();
+        try {
+          await this.bridgeReady;
+          await this.bridge.installCloudflared();
+        } finally {
+          const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
+          try {
+            await sourceWebview.postMessage({
+              type: "cloudflaredInstallFinished",
+              status: this.bridge.getStatus(),
+              persistentMode,
+            });
+          } catch {
+            // The originating Webview may have been disposed while the package manager was running.
+          }
+        }
         return;
       case "rotateEndpoint":
         await this.bridgeReady;
@@ -284,6 +344,7 @@ private renderHtml(): string {
  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this.view?.webview.cspSource ?? ""} 'unsafe-inline'; script-src 'unsafe-inline';">
  <script>
    window.__AB_I18N__ = ${JSON.stringify(dict).replace(/</g, "\\u003c")};
+   window.__AB_CAN_AUTO_INSTALL_CLOUDFLARED__ = ${JSON.stringify(CAN_AUTO_INSTALL_CLOUDFLARED)};
  </script>
  <style>
   html { height: 100%; margin: 0; padding: 0; }
@@ -684,12 +745,7 @@ private renderHtml(): string {
             <p>${t("installCloudflaredIntro")}</p>
             <div class="agentbridge-setup-step">
               <h4>${t("installOrUpdateCloudflared")}</h4>
-              <div class="agentbridge-command-row"><code>winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements">${t("copy")}</button></div>
-              <div class="agentbridge-command-row"><code>winget upgrade --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget upgrade --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements">${t("copy")}</button></div>
-            </div>
-            <div class="agentbridge-setup-step">
-              <h4>${t("verifyCloudflared")}</h4>
-              <div class="agentbridge-command-row"><code>cloudflared --version</code><button class="secondary" data-copy="cloudflared --version">${t("copy")}</button></div>
+              ${cloudflaredInstallHelpHtml()}
             </div>
             <p class="agentbridge-help">${t("tempAddressHelp")}</p>
           </div>
@@ -700,7 +756,7 @@ private renderHtml(): string {
             <p>${t("setupNamedIntro")}</p>
             <div class="agentbridge-setup-step">
               <h4>${t("installOrUpdateCloudflared")}</h4>
-              <div class="agentbridge-command-row"><code>winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements</code><button class="secondary" data-copy="winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements">${t("copy")}</button></div>
+              ${cloudflaredInstallHelpHtml()}
             </div>
             <div class="agentbridge-setup-step">
               <h4>${t("createOrOpenTunnel")}</h4>
@@ -851,6 +907,7 @@ private renderHtml(): string {
   let lastStatus = null;
   let busy = false;
   let installingCloudflared = false;
+  const canAutoInstallCloudflared = window.__AB_CAN_AUTO_INSTALL_CLOUDFLARED__ === true;
   let domainInputDirty = false;
   let namedTunnelInputDirty = false;
   let lastRevision = -1;
@@ -1306,7 +1363,7 @@ private renderHtml(): string {
     $('cloudflareSetup').style.display = isQuick ? '' : 'none';
     $('cloudflareNamedSetup').style.display = isNamed ? '' : 'none';
     $('ngrokSetup').style.display = isNgrok ? '' : 'none';
-    $('installCloudflaredButton').style.display = (isQuick || isNamed) && status.tunnelInstalled === false ? '' : 'none';
+    $('installCloudflaredButton').style.display = canAutoInstallCloudflared && (isQuick || isNamed) && status.tunnelInstalled === false ? '' : 'none';
     $('cloudflareSetup').querySelector('summary').textContent = needsTunnelSetup ? t('setupCloudflaredSummary') : t('cloudflaredHelpSummary');
     $('ngrokSetup').querySelector('summary').textContent = needsTunnelSetup ? t('setupNgrokSummary') : t('ngrokHelpSummary');
     $('cloudflareNamedSetup').querySelector('summary').textContent = needsTunnelSetup ? t('setupNamedSummary') : t('namedHelpSummary');
@@ -1409,7 +1466,7 @@ private renderHtml(): string {
     $('saveNamedTunnelButton').disabled = busy || running || starting || !isNamed || !$('namedDomainInput').value.trim() || !Number.isInteger(Number($('namedPortInput').value));
     $('clearNamedTunnelTokenButton').disabled = busy || running || starting || !isNamed || lastStatus.namedTunnelTokenConfigured !== true;
     $('checkButton').disabled = busy || starting;
-    $('installCloudflaredButton').disabled = busy || running || starting || !(isQuick || isNamed) || lastStatus.tunnelInstalled === true;
+    $('installCloudflaredButton').disabled = busy || installingCloudflared || running || starting || !canAutoInstallCloudflared || !(isQuick || isNamed) || lastStatus.tunnelInstalled === true;
     $('installCloudflaredButton').textContent = installingCloudflared ? t('installing') : t('installCloudflared');
     $('rotateButton').disabled = busy || running || starting;
     $('startStopButton').disabled = busy || starting || (!running && busy);
@@ -1533,6 +1590,7 @@ private renderHtml(): string {
   });
   $('installCloudflaredButton').addEventListener('click', () => {
     if (busy) return;
+    busy = true;
     installingCloudflared = true;
     updateControls();
     vscode.postMessage({ type: 'installCloudflared' });
@@ -1662,7 +1720,13 @@ private renderHtml(): string {
     const message = event.data;
     if (message && message.type === 'status' && message.status) {
       refreshStatus(message.status, message.persistentMode);
-      resetBusy();
+      if (!installingCloudflared) resetBusy();
+    } else if (message && message.type === 'cloudflaredInstallFinished') {
+      try {
+        if (message.status) refreshStatus(message.status, message.persistentMode);
+      } finally {
+        resetBusy();
+      }
     }
   });
   setInterval(() => {

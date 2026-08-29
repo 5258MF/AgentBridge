@@ -16,6 +16,7 @@ Published to the [Visual Studio Marketplace](https://marketplace.visualstudio.co
   - **LSP / diagnostics** — `get_diagnostics`, `lsp`
   - **Bridge state** — `set_todos`, `report_progress`
 - **3 tunnel providers** — Cloudflare Quick Tunnel (default, zero-config), Cloudflare Named Tunnel (stable hostname), ngrok (reserved domain).
+- **Cross-platform cloudflared detection and installation** — one-click Winget installation on Windows and Homebrew installation on macOS; Linux checks PATH, `/usr/bin`, and `/usr/local/bin` while keeping installation manual through Cloudflare's official instructions.
 - **Managed shell support matrix** — PowerShell 5.1 / PowerShell 7+ (Windows), bash (Linux) and zsh (macOS) fully support `run_command` via per-prompt protocol hooks; cmd, sh and fish are rejected up front with a clear error instead of timing out. The syntax hint shown to the AI updates automatically when you switch shells.
 - **Vision-capable `read_image_file`** — returns MCP `ImageContent` blocks (PNG / JPEG / GIF / WebP / BMP) up to 5 MiB so vision-capable clients see pixels natively. SVG stays text via `read_files`.
 - **External link routing** — `agentbridge.bridge.openInternalBrowser` (`auto` / `all` / `external`) controls whether ChatGPT / Arena open inside VS Code's Simple Browser or in the OS default browser. Default `auto` matches the original in-editor experience.
@@ -85,6 +86,18 @@ code --install-extension vsc-agentbridge-latest.vsix
 
 Choose in the **AgentBridge** panel's tunnel provider radio, or set `agentbridge.bridge.tunnelProvider` in `settings.json`.
 
+### cloudflared detection and installation
+
+Cloudflare Quick Tunnel and Cloudflare Named Tunnel share the same `cloudflared` detection and installation help. Every check actually runs `cloudflared --version`; finding a file that cannot execute does not count as an installed client.
+
+| System | Automatic installation | Detection locations |
+|---|---|---|
+| Windows | Winget | PATH, Winget Links, WindowsApps, Program Files |
+| macOS | Homebrew | PATH, `/opt/homebrew/bin`, `/usr/local/bin` |
+| Linux | Manual instructions only in this release | PATH, `/usr/bin`, `/usr/local/bin` |
+
+If Winget is missing on Windows, Homebrew is missing on macOS, or cloudflared is absent on Linux, open the official Cloudflare downloads instructions from the panel. Install it manually and click **Check Tunnel** again. This release does not run APT or modify Linux package sources.
+
 ## Configuration
 
 All settings live under the `agentbridge.bridge.*` namespace.
@@ -123,7 +136,7 @@ Connecting the ChatGPT web app: see [docs/chatgpt-web-connector.md](docs/chatgpt
 
 - VS Code 1.95+
 - Node 22+
-- Verified on Windows. POSIX shell providers resolve paths via `which(1)`.
+- Built and verified on Windows; macOS supports Homebrew installation, while Linux detects an existing cloudflared and provides a manual installation entry point.
 
 ## License
 

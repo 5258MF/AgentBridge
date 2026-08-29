@@ -13,8 +13,10 @@ import { BRIDGE_EXCLUDED_TOOL_NAMES, getIdeToolDefinition, IDE_TOOL_DEFINITIONS 
 import { getManagedShellChoice } from "./ide-tool-broker.js";
 import { managedShellExecutable, managedShellOverrideWarning } from "./ide-tool-broker.js";
 import type { IdeToolBroker } from "./ide-tool-broker.js";
+import { createTranslator, detectLang } from "./i18n.js";
 
 const execFileAsync = promisify(execFile);
+const t = createTranslator(detectLang());
 const ROUTE_TOKEN_SECRET = "agentbridge.bridge.routeToken";
 const NGROK_DOMAIN_SETTING = "bridge.ngrokDomain";
 const NGROK_DOMAIN_STATE_KEY = "agentbridge.bridge.ngrokDomain";
@@ -836,6 +838,7 @@ export class BridgeManager implements vscode.Disposable {
   private lastTool: string | undefined;
   private lastToolAt: string | undefined;
   private startPromise: Promise<BridgeStatus> | undefined;
+  private installCloudflaredPromise: Promise<BridgeStatus> | undefined;
   private sessionPruneTimer: ReturnType<typeof setInterval> | undefined;
   private tunnelRecoveryPromise: Promise<void> | undefined;
   private tunnelRecoveryGeneration: number | undefined;
@@ -1091,6 +1094,9 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   async setTunnelProvider(provider: string): Promise<BridgeStatus> {
+    if (this.installCloudflaredPromise) {
+      throw new Error(t("cloudflaredInstallBusy"));
+    }
     if (this.state === "running" || this.state === "starting") {
       throw new Error("Stop the Bridge before changing its tunnel provider.");
     }
@@ -1212,52 +1218,93 @@ export class BridgeManager implements vscode.Disposable {
       }
       if (process.env.ProgramFiles) candidates.push(path.join(process.env.ProgramFiles, "cloudflared", "cloudflared.exe"));
       if (process.env["ProgramFiles(x86)"]) candidates.push(path.join(process.env["ProgramFiles(x86)"]!, "cloudflared", "cloudflared.exe"));
+    } else if (process.platform === "darwin") {
+      candidates.push("/opt/homebrew/bin/cloudflared", "/usr/local/bin/cloudflared");
+    } else if (process.platform === "linux") {
+      candidates.push("/usr/bin/cloudflared", "/usr/local/bin/cloudflared");
     }
     return [...new Set(candidates.filter(Boolean))];
   }
 
   async installCloudflared(): Promise<BridgeStatus> {
-    if (this.state === "running" || this.state === "starting") {
-      throw new Error("Stop the Bridge before installing cloudflared.");
+    if (this.installCloudflaredPromise) return this.installCloudflaredPromise;
+    this.installCloudflaredPromise = this.installCloudflaredInternal();
+    try {
+      return await this.installCloudflaredPromise;
+    } finally {
+      this.installCloudflaredPromise = undefined;
+    }
+  }
+
+  private async installCloudflaredInternal(): Promise<BridgeStatus> {
+    if (this.startPromise || this.state === "running" || this.state === "starting") {
+      throw new Error(t("stopBeforeCloudflaredInstall"));
     }
     this.tunnelProvider = this.readTunnelProvider();
     if (this.tunnelProvider !== "cloudflare" && this.tunnelProvider !== "cloudflare-named") {
-      throw new Error("Select a Cloudflare tunnel mode before installing cloudflared.");
+      throw new Error(t("selectCloudflareBeforeInstall"));
     }
     const existing = await this.checkCloudflared();
     if (existing.tunnelInstalled) return this.tunnelProvider === "cloudflare-named" ? await this.checkNamedTunnel() : existing;
-    if (process.platform !== "win32") {
-      throw new Error("One-click cloudflared installation is currently supported on Windows with Winget.");
-    }
 
-    this.output.appendLine(`[bridge] installing cloudflared with Winget package ${CLOUDFLARED_WINGET_PACKAGE}...`);
     try {
-      const result = await execFileAsync("winget", [
-        "install",
-        "--id", CLOUDFLARED_WINGET_PACKAGE,
-        "--exact",
-        "--source", "winget",
-        "--silent",
-        "--disable-interactivity",
-        "--accept-package-agreements",
-        "--accept-source-agreements",
-      ], {
-        windowsHide: false,
-        timeout: 10 * 60 * 1000,
-        maxBuffer: 2 * 1024 * 1024,
-      });
-      const output = String(result.stdout || result.stderr).trim();
-      if (output) this.output.appendLine(`[winget] ${output}`);
+      if (process.platform === "win32") {
+        try {
+          await execFileAsync("winget", ["--version"], { windowsHide: true, timeout: 10_000 });
+        } catch {
+          throw new Error(t("wingetNotFound"));
+        }
+        this.output.appendLine(`[bridge] installing cloudflared with Winget package ${CLOUDFLARED_WINGET_PACKAGE}...`);
+        const result = await execFileAsync("winget", [
+          "install",
+          "--id", CLOUDFLARED_WINGET_PACKAGE,
+          "--exact",
+          "--source", "winget",
+          "--silent",
+          "--disable-interactivity",
+          "--accept-package-agreements",
+          "--accept-source-agreements",
+        ], {
+          windowsHide: false,
+          timeout: 10 * 60 * 1000,
+          maxBuffer: 2 * 1024 * 1024,
+        });
+        const output = [result.stdout, result.stderr].map((value) => String(value ?? "").trim()).filter(Boolean).join("\n");
+        if (output) this.output.appendLine(`[winget] ${output}`);
+      } else if (process.platform === "darwin") {
+        let brewExecutable: string | undefined;
+        for (const candidate of ["brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew"]) {
+          try {
+            await execFileAsync(candidate, ["--version"], { timeout: 10_000 });
+            brewExecutable = candidate;
+            break;
+          } catch {
+            // Try the next standard Homebrew location.
+          }
+        }
+        if (!brewExecutable) {
+          throw new Error(t("homebrewNotFound"));
+        }
+        this.output.appendLine(`[bridge] installing cloudflared with Homebrew (${brewExecutable})...`);
+        const result = await execFileAsync(brewExecutable, ["install", "cloudflared"], {
+          timeout: 15 * 60 * 1000,
+          maxBuffer: 2 * 1024 * 1024,
+        });
+        const output = [result.stdout, result.stderr].map((value) => String(value ?? "").trim()).filter(Boolean).join("\n");
+        if (output) this.output.appendLine(`[brew] ${output}`);
+      } else {
+        throw new Error(t("cloudflaredAutoInstallUnavailable"));
+      }
     } catch (error) {
       const details = error as Error & { stdout?: string | Buffer; stderr?: string | Buffer };
       const output = [details.message, String(details.stdout ?? "").trim(), String(details.stderr ?? "").trim()].filter(Boolean).join("\n");
-      this.lastError = `cloudflared installation failed: ${output}`;
+      this.lastError = t("cloudflaredInstallFailed", output);
       throw new Error(this.lastError);
     }
 
     const installed = await this.checkCloudflared();
     if (!installed.tunnelInstalled) {
-      this.lastError = "cloudflared installation completed, but AgentBridge could not locate the executable. Restart the extension and check the tunnel again.";
+      this.lastError = t("cloudflaredInstallVerificationFailed");
       throw new Error(this.lastError);
     }
     this.output.appendLine(`[bridge] cloudflared installation verified: ${installed.tunnelVersion ?? "installed"}`);
@@ -1265,6 +1312,9 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   async start(domain?: string): Promise<BridgeStatus> {
+    if (this.installCloudflaredPromise) {
+      throw new Error(t("cloudflaredInstallBusy"));
+    }
     if (this.state === "running") return this.getStatus();
     if (this.startPromise) return this.startPromise;
     // During automatic tunnel recovery the local HTTP/MCP runtime is intentionally kept alive.
