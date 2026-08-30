@@ -82,57 +82,57 @@
     "commands": [
       {
         "command": "agentbridge.bridge.start",
-        "title": "AgentBridge: Start",
+        "title": "%agentbridge.command.start.title%",
         "icon": "$(radio-tower)"
       },
       {
         "command": "agentbridge.bridge.stop",
-        "title": "AgentBridge: Stop",
+        "title": "%agentbridge.command.stop.title%",
         "icon": "$(debug-stop)"
       },
       {
         "command": "agentbridge.bridge.checkTunnel",
-        "title": "AgentBridge: Check Tunnel",
+        "title": "%agentbridge.command.checkTunnel.title%",
         "icon": "$(check)"
       },
       {
         "command": "agentbridge.bridge.installCloudflared",
-        "title": "AgentBridge: Install cloudflared",
+        "title": "%agentbridge.command.installCloudflared.title%",
         "icon": "$(cloud-download)"
       },
       {
         "command": "agentbridge.bridge.configureNamedTunnel",
-        "title": "AgentBridge: Configure Cloudflare Named Tunnel",
+        "title": "%agentbridge.command.configureNamedTunnel.title%",
         "icon": "$(cloud)"
       },
       {
         "command": "agentbridge.bridge.clearNamedTunnelToken",
-        "title": "AgentBridge: Clear Cloudflare Tunnel Token",
+        "title": "%agentbridge.command.clearNamedTunnelToken.title%",
         "icon": "$(clear-all)"
       },
       {
         "command": "agentbridge.bridge.setTunnelProvider",
-        "title": "AgentBridge: Set Tunnel Provider",
+        "title": "%agentbridge.command.setTunnelProvider.title%",
         "icon": "$(settings-gear)"
       },
       {
         "command": "agentbridge.bridge.rotateEndpoint",
-        "title": "AgentBridge: Rotate Endpoint",
+        "title": "%agentbridge.command.rotateEndpoint.title%",
         "icon": "$(key)"
       },
       {
         "command": "agentbridge.bridge.showOutput",
-        "title": "AgentBridge: Show Output",
+        "title": "%agentbridge.command.showOutput.title%",
         "icon": "$(output)"
       },
       {
         "command": "agentbridge.bridge.configure",
-        "title": "AgentBridge: Configure ngrok Domain",
+        "title": "%agentbridge.command.configureNgrokDomain.title%",
         "icon": "$(globe)"
       },
       {
         "command": "agentbridge.bridge.checkNgrok",
-        "title": "AgentBridge: Check ngrok",
+        "title": "%agentbridge.command.checkNgrok.title%",
         "icon": "$(check)"
       }
     ],

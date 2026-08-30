@@ -88,7 +88,7 @@ code --install-extension vsc-agentbridge-latest.vsix
 
 ### cloudflared 检测与安装
 
-Cloudflare Quick Tunnel 与 Cloudflare Named Tunnel 共用同一套 `cloudflared` 检测和安装帮助。检查始终实际执行 `cloudflared --version`；仅找到文件但无法运行时不会被视为已安装。
+Cloudflare Quick Tunnel 与 Cloudflare Named Tunnel 共用同一套 `cloudflared` 检测和安装帮助，固定流程为 **检查隧道 → 必要时安装并自动复检 → 启动 Bridge**。检查始终实际执行 `cloudflared --version`；仅找到文件但无法运行时不会被视为已安装。手动启动 Cloudflare 前，当前供应商及配置必须先通过检查；Persistent Mode 会在自动启动前自行检查。ngrok 继续保持原有启动流程。
 
 | 系统 | 自动安装 | 检测位置 |
 |---|---|---|
@@ -96,7 +96,7 @@ Cloudflare Quick Tunnel 与 Cloudflare Named Tunnel 共用同一套 `cloudflared
 | macOS | Homebrew | PATH、`/opt/homebrew/bin`、`/usr/local/bin` |
 | Linux | 本版本仅提供手动安装说明 | PATH、`/usr/bin`、`/usr/local/bin` |
 
-Windows 没有 Winget、macOS 没有 Homebrew，或 Linux 尚未安装时，请从面板打开 Cloudflare 官方下载说明，手动安装后重新点击“检查隧道”。本版本不会在 Linux 上运行 APT 或修改软件源。
+检查未找到 `cloudflared` 时，AgentBridge 还会实际验证 Winget 或 Homebrew 能否运行；只有安装器可用时才显示一键安装按钮。安装成功后会自动复检；只有所选 Cloudflare 供应商及其配置通过验证，才会解锁“启动 Bridge”。Windows 没有 Winget、macOS 没有 Homebrew，或 Linux 尚未安装时，请从面板打开 Cloudflare 官方下载说明，手动安装后重新点击“检查隧道”。本版本不会在 Linux 上运行 APT 或修改软件源。
 
 ## 配置项
 
@@ -117,7 +117,7 @@ Managed Shell 与 打开方式 的运行时切换入口位于 Bridge 面板的 *
 
 ### Cloudflare Named Tunnel 配置教程
 
-逐步指南见 [docs/cloudflare-named-tunnel-setup.md](docs/cloudflare-named-tunnel-setup.md)（安装 cloudflared → 创建隧道 → 复制 Token → 添加路由 → 检查 DNS → 启动并验证）。英文版：[cloudflare-named-tunnel-setup.en.md](docs/cloudflare-named-tunnel-setup.en.md)。
+逐步指南见 [docs/cloudflare-named-tunnel-setup.md](docs/cloudflare-named-tunnel-setup.md)（检查/安装 cloudflared → 创建隧道 → 复制 Token → 添加路由 → 检查 DNS → 检查隧道 → 启动并验证）。英文版：[cloudflare-named-tunnel-setup.en.md](docs/cloudflare-named-tunnel-setup.en.md)。
 
 ### ngrok 开发域名配置教程
 

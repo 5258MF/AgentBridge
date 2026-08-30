@@ -255,7 +255,7 @@ export function activate(context: vscode.ExtensionContext): void {
   if (vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false)) {
     output.appendLine("[extension] persistent Bridge mode enabled; auto-starting");
     setTimeout(() => {
-      void bridgeReady.then(() => bridge.start()).then(
+      void bridgeReady.then(() => bridge.start(undefined, { automaticCheck: true })).then(
         (status) => {
           updateStatusBar();
           output.appendLine(`[bridge] persistent start: ${status.state} ${status.publicUrl ?? ""}`);

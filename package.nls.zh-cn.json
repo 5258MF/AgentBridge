@@ -1,0 +1,13 @@
+{
+  "agentbridge.command.start.title": "AgentBridge：启动",
+  "agentbridge.command.stop.title": "AgentBridge：停止",
+  "agentbridge.command.checkTunnel.title": "AgentBridge：检查隧道",
+  "agentbridge.command.installCloudflared.title": "AgentBridge：安装 cloudflared",
+  "agentbridge.command.configureNamedTunnel.title": "AgentBridge：配置 Cloudflare Named Tunnel",
+  "agentbridge.command.clearNamedTunnelToken.title": "AgentBridge：清除 Cloudflare Tunnel Token",
+  "agentbridge.command.setTunnelProvider.title": "AgentBridge：设置隧道供应商",
+  "agentbridge.command.rotateEndpoint.title": "AgentBridge：轮换端点",
+  "agentbridge.command.showOutput.title": "AgentBridge：显示输出",
+  "agentbridge.command.configureNgrokDomain.title": "AgentBridge：配置 ngrok 域名",
+  "agentbridge.command.checkNgrok.title": "AgentBridge：检查 ngrok"
+}

@@ -4,7 +4,9 @@
 
 ## Step 1 — 安装或更新 cloudflared
 
-打开任意 Windows PowerShell 终端(开始菜单搜「PowerShell」/ Windows Terminal / VS Code 集成终端),粘贴执行:
+推荐先在面板选择 **Cloudflare Named Tunnel**，再点击 **检查隧道**。未找到 `cloudflared` 时，AgentBridge 只有在确认 Windows 的 Winget 或 macOS 的 Homebrew 可用后才提供一键安装，并在安装成功后自动复检。Linux 或没有受支持安装器的系统请使用面板中的 Cloudflare 手动安装入口。
+
+如需在 Windows 上手动安装，请打开 PowerShell 或 Windows Terminal，粘贴执行：
 
 ```powershell
 winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements
@@ -71,16 +73,17 @@ winget upgrade --id Cloudflare.cloudflared --exact --accept-package-agreements -
 | 固定本地端口 | `48271`(默认) | 与 Step 3 的 Port 一致 |
 | Cloudflare Service URL | 自动显示,不用改 | `http://127.0.0.1:<端口>` |
 
-点 **保存 Named Tunnel**。
+点 **保存 Named Tunnel**。保存或修改配置后，需要重新检查隧道。
 
 ## Start Bridge + 验证
 
-1. 点 `Start Bridge`,状态变为在线,公网 URL:
+1. 点击 **检查隧道**。如果面板提供安装入口，请完成安装并等待自动复检；存在配置提示时先处理完成。
+2. 点 `Start Bridge`，状态变为在线，公网 URL：
 
    ```
    https://mcp.example.com/mcp/<routeToken>
    ```
-2. 验证(PowerShell 下用 `curl.exe`,单行执行,`\` 续行在 PowerShell 无效):
+3. 验证（PowerShell 下用 `curl.exe`，单行执行，`\` 续行在 PowerShell 无效）：
 
    ```powershell
    curl.exe -i -X POST "https://mcp.example.com/mcp/<routeToken>" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'

@@ -88,7 +88,7 @@ Choose in the **AgentBridge** panel's tunnel provider radio, or set `agentbridge
 
 ### cloudflared detection and installation
 
-Cloudflare Quick Tunnel and Cloudflare Named Tunnel share the same `cloudflared` detection and installation help. Every check actually runs `cloudflared --version`; finding a file that cannot execute does not count as an installed client.
+Cloudflare Quick Tunnel and Cloudflare Named Tunnel share the same `cloudflared` detection and installation help. The required flow is **Check Tunnel → install if needed (with automatic verification) → Start Bridge**. Every check actually runs `cloudflared --version`; finding a file that cannot execute does not count as an installed client. Manual Cloudflare starts stay disabled until the selected provider and configuration have passed a check; Persistent Mode performs that check automatically before starting. ngrok keeps its existing start behavior.
 
 | System | Automatic installation | Detection locations |
 |---|---|---|
@@ -96,7 +96,7 @@ Cloudflare Quick Tunnel and Cloudflare Named Tunnel share the same `cloudflared`
 | macOS | Homebrew | PATH, `/opt/homebrew/bin`, `/usr/local/bin` |
 | Linux | Manual instructions only in this release | PATH, `/usr/bin`, `/usr/local/bin` |
 
-If Winget is missing on Windows, Homebrew is missing on macOS, or cloudflared is absent on Linux, open the official Cloudflare downloads instructions from the panel. Install it manually and click **Check Tunnel** again. This release does not run APT or modify Linux package sources.
+When a check cannot find `cloudflared`, AgentBridge also verifies whether Winget or Homebrew can actually run. The one-click install button appears only when that installer is available. A successful installation is checked automatically; Start Bridge unlocks only after the selected Cloudflare provider and its configuration pass verification. If Winget is missing on Windows, Homebrew is missing on macOS, or cloudflared is absent on Linux, open the official Cloudflare downloads instructions from the panel, install it manually, and click **Check Tunnel** again. This release does not run APT or modify Linux package sources.
 
 ## Configuration
 
@@ -117,7 +117,7 @@ Runtime toggles for managed shell and open-internally-browser live on the Bridge
 
 ### Cloudflare Named Tunnel walkthrough
 
-See [docs/cloudflare-named-tunnel-setup.md](docs/cloudflare-named-tunnel-setup.md) for a step-by-step guide (install cloudflared, create the tunnel, copy the token, add the route, verify DNS, start + verify the bridge). English version: [cloudflare-named-tunnel-setup.en.md](docs/cloudflare-named-tunnel-setup.en.md).
+See [docs/cloudflare-named-tunnel-setup.md](docs/cloudflare-named-tunnel-setup.md) for a step-by-step guide (check/install cloudflared, create the tunnel, copy the token, add the route, verify DNS, check, then start + verify the bridge). English version: [cloudflare-named-tunnel-setup.en.md](docs/cloudflare-named-tunnel-setup.en.md).
 
 ### ngrok development domain walkthrough
 

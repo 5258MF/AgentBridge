@@ -62,6 +62,17 @@ interface PanelMessage {
   [key: string]: unknown;
 }
 
+const BUSY_PANEL_MESSAGE_TYPES = new Set([
+  "start",
+  "stop",
+  "setProvider",
+  "configure",
+  "configureNamedTunnel",
+  "clearNamedTunnelToken",
+  "checkTunnel",
+  "rotateEndpoint",
+]);
+
 export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
@@ -81,9 +92,14 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.renderHtml();
     webviewView.webview.onDidReceiveMessage((message: PanelMessage) => {
       void this.handleMessage(message, webviewView.webview).then(() => {
-        if (message.type !== "installCloudflared" && this.view === webviewView) this.pushStatus();
+        if (message.type !== "installCloudflared" && this.view === webviewView) {
+          this.pushStatus(BUSY_PANEL_MESSAGE_TYPES.has(message.type) ? "operationFinished" : "status");
+        }
       }, (error) => {
         void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+        if (message.type !== "installCloudflared" && this.view === webviewView) {
+          this.pushStatus(BUSY_PANEL_MESSAGE_TYPES.has(message.type) ? "operationFinished" : "status");
+        }
       });
     });
     this.startPolling();
@@ -110,7 +126,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private pushStatus(): void {
+  private pushStatus(type: "status" | "operationFinished" = "status"): void {
     if (!this.view) return;
     const status = this.bridge.getStatus();
     if (status.tunnelProvider === "cloudflare" && status.state === "running" && status.publicUrl && status.publicUrl !== this.lastCopiedQuickTunnelUrl) {
@@ -122,7 +138,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       });
     }
     const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
-    void this.view.webview.postMessage({ type: "status", status, persistentMode });
+    void this.view.webview.postMessage({ type, status, persistentMode });
   }
 
   private async handleMessage(message: PanelMessage, sourceWebview: vscode.Webview): Promise<void> {
@@ -609,7 +625,7 @@ private renderHtml(): string {
       </span>
     </div>
     <p class="agentbridge-hero-description">${t("heroDescription")}</p>
-    <div class="agentbridge-status-details" id="stateDetails">${t("checkingBridgeStatus")}</div>
+    <div class="agentbridge-status-details" id="stateDetails">${t("loadingBridgeStatus")}</div>
     <div class="agentbridge-open-folder-group" id="openFolderGroup" style="display:none">
       <p class="agentbridge-open-folder-hint">${t("openFolderHint")}</p>
       <button class="secondary" id="openFolderButton" type="button">${t("openFolderButton")}</button>
@@ -623,7 +639,7 @@ private renderHtml(): string {
     </div>
     <div class="agentbridge-address-notice" id="addressNotice" style="display:none"></div>
     <div class="agentbridge-controls agentbridge-hero-actions">
-      <button class="primary" id="startStopButton">${t("startBridge")}</button>
+      <button class="primary" id="startStopButton" disabled>${t("startBridge")}</button>
       <button class="secondary" id="openChatGptButton">${t("openChatGpt")}</button>
       <button class="secondary" id="copyPromptButton">${t("copyPrompt")}</button>
       <button class="secondary agentbridge-more-sites-toggle" id="moreSitesButton" type="button" aria-expanded="false">${t("moreSites")}</button>
@@ -651,7 +667,7 @@ private renderHtml(): string {
       <div class="agentbridge-field">
         <label class="agentbridge-label">${t("tunnelMode")}</label>
         <div class="agentbridge-provider-choices" role="radiogroup">
-          <button class="agentbridge-provider-choice" data-provider="cloudflare" role="radio" id="quickProvider" type="button">
+          <button class="agentbridge-provider-choice" data-provider="cloudflare" role="radio" id="quickProvider" type="button" disabled>
             <div class="agentbridge-provider-header">
               <span class="agentbridge-provider-title">${t("quickTitle")}</span>
               <span class="agentbridge-provider-badge">${t("defaultZeroConfig")}</span>
@@ -663,7 +679,7 @@ private renderHtml(): string {
               <li>${t("quickFactConfig")}</li>
             </ul>
           </button>
-          <button class="agentbridge-provider-choice" data-provider="cloudflare-named" role="radio" id="namedProvider" type="button">
+          <button class="agentbridge-provider-choice" data-provider="cloudflare-named" role="radio" id="namedProvider" type="button" disabled>
             <div class="agentbridge-provider-header">
               <span class="agentbridge-provider-title">${t("namedTitle")}</span>
               <span class="agentbridge-provider-badge">${t("fixedAddress")}</span>
@@ -675,7 +691,7 @@ private renderHtml(): string {
               <li>${t("namedFactConfig")}</li>
             </ul>
           </button>
-          <button class="agentbridge-provider-choice" data-provider="ngrok" role="radio" id="ngrokProvider" type="button">
+          <button class="agentbridge-provider-choice" data-provider="ngrok" role="radio" id="ngrokProvider" type="button" disabled>
             <div class="agentbridge-provider-header">
               <span class="agentbridge-provider-title">${t("ngrokTitle")}</span>
               <span class="agentbridge-provider-badge">${t("fixedAddress")}</span>
@@ -693,7 +709,7 @@ private renderHtml(): string {
 
       <div class="agentbridge-field" id="domainField">
         <label class="agentbridge-label">${t("ngrokDomainLabel")}</label>
-        <input class="agentbridge-input" id="domainInput" type="text" placeholder="${t("ngrokDomainPlaceholder")}" spellcheck="false">
+        <input class="agentbridge-input" id="domainInput" type="text" placeholder="${t("ngrokDomainPlaceholder")}" spellcheck="false" disabled>
         <div class="agentbridge-help">${t("ngrokDomainHelp")}</div>
       </div>
 
@@ -702,29 +718,29 @@ private renderHtml(): string {
         <div class="agentbridge-named-grid">
           <div class="agentbridge-field">
             <label class="agentbridge-label">${t("publicHostname")}</label>
-            <input class="agentbridge-input" id="namedDomainInput" type="text" placeholder="${t("namedDomainPlaceholder")}" spellcheck="false">
+            <input class="agentbridge-input" id="namedDomainInput" type="text" placeholder="${t("namedDomainPlaceholder")}" spellcheck="false" disabled>
           </div>
           <div class="agentbridge-field">
             <label class="agentbridge-label">${t("tunnelToken")}</label>
-            <input class="agentbridge-input" id="namedTokenInput" type="password" placeholder="${t("pasteTokenPlaceholder")}" spellcheck="false" autocomplete="off">
+            <input class="agentbridge-input" id="namedTokenInput" type="password" placeholder="${t("pasteTokenPlaceholder")}" spellcheck="false" autocomplete="off" disabled>
             <div class="agentbridge-help" id="namedTokenStatus"></div>
           </div>
           <div class="agentbridge-field">
             <label class="agentbridge-label">${t("fixedLocalPort")}</label>
-            <input class="agentbridge-input" id="namedPortInput" type="number" min="1024" max="65535" step="1">
+            <input class="agentbridge-input" id="namedPortInput" type="number" min="1024" max="65535" step="1" disabled>
           </div>
           <div class="agentbridge-field">
             <label class="agentbridge-label">${t("serviceUrlLabel")}</label>
             <div class="agentbridge-named-origin-row">
               <input class="agentbridge-input" id="namedOriginValue" type="text" readonly>
-              <button class="agentbridge-copy-url" id="copyOriginButton">${t("copy")}</button>
+              <button class="agentbridge-copy-url" id="copyOriginButton" disabled>${t("copy")}</button>
             </div>
           </div>
         </div>
         <div class="agentbridge-help">${t("namedHelp")}</div>
         <div class="agentbridge-controls">
-          <button class="primary" id="saveNamedTunnelButton">${t("saveNamedTunnel")}</button>
-          <button class="secondary" id="clearNamedTunnelTokenButton">${t("clearToken")}</button>
+          <button class="primary" id="saveNamedTunnelButton" disabled>${t("saveNamedTunnel")}</button>
+          <button class="secondary" id="clearNamedTunnelTokenButton" disabled>${t("clearToken")}</button>
         </div>
       </div>
 
@@ -735,10 +751,11 @@ private renderHtml(): string {
             <div class="agentbridge-tunnel-state" id="tunnelState">${t("notCheckedTunnel")}</div>
           </div>
           <div class="agentbridge-controls agentbridge-tunnel-actions">
-            <button class="secondary" id="checkButton">${t("checkTunnel")}</button>
-            <button class="primary" id="installCloudflaredButton" style="display:none">${t("installCloudflared")}</button>
+            <button class="secondary" id="checkButton" disabled>${t("checkTunnel")}</button>
+            <button class="primary" id="installCloudflaredButton" style="display:none" disabled>${t("installCloudflared")}</button>
           </div>
         </div>
+        <div class="agentbridge-help" id="cloudflaredInstallerNotice" style="display:none"></div>
         <details class="agentbridge-setup" id="cloudflareSetup">
           <summary>${t("setupCloudflaredSummary")}</summary>
           <div class="agentbridge-setup-body">
@@ -802,7 +819,7 @@ private renderHtml(): string {
           <label class="agentbridge-label">${t("persistentLabel")}</label>
           <div class="agentbridge-help">${t("persistentHelp")}</div>
         </div>
-        <button class="agentbridge-switch" id="persistentModeToggle" role="switch" type="button">
+        <button class="agentbridge-switch" id="persistentModeToggle" role="switch" type="button" disabled>
           <span class="agentbridge-switch-track"></span>
         </button>
       </div>
@@ -820,14 +837,14 @@ private renderHtml(): string {
         <h4>${t("securityAccess")}</h4>
         <p class="agentbridge-help">${t("securityHelp")}</p>
         <div class="agentbridge-controls">
-          <button class="secondary" id="rotateButton">${t("rotateEndpoint")}</button>
+          <button class="secondary" id="rotateButton" disabled>${t("rotateEndpoint")}</button>
         </div>
         <div class="agentbridge-persistent-row" style="margin-top:10px;">
           <div class="agentbridge-persistent-text">
             <label class="agentbridge-label">${t("readOnlyLabel")}</label>
             <div class="agentbridge-help">${t("readOnlyHelp")}</div>
           </div>
-          <button class="agentbridge-switch" id="readOnlyToggle" role="switch" type="button">
+          <button class="agentbridge-switch" id="readOnlyToggle" role="switch" type="button" disabled>
             <span class="agentbridge-switch-track"></span>
           </button>
         </div>
@@ -844,10 +861,10 @@ private renderHtml(): string {
           <div class="agentbridge-static-value" id="managedShellCurrentLabel">${t("reading")}</div>
         </div>
         <div class="agentbridge-controls" style="display:flex; flex-direction:column; gap:8px; margin-top:8px;">
-          <input id="managedShellInput" type="text" placeholder="${t("managedShellPlaceholder")}" style="width:100%; box-sizing:border-box; padding:6px 8px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent)); border-radius:2px;" />
+          <input id="managedShellInput" type="text" placeholder="${t("managedShellPlaceholder")}" style="width:100%; box-sizing:border-box; padding:6px 8px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent)); border-radius:2px;" disabled />
           <div style="display:flex; gap:8px;">
-            <button class="secondary" id="managedShellSaveButton">${t("save")}</button>
-            <button class="secondary" id="managedShellResetButton">${t("resetToDefault")}</button>
+            <button class="secondary" id="managedShellSaveButton" disabled>${t("save")}</button>
+            <button class="secondary" id="managedShellResetButton" disabled>${t("resetToDefault")}</button>
           </div>
           <div id="managedShellWarning" style="color:var(--vscode-errorForeground); display:none; font-size:11px; line-height:1.4;"></div>
         </div>
@@ -856,9 +873,9 @@ private renderHtml(): string {
         <h4>${t("openMode")}</h4>
         <p class="agentbridge-help">${t("openModeHelp")}</p>
         <div class="agentbridge-controls" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">
-          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserAuto" role="radio" aria-checked="true">${t("smart")}</button>
-          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserAll" role="radio" aria-checked="false">${t("embedAll")}</button>
-          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserExternal" role="radio" aria-checked="false">${t("externalAll")}</button>
+          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserAuto" role="radio" aria-checked="true" disabled>${t("smart")}</button>
+          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserAll" role="radio" aria-checked="false" disabled>${t("embedAll")}</button>
+          <button class="secondary agentbridge-oib-radio" id="openInternalBrowserExternal" role="radio" aria-checked="false" disabled>${t("externalAll")}</button>
         </div>
       </div>
     </div>
@@ -880,7 +897,7 @@ private renderHtml(): string {
           <span class="agentbridge-session-connection-description" id="connectionDescription">${t("startToMonitor")}</span>
         </div>
         <div class="agentbridge-session-connection-actions">
-          <button class="primary" id="sessionStartStopButton">${t("connect")}</button>
+          <button class="primary" id="sessionStartStopButton" disabled>${t("connect")}</button>
           <button class="secondary" id="sessionCollapseButton" title="${t("collapseTitle")}">▾</button>
         </div>
       </div>
@@ -1213,10 +1230,15 @@ private renderHtml(): string {
   }
 
   function updateSessionStartStopControl(status) {
+    const statusLoaded = status !== null;
     const state = status && status.state ? status.state : 'stopped';
     const cloudflaredInstallInProgress = installingCloudflared || (status && status.cloudflaredInstalling === true);
+    const tunnelCheckInProgress = status && status.tunnelChecking === true;
+    const isCloudflare = status && (status.tunnelProvider === 'cloudflare' || status.tunnelProvider === 'cloudflare-named');
+    const cloudflareStartBlocked = state !== 'running' && isCloudflare
+      && (status.tunnelChecked !== true || status.tunnelInstalled !== true || status.tunnelConfigValid !== true);
     const startStop = $('sessionStartStopButton');
-    startStop.disabled = busy || cloudflaredInstallInProgress || state === 'starting';
+    startStop.disabled = !statusLoaded || busy || cloudflaredInstallInProgress || tunnelCheckInProgress || state === 'starting' || cloudflareStartBlocked;
     startStop.textContent = state === 'running' ? t('stop') : state === 'starting' ? t('starting') : t('connect');
   }
 
@@ -1302,6 +1324,30 @@ private renderHtml(): string {
     }
   }
 
+  function renderCloudflaredInstallerNotice(status, isCloudflare) {
+    const notice = $('cloudflaredInstallerNotice');
+    if (!isCloudflare || status.tunnelInstalled === true) {
+      notice.style.display = 'none';
+      notice.textContent = '';
+      return;
+    }
+    const outcome = status.lastCloudflaredInstallResult && status.lastCloudflaredInstallResult.code;
+    let message = outcome === 'permission-denied' ? t('cloudflaredInstallPermissionDeniedNotice')
+      : outcome === 'cancelled' ? t('cloudflaredInstallCancelled')
+      : outcome === 'command-failed' ? t('cloudflaredInstallCommandFailedNotice')
+      : outcome === 'verification-failed' ? t('cloudflaredInstallVerificationFailedNotice')
+      : status.tunnelChecking ? t('checkingTunnel')
+      : status.cloudflaredInstallerAvailability === 'available'
+        ? (status.cloudflaredInstaller === 'winget' ? t('wingetInstallerAvailable') : t('homebrewInstallerAvailable'))
+        : status.cloudflaredInstallerAvailability === 'unavailable'
+          ? (status.cloudflaredInstaller === 'winget' ? t('wingetInstallerUnavailable') : t('homebrewInstallerUnavailable'))
+          : status.cloudflaredInstallerAvailability === 'manual-only'
+            ? t('cloudflaredManualInstallerOnly')
+            : t('cloudflaredInstallerUnchecked');
+    notice.textContent = message;
+    notice.style.display = '';
+  }
+
   function renderStatus(status, persistentMode) {
     renderSession(status);
     const isNgrok = status.tunnelProvider === 'ngrok';
@@ -1326,16 +1372,23 @@ private renderHtml(): string {
     }
 
     const providerDomainMissing = isNgrok ? !status.configuredDomain : isNamed ? !status.configuredNamedDomain : false;
-    const connectionNeedsAttention = status.state === 'error' || status.tunnelInstalled !== true || status.tunnelConfigValid !== true || providerDomainMissing;
+    const cloudflareNotChecked = (isQuick || isNamed) && status.tunnelChecked !== true;
+    const connectionNeedsAttention = status.state === 'error' || cloudflareNotChecked || status.tunnelInstalled !== true || status.tunnelConfigValid !== true || providerDomainMissing;
     if (connectionNeedsAttention) $('connectionCard').open = true;
     const connectionState = status.state === 'error' ? 'error' : connectionNeedsAttention ? 'stopped' : 'running';
     renderStateBadge($('connectionBadge'), connectionState);
     if (status.state === 'error') {
       $('connectionBadge').textContent = t('needsAttention');
       $('connectionDetails').textContent = t('bridgeConnectionNeedsAttention');
-    } else if (status.tunnelInstalled === undefined) {
+    } else if (status.tunnelChecking) {
       $('connectionBadge').textContent = t('checking');
       $('connectionDetails').textContent = t('checkingTunnel');
+    } else if (cloudflareNotChecked) {
+      $('connectionBadge').textContent = t('needsAttention');
+      $('connectionDetails').textContent = t('cloudflaredInstallerUnchecked');
+    } else if (status.tunnelInstalled === undefined) {
+      $('connectionBadge').textContent = t('checking');
+      $('connectionDetails').textContent = t('notCheckedTunnelClient');
     } else if (!status.tunnelInstalled) {
       $('connectionBadge').textContent = t('needsConfig');
       $('connectionDetails').textContent = isQuick || isNamed ? t('cloudflaredNotInstalled') : t('ngrokNotInstalled');
@@ -1352,7 +1405,9 @@ private renderHtml(): string {
         : t('ngrokReady', status.configuredDomain);
     }
 
-    if (status.tunnelInstalled === undefined) {
+    if (status.tunnelChecking) {
+      $('tunnelState').textContent = t('checkingTunnel');
+    } else if (status.tunnelInstalled === undefined || cloudflareNotChecked) {
       $('tunnelState').textContent = t('notCheckedTunnelClient');
     } else if (!status.tunnelInstalled) {
       $('tunnelState').textContent = isQuick || isNamed ? t('cloudflaredNeedsSetup') : t('ngrokNeedsSetup');
@@ -1364,12 +1419,14 @@ private renderHtml(): string {
       $('tunnelState').textContent = t('readySuffix', (status.tunnelVersion || (isQuick || isNamed ? 'cloudflared' : 'ngrok')));
     }
 
-    const needsTunnelSetup = status.tunnelInstalled === false || status.tunnelConfigValid === false || providerDomainMissing;
+    const needsTunnelSetup = cloudflareNotChecked || status.tunnelInstalled === false || status.tunnelConfigValid === false || providerDomainMissing;
     $('tunnelSetupPanel').classList.toggle('needs-attention', needsTunnelSetup);
     $('cloudflareSetup').style.display = isQuick ? '' : 'none';
     $('cloudflareNamedSetup').style.display = isNamed ? '' : 'none';
     $('ngrokSetup').style.display = isNgrok ? '' : 'none';
-    $('installCloudflaredButton').style.display = canAutoInstallCloudflared && (isQuick || isNamed) && status.tunnelInstalled === false ? '' : 'none';
+    $('installCloudflaredButton').style.display = canAutoInstallCloudflared && (isQuick || isNamed) && status.tunnelInstalled === false && status.cloudflaredInstallerAvailability === 'available' ? '' : 'none';
+    $('checkButton').textContent = status.tunnelChecking ? t('checking') : t('checkTunnel');
+    renderCloudflaredInstallerNotice(status, isQuick || isNamed);
     $('cloudflareSetup').querySelector('summary').textContent = needsTunnelSetup ? t('setupCloudflaredSummary') : t('cloudflaredHelpSummary');
     $('ngrokSetup').querySelector('summary').textContent = needsTunnelSetup ? t('setupNgrokSummary') : t('ngrokHelpSummary');
     $('cloudflareNamedSetup').querySelector('summary').textContent = needsTunnelSetup ? t('setupNamedSummary') : t('namedHelpSummary');
@@ -1455,35 +1512,47 @@ private renderHtml(): string {
   }
 
   function updateControls() {
+    const statusLoaded = lastStatus !== null;
     const running = lastStatus && lastStatus.state === 'running';
     const starting = lastStatus && lastStatus.state === 'starting';
     const isNgrok = lastStatus && lastStatus.tunnelProvider === 'ngrok';
     const isNamed = lastStatus && lastStatus.tunnelProvider === 'cloudflare-named';
     const isQuick = lastStatus && lastStatus.tunnelProvider === 'cloudflare';
     const cloudflaredInstallInProgress = installingCloudflared || (lastStatus && lastStatus.cloudflaredInstalling === true);
+    const tunnelChecking = lastStatus && lastStatus.tunnelChecking === true;
+    const tunnelOperationBusy = busy || cloudflaredInstallInProgress || tunnelChecking;
+    const cloudflareStartBlocked = !running && (isQuick || isNamed)
+      && (lastStatus.tunnelChecked !== true || lastStatus.tunnelInstalled !== true || lastStatus.tunnelConfigValid !== true);
 
-    $('quickProvider').disabled = busy || cloudflaredInstallInProgress || running || starting;
-    $('namedProvider').disabled = busy || cloudflaredInstallInProgress || running || starting;
-    $('ngrokProvider').disabled = busy || cloudflaredInstallInProgress || running || starting;
-    $('domainInput').disabled = busy || running || starting || !isNgrok;
-    $('namedDomainInput').disabled = busy || running || starting || !isNamed;
-    $('namedTokenInput').disabled = busy || running || starting || !isNamed;
-    $('namedPortInput').disabled = busy || running || starting || !isNamed;
-    $('copyOriginButton').disabled = !$('namedOriginValue').value;
-    $('saveNamedTunnelButton').disabled = busy || running || starting || !isNamed || !$('namedDomainInput').value.trim() || !Number.isInteger(Number($('namedPortInput').value));
-    $('clearNamedTunnelTokenButton').disabled = busy || running || starting || !isNamed || lastStatus.namedTunnelTokenConfigured !== true;
-    $('checkButton').disabled = busy || cloudflaredInstallInProgress || starting;
-    $('installCloudflaredButton').disabled = busy || cloudflaredInstallInProgress || running || starting || !canAutoInstallCloudflared || !(isQuick || isNamed) || lastStatus.tunnelInstalled === true;
+    $('quickProvider').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
+    $('namedProvider').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
+    $('ngrokProvider').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
+    $('domainInput').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNgrok;
+    $('namedDomainInput').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed;
+    $('namedTokenInput').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed;
+    $('namedPortInput').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed;
+    $('copyOriginButton').disabled = !statusLoaded || !$('namedOriginValue').value;
+    $('saveNamedTunnelButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed || !$('namedDomainInput').value.trim() || !Number.isInteger(Number($('namedPortInput').value));
+    $('clearNamedTunnelTokenButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed || lastStatus.namedTunnelTokenConfigured !== true;
+    $('checkButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
+    $('installCloudflaredButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !canAutoInstallCloudflared || !(isQuick || isNamed) || lastStatus.tunnelInstalled !== false || lastStatus.cloudflaredInstallerAvailability !== 'available';
     $('installCloudflaredButton').textContent = cloudflaredInstallInProgress ? t('installing') : t('installCloudflared');
-    $('rotateButton').disabled = busy || running || starting;
-    $('startStopButton').disabled = busy || cloudflaredInstallInProgress || starting || (!running && busy);
+    $('rotateButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
+    $('startStopButton').disabled = !statusLoaded || tunnelOperationBusy || starting || cloudflareStartBlocked;
     $('startStopButton').textContent = running ? t('stopBridge') : starting ? t('starting') : t('startBridge');
-    $('persistentModeToggle').disabled = busy;
+    $('persistentModeToggle').disabled = !statusLoaded || busy || cloudflaredInstallInProgress;
+    $('readOnlyToggle').disabled = !statusLoaded || busy;
+    $('managedShellInput').disabled = !statusLoaded || busy;
+    $('managedShellSaveButton').disabled = !statusLoaded || busy;
+    $('managedShellResetButton').disabled = !statusLoaded || busy;
+    $('openInternalBrowserAuto').disabled = !statusLoaded || busy;
+    $('openInternalBrowserAll').disabled = !statusLoaded || busy;
+    $('openInternalBrowserExternal').disabled = !statusLoaded || busy;
     updateSessionStartStopControl(lastStatus);
   }
 
   function selectTunnelProvider(provider) {
-    if (busy || (lastStatus && (lastStatus.state === 'running' || lastStatus.state === 'starting' || lastStatus.tunnelProvider === provider))) return;
+    if (!lastStatus || busy || lastStatus.tunnelChecking || lastStatus.cloudflaredInstalling || lastStatus.state === 'running' || lastStatus.state === 'starting' || lastStatus.tunnelProvider === provider) return;
     busy = true;
     domainInputDirty = false;
     namedTunnelInputDirty = false;
@@ -1540,14 +1609,14 @@ private renderHtml(): string {
   }
 
   function toggleBridge() {
-    if (busy) return;
-    if (lastStatus && lastStatus.state === 'running') {
+    if (busy || !lastStatus || lastStatus.tunnelChecking || lastStatus.cloudflaredInstalling) return;
+    if (lastStatus.state === 'running') {
       busy = true;
       updateControls();
       vscode.postMessage({ type: 'stop' });
       return;
     }
-    const provider = (lastStatus && lastStatus.tunnelProvider) || 'cloudflare';
+    const provider = lastStatus.tunnelProvider;
     const domain = $('domainInput').value.trim();
     if (provider === 'ngrok' && !domain) {
       $('connectionCard').open = true;
@@ -1555,10 +1624,20 @@ private renderHtml(): string {
       $('domainInput').focus();
       return;
     }
-    if (provider === 'cloudflare-named' && (!lastStatus || !lastStatus.configuredNamedDomain || !lastStatus.namedTunnelTokenConfigured)) {
+    if (provider === 'cloudflare-named' && (!lastStatus.configuredNamedDomain || !lastStatus.namedTunnelTokenConfigured)) {
       $('connectionCard').open = true;
       renderLocalError(t('saveNamedConfigFirst'));
-      (lastStatus && lastStatus.configuredNamedDomain ? $('namedTokenInput') : $('namedDomainInput')).focus();
+      (lastStatus.configuredNamedDomain ? $('namedTokenInput') : $('namedDomainInput')).focus();
+      return;
+    }
+    if ((provider === 'cloudflare' || provider === 'cloudflare-named') && lastStatus.tunnelChecked !== true) {
+      $('connectionCard').open = true;
+      renderLocalError(t('checkCloudflareBeforeStart'));
+      return;
+    }
+    if ((provider === 'cloudflare' || provider === 'cloudflare-named') && (lastStatus.tunnelInstalled !== true || lastStatus.tunnelConfigValid !== true)) {
+      $('connectionCard').open = true;
+      renderLocalError(t('cloudflareCheckNotReady'));
       return;
     }
     busy = true;
@@ -1577,7 +1656,10 @@ private renderHtml(): string {
   $('copyUrlButton').addEventListener('click', () => {
     if (lastStatus && lastStatus.publicUrl) vscode.postMessage({ type: 'copy', text: lastStatus.publicUrl });
   });
-  $('copyOriginButton').addEventListener('click', () => vscode.postMessage({ type: 'copy', text: $('namedOriginValue').value }));
+  $('copyOriginButton').addEventListener('click', () => {
+    if (!lastStatus) return;
+    vscode.postMessage({ type: 'copy', text: $('namedOriginValue').value });
+  });
   $('openChatGptButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://chatgpt.com/' }));
   $('openArenaButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://arena.ai/agent' }));
   $('openWorkBuddyButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://www.workbuddy.cn/app' }));
@@ -1592,30 +1674,33 @@ private renderHtml(): string {
   });
   $('copyPromptButton').addEventListener('click', () => vscode.postMessage({ type: 'copyPrompt' }));
   $('checkButton').addEventListener('click', () => {
+    if (!lastStatus || busy || lastStatus.tunnelChecking || lastStatus.cloudflaredInstalling || lastStatus.state === 'running' || lastStatus.state === 'starting') return;
     busy = true;
     updateControls();
     vscode.postMessage({ type: 'checkTunnel' });
   });
   $('installCloudflaredButton').addEventListener('click', () => {
-    if (busy || (lastStatus && lastStatus.cloudflaredInstalling === true)) return;
+    if (!lastStatus || busy || lastStatus.tunnelChecking || lastStatus.cloudflaredInstalling === true || lastStatus.cloudflaredInstallerAvailability !== 'available') return;
     busy = true;
     installingCloudflared = true;
     updateControls();
     vscode.postMessage({ type: 'installCloudflared' });
   });
   $('rotateButton').addEventListener('click', () => {
-    if (busy) return;
+    if (!lastStatus || busy || lastStatus.tunnelChecking) return;
     busy = true;
     updateControls();
     vscode.postMessage({ type: 'rotateEndpoint' });
   });
   $('persistentModeToggle').addEventListener('click', () => {
+    if (!lastStatus || busy || lastStatus.cloudflaredInstalling) return;
     const enabled = $('persistentModeToggle').getAttribute('aria-checked') !== 'true';
     $('persistentModeToggle').setAttribute('aria-checked', String(enabled));
     $('persistentModeToggle').title = enabled ? t('persistentOnTitle') : t('persistentOffTitle');
     vscode.postMessage({ type: 'setPersistentMode', enabled });
   });
   $('readOnlyToggle').addEventListener('click', () => {
+    if (!lastStatus || busy) return;
     const enabled = $('readOnlyToggle').getAttribute('aria-checked') !== 'true';
     $('readOnlyToggle').setAttribute('aria-checked', String(enabled));
     $('readOnlyToggle').title = enabled ? t('readOnlyOnTitle') : t('readOnlyOffTitle');
@@ -1626,6 +1711,7 @@ private renderHtml(): string {
     vscode.postMessage({ type: 'setReadOnlyMode', enabled });
   });
   $('managedShellSaveButton').addEventListener('click', () => {
+    if (!lastStatus || busy) return;
     const raw = $('managedShellInput').value.trim();
     $('managedShellInput').value = '';
     vscode.postMessage({ type: 'configureManagedShell', path: raw });
@@ -1637,10 +1723,14 @@ private renderHtml(): string {
     }
   });
   $('managedShellResetButton').addEventListener('click', () => {
+    if (!lastStatus || busy) return;
     $('managedShellInput').value = '';
     vscode.postMessage({ type: 'resetManagedShell' });
   });
-  const setOib = (v) => vscode.postMessage({ type: 'setOpenInternalBrowser', value: v });
+  const setOib = (v) => {
+    if (!lastStatus || busy) return;
+    vscode.postMessage({ type: 'setOpenInternalBrowser', value: v });
+  };
   $('openInternalBrowserAuto').addEventListener('click', () => setOib('auto'));
   $('openInternalBrowserAll').addEventListener('click', () => setOib('all'));
   $('openInternalBrowserExternal').addEventListener('click', () => setOib('external'));
@@ -1707,10 +1797,7 @@ private renderHtml(): string {
     }
   });
   $('sessionStartStopButton').addEventListener('click', () => {
-    if (busy || installingCloudflared || (lastStatus && lastStatus.cloudflaredInstalling === true)) return;
-    busy = true;
-    if (lastStatus && lastStatus.state === 'running') vscode.postMessage({ type: 'stop' });
-    else vscode.postMessage({ type: 'start' });
+    toggleBridge();
   });
   $('sessionCollapseButton').addEventListener('click', () => {
     footerCollapsed = !footerCollapsed;
@@ -1728,7 +1815,12 @@ private renderHtml(): string {
     const message = event.data;
     if (message && message.type === 'status' && message.status) {
       refreshStatus(message.status, message.persistentMode);
-      if (!installingCloudflared) resetBusy();
+    } else if (message && message.type === 'operationFinished') {
+      try {
+        if (message.status) refreshStatus(message.status, message.persistentMode);
+      } finally {
+        if (!installingCloudflared) resetBusy();
+      }
     } else if (message && message.type === 'cloudflaredInstallFinished') {
       try {
         if (message.status) refreshStatus(message.status, message.persistentMode);
@@ -1744,6 +1836,7 @@ private renderHtml(): string {
       if (Number.isFinite(started)) el.textContent = formatDuration(now - started);
     });
   }, 1000);
+  updateControls();
   vscode.postMessage({ type: 'refresh' });
 })();
 </script>

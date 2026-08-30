@@ -4,7 +4,9 @@
 
 ## Step 1 — Install or update cloudflared
 
-Open any Windows PowerShell terminal (Start menu → "PowerShell" / Windows Terminal / VS Code integrated terminal) and paste:
+The recommended panel flow is to select **Cloudflare Named Tunnel** and click **Check Tunnel** first. If `cloudflared` is missing, AgentBridge offers one-click installation only after confirming Winget (Windows) or Homebrew (macOS) is available; installation success is verified automatically. Linux and systems without a supported installer use the Cloudflare manual installation link in the panel.
+
+For manual Windows installation, open PowerShell or Windows Terminal and paste:
 
 ```powershell
 winget install --id Cloudflare.cloudflared --exact --accept-package-agreements --accept-source-agreements
@@ -71,16 +73,17 @@ Notes:
 | Fixed local port | `48271` (default) | Must match Step 3's Port |
 | Cloudflare Service URL | Shown automatically, no change needed | `http://127.0.0.1:<port>` |
 
-Click **Save Named Tunnel**.
+Click **Save Named Tunnel**. Saving or changing this configuration requires a new tunnel check.
 
 ## Start Bridge + verify
 
-1. Click `Start Bridge`; the status turns online and the public URL is:
+1. Click **Check Tunnel**. If installation is offered, complete it and wait for automatic verification; resolve any configuration warning before continuing.
+2. Click `Start Bridge`; the status turns online and the public URL is:
 
    ```
    https://mcp.example.com/mcp/<routeToken>
    ```
-2. Verify (use `curl.exe` in PowerShell, on a single line; the `\` line continuation does not work in PowerShell):
+3. Verify (use `curl.exe` in PowerShell, on a single line; the `\` line continuation does not work in PowerShell):
 
    ```powershell
    curl.exe -i -X POST "https://mcp.example.com/mcp/<routeToken>" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'

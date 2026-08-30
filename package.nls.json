@@ -1,0 +1,13 @@
+{
+  "agentbridge.command.start.title": "AgentBridge: Start",
+  "agentbridge.command.stop.title": "AgentBridge: Stop",
+  "agentbridge.command.checkTunnel.title": "AgentBridge: Check Tunnel",
+  "agentbridge.command.installCloudflared.title": "AgentBridge: Install cloudflared",
+  "agentbridge.command.configureNamedTunnel.title": "AgentBridge: Configure Cloudflare Named Tunnel",
+  "agentbridge.command.clearNamedTunnelToken.title": "AgentBridge: Clear Cloudflare Tunnel Token",
+  "agentbridge.command.setTunnelProvider.title": "AgentBridge: Set Tunnel Provider",
+  "agentbridge.command.rotateEndpoint.title": "AgentBridge: Rotate Endpoint",
+  "agentbridge.command.showOutput.title": "AgentBridge: Show Output",
+  "agentbridge.command.configureNgrokDomain.title": "AgentBridge: Configure ngrok Domain",
+  "agentbridge.command.checkNgrok.title": "AgentBridge: Check ngrok"
+}

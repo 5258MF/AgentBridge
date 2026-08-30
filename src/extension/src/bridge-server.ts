@@ -62,6 +62,84 @@ const CLOUDFLARED_WINGET_PACKAGE = "Cloudflare.cloudflared";
 const DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT = 48271;
 
 export type BridgeTunnelProvider = "cloudflare" | "cloudflare-named" | "ngrok";
+export type CloudflaredInstaller = "winget" | "homebrew" | "manual";
+export type CloudflaredInstallerAvailability = "unchecked" | "available" | "unavailable" | "manual-only";
+export type CloudflaredInstallResultCode =
+  | "success"
+  | "installer-unavailable"
+  | "permission-denied"
+  | "cancelled"
+  | "command-failed"
+  | "verification-failed";
+
+export interface CloudflaredInstallResult {
+  readonly code: CloudflaredInstallResultCode;
+  readonly installer: CloudflaredInstaller;
+  readonly version?: string;
+}
+
+export interface BridgeStartOptions {
+  readonly automaticCheck?: boolean;
+}
+
+export class CloudflaredInstallError extends Error {
+  constructor(
+    message: string,
+    readonly result: CloudflaredInstallResult,
+  ) {
+    super(message);
+    this.name = "CloudflaredInstallError";
+  }
+}
+
+function platformCloudflaredInstaller(): CloudflaredInstaller {
+  return process.platform === "win32" ? "winget" : process.platform === "darwin" ? "homebrew" : "manual";
+}
+
+function initialCloudflaredInstallerAvailability(): CloudflaredInstallerAvailability {
+  return process.platform === "win32" || process.platform === "darwin" ? "unchecked" : "manual-only";
+}
+
+type ProcessExecutionError = Error & {
+  code?: string | number;
+  signal?: string;
+  killed?: boolean;
+  stdout?: string | Buffer;
+  stderr?: string | Buffer;
+};
+
+function processExecutionDetails(error: unknown): string {
+  const details = error as ProcessExecutionError;
+  return [details.message, String(details.stdout ?? "").trim(), String(details.stderr ?? "").trim()].filter(Boolean).join("\n");
+}
+
+function classifyCloudflaredInstallFailure(error: unknown): Exclude<CloudflaredInstallResultCode, "success" | "installer-unavailable" | "verification-failed"> {
+  const details = error as ProcessExecutionError;
+  const combined = processExecutionDetails(error).toLowerCase();
+  const code = String(details.code ?? "").toLowerCase();
+  const signal = String(details.signal ?? "").toUpperCase();
+  if (code === "etimedout" || combined.includes("timed out") || (details.killed === true && signal === "SIGTERM")) {
+    return "command-failed";
+  }
+  if (
+    signal === "SIGINT"
+    || signal === "SIGTERM"
+    || code === "abort_err"
+    || code === "1223"
+    || combined.includes("0x800704c7")
+    || /\b(cancelled|canceled|user declined)\b|已取消|取消安装/.test(combined)
+  ) {
+    return "cancelled";
+  }
+  if (
+    code === "eacces"
+    || code === "eperm"
+    || /permission denied|access is denied|operation not permitted|administrator privileges|requires elevation|拒绝访问|权限不足|需要管理员权限/.test(combined)
+  ) {
+    return "permission-denied";
+  }
+  return "command-failed";
+}
 
 const BRIDGE_SERVER_INSTRUCTIONS = `You are connected to the currently open AgentBridge workspace.
 
@@ -248,7 +326,12 @@ export interface BridgeStatus {
   readonly localUrl?: string;
   readonly publicUrl?: string;
   readonly localPort?: number;
+  readonly tunnelChecking: boolean;
+  readonly tunnelChecked: boolean;
   readonly cloudflaredInstalling: boolean;
+  readonly cloudflaredInstaller: CloudflaredInstaller;
+  readonly cloudflaredInstallerAvailability: CloudflaredInstallerAvailability;
+  readonly lastCloudflaredInstallResult?: CloudflaredInstallResult;
   readonly tunnelInstalled?: boolean;
   readonly tunnelVersion?: string;
   readonly tunnelConfigValid?: boolean;
@@ -827,6 +910,11 @@ export class BridgeManager implements vscode.Disposable {
   private tunnelVersion: string | undefined;
   private tunnelConfigValid: boolean | undefined;
   private cloudflaredExecutable = "cloudflared";
+  private cloudflaredInstaller: CloudflaredInstaller = platformCloudflaredInstaller();
+  private cloudflaredInstallerAvailability: CloudflaredInstallerAvailability = initialCloudflaredInstallerAvailability();
+  private cloudflaredInstallerExecutable: string | undefined;
+  private lastCloudflaredInstallResult: CloudflaredInstallResult | undefined;
+  private tunnelChecked = false;
   private activeRequests = 0;
   private readonly activities: BridgeActivity[] = [];
   private todos: BridgeTodo[] = [];
@@ -839,6 +927,7 @@ export class BridgeManager implements vscode.Disposable {
   private lastTool: string | undefined;
   private lastToolAt: string | undefined;
   private startPromise: Promise<BridgeStatus> | undefined;
+  private tunnelCheckPromise: Promise<BridgeStatus> | undefined;
   private installCloudflaredPromise: Promise<BridgeStatus> | undefined;
   private sessionPruneTimer: ReturnType<typeof setInterval> | undefined;
   private tunnelRecoveryPromise: Promise<void> | undefined;
@@ -868,12 +957,30 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   getStatus(): BridgeStatus {
-    if (this.state !== "running" && this.state !== "starting") {
+    if (
+      this.state !== "running"
+      && this.state !== "starting"
+      && !this.tunnelCheckPromise
+      && !this.installCloudflaredPromise
+    ) {
+      const previousProvider = this.tunnelProvider;
+      const previousNamedDomain = this.configuredNamedDomain;
+      const previousNamedLocalPort = this.namedTunnelLocalPort;
       this.tunnelProvider = this.readTunnelProvider();
       this.restoreConfiguredDomain();
       this.restoreConfiguredNamedDomain();
       this.namedTunnelLocalPort = this.readNamedTunnelLocalPort();
       this.domain = this.configuredDomainForProvider(this.tunnelProvider);
+      const providerChanged = previousProvider !== this.tunnelProvider;
+      const namedConfigurationChanged = this.tunnelProvider === "cloudflare-named"
+        && (previousNamedDomain !== this.configuredNamedDomain || previousNamedLocalPort !== this.namedTunnelLocalPort);
+      if (providerChanged || namedConfigurationChanged) {
+        this.tunnelChecked = false;
+        this.tunnelInstalled = providerChanged ? undefined : this.tunnelInstalled;
+        this.tunnelVersion = providerChanged ? undefined : this.tunnelVersion;
+        this.tunnelConfigValid = undefined;
+        this.lastError = undefined;
+      }
     }
     const localUrl = this.localPort && this.routeToken ? `http://127.0.0.1:${this.localPort}/mcp/${this.routeToken}` : undefined;
     const publicUrl = this.domain && this.routeToken ? `https://${this.domain}/mcp/${this.routeToken}` : undefined;
@@ -890,7 +997,12 @@ export class BridgeManager implements vscode.Disposable {
       localUrl,
       publicUrl,
       localPort: this.localPort,
+      tunnelChecking: Boolean(this.tunnelCheckPromise),
+      tunnelChecked: this.tunnelChecked,
       cloudflaredInstalling: Boolean(this.installCloudflaredPromise),
+      cloudflaredInstaller: this.cloudflaredInstaller,
+      cloudflaredInstallerAvailability: this.cloudflaredInstallerAvailability,
+      lastCloudflaredInstallResult: this.lastCloudflaredInstallResult,
       tunnelInstalled: this.tunnelInstalled,
       tunnelVersion: this.tunnelVersion,
       tunnelConfigValid: this.tunnelConfigValid,
@@ -1023,10 +1135,12 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   async configure(domain: string): Promise<BridgeStatus> {
+    if (this.tunnelCheckPromise) throw new Error(t("tunnelCheckBusy"));
     if (this.state === "running" || this.state === "starting") {
       throw new Error("Stop the Bridge before changing its ngrok domain.");
     }
     await this.persistDomain(domain);
+    this.tunnelChecked = false;
     this.lastError = undefined;
     return this.getStatus();
   }
@@ -1061,6 +1175,7 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   async configureNamedTunnel(input: { domain: string; token?: string; localPort: number }): Promise<BridgeStatus> {
+    if (this.tunnelCheckPromise) throw new Error(t("tunnelCheckBusy"));
     if (this.state === "running" || this.state === "starting") {
       throw new Error("Stop the Bridge before changing its Cloudflare Named Tunnel configuration.");
     }
@@ -1079,17 +1194,20 @@ export class BridgeManager implements vscode.Disposable {
       await this.context.secrets.store(CLOUDFLARE_NAMED_TOKEN_SECRET, token);
     }
     if (this.tunnelProvider === "cloudflare-named") this.domain = domain;
+    this.tunnelChecked = false;
     this.tunnelConfigValid = undefined;
     this.lastError = undefined;
-    return await this.checkNamedTunnel();
+    return this.getStatus();
   }
 
   async clearNamedTunnelToken(): Promise<BridgeStatus> {
+    if (this.tunnelCheckPromise) throw new Error(t("tunnelCheckBusy"));
     if (this.state === "running" || this.state === "starting") {
       throw new Error("Stop the Bridge before clearing its Cloudflare Tunnel Token.");
     }
     this.namedTunnelToken = "";
     await this.context.secrets.delete(CLOUDFLARE_NAMED_TOKEN_SECRET);
+    this.tunnelChecked = false;
     this.tunnelConfigValid = false;
     this.lastError = "Cloudflare Named Tunnel Token is not configured.";
     return this.getStatus();
@@ -1099,6 +1217,7 @@ export class BridgeManager implements vscode.Disposable {
     if (this.installCloudflaredPromise) {
       throw new Error(t("cloudflaredInstallBusy"));
     }
+    if (this.tunnelCheckPromise) throw new Error(t("tunnelCheckBusy"));
     if (this.state === "running" || this.state === "starting") {
       throw new Error("Stop the Bridge before changing its tunnel provider.");
     }
@@ -1107,6 +1226,7 @@ export class BridgeManager implements vscode.Disposable {
     }
     this.tunnelProvider = provider;
     this.domain = this.configuredDomainForProvider(provider);
+    this.tunnelChecked = false;
     this.tunnelInstalled = undefined;
     this.tunnelVersion = undefined;
     this.tunnelConfigValid = undefined;
@@ -1125,15 +1245,49 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   async checkTunnel(): Promise<BridgeStatus> {
-    this.tunnelProvider = this.readTunnelProvider();
-    return this.tunnelProvider === "ngrok"
-      ? await this.checkNgrok()
+    return this.checkTunnelInternal(false);
+  }
+
+  private async checkTunnelInternal(allowDuringStart: boolean): Promise<BridgeStatus> {
+    if (this.state === "running" || (this.state === "starting" && !allowDuringStart)) {
+      throw new Error(t("stopBeforeTunnelCheck"));
+    }
+    if (this.installCloudflaredPromise) throw new Error(t("cloudflaredInstallBusy"));
+    if (this.tunnelCheckPromise) return this.tunnelCheckPromise;
+    if (!allowDuringStart) {
+      this.tunnelProvider = this.readTunnelProvider();
+      this.getStatus();
+    }
+    const checkedProvider = this.tunnelProvider;
+    const checkedNamedDomain = this.configuredNamedDomain;
+    const checkedNamedLocalPort = this.namedTunnelLocalPort;
+    this.tunnelChecked = false;
+    const check = this.tunnelProvider === "ngrok"
+      ? this.checkNgrokInternal()
       : this.tunnelProvider === "cloudflare-named"
-        ? await this.checkNamedTunnel()
-        : await this.checkCloudflared();
+        ? this.checkNamedTunnel(!allowDuringStart)
+        : this.checkCloudflared();
+    this.tunnelCheckPromise = (async () => {
+      try {
+        await check;
+        if (this.state !== "running" && this.state !== "starting") this.getStatus();
+        this.tunnelChecked = this.tunnelProvider === checkedProvider
+          && (checkedProvider !== "cloudflare-named"
+            || (this.configuredNamedDomain === checkedNamedDomain && this.namedTunnelLocalPort === checkedNamedLocalPort));
+      } finally {
+        this.tunnelCheckPromise = undefined;
+      }
+      return this.getStatus();
+    })();
+    return this.tunnelCheckPromise;
   }
 
   async checkNgrok(): Promise<BridgeStatus> {
+    if (this.readTunnelProvider() !== "ngrok") throw new Error(t("selectNgrokBeforeCheck"));
+    return this.checkTunnel();
+  }
+
+  private async checkNgrokInternal(): Promise<BridgeStatus> {
     try {
       const version = await execFileAsync("ngrok", ["version"], { windowsHide: true, timeout: 10_000 });
       this.tunnelInstalled = true;
@@ -1157,6 +1311,36 @@ export class BridgeManager implements vscode.Disposable {
     return this.getStatus();
   }
 
+  private async refreshCloudflaredInstallerAvailability(): Promise<void> {
+    this.cloudflaredInstaller = platformCloudflaredInstaller();
+    this.cloudflaredInstallerExecutable = undefined;
+    if (process.platform === "win32") {
+      try {
+        await execFileAsync("winget", ["--version"], { windowsHide: true, timeout: 10_000 });
+        this.cloudflaredInstallerAvailability = "available";
+        this.cloudflaredInstallerExecutable = "winget";
+      } catch {
+        this.cloudflaredInstallerAvailability = "unavailable";
+      }
+      return;
+    }
+    if (process.platform === "darwin") {
+      for (const candidate of ["brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew"]) {
+        try {
+          await execFileAsync(candidate, ["--version"], { timeout: 10_000 });
+          this.cloudflaredInstallerAvailability = "available";
+          this.cloudflaredInstallerExecutable = candidate;
+          return;
+        } catch {
+          // Try the next standard Homebrew location.
+        }
+      }
+      this.cloudflaredInstallerAvailability = "unavailable";
+      return;
+    }
+    this.cloudflaredInstallerAvailability = "manual-only";
+  }
+
   private async checkCloudflared(): Promise<BridgeStatus> {
     let lastError: unknown;
     for (const executable of this.cloudflaredExecutableCandidates()) {
@@ -1175,18 +1359,21 @@ export class BridgeManager implements vscode.Disposable {
     this.tunnelInstalled = false;
     this.tunnelConfigValid = false;
     this.tunnelVersion = undefined;
+    await this.refreshCloudflaredInstallerAvailability();
     this.lastError = `cloudflared was not found: ${lastError instanceof Error ? lastError.message : String(lastError ?? "not installed")}`;
     return this.getStatus();
   }
 
-  private async checkNamedTunnel(): Promise<BridgeStatus> {
+  private async checkNamedTunnel(refreshConfiguration = true): Promise<BridgeStatus> {
     await this.checkCloudflared();
     if (!this.tunnelInstalled) return this.getStatus();
 
-    this.namedTunnelToken = await this.context.secrets.get(CLOUDFLARE_NAMED_TOKEN_SECRET) ?? "";
-    this.restoreConfiguredNamedDomain();
-    this.namedTunnelLocalPort = this.readNamedTunnelLocalPort();
-    this.domain = this.configuredNamedDomain;
+    if (refreshConfiguration) {
+      this.namedTunnelToken = await this.context.secrets.get(CLOUDFLARE_NAMED_TOKEN_SECRET) ?? "";
+      this.restoreConfiguredNamedDomain();
+      this.namedTunnelLocalPort = this.readNamedTunnelLocalPort();
+      this.domain = this.configuredNamedDomain;
+    }
 
     if (!this.namedTunnelToken) {
       this.tunnelConfigValid = false;
@@ -1228,6 +1415,14 @@ export class BridgeManager implements vscode.Disposable {
     return [...new Set(candidates.filter(Boolean))];
   }
 
+  private failCloudflaredInstall(code: Exclude<CloudflaredInstallResultCode, "success">, message: string): never {
+    const result: CloudflaredInstallResult = { code, installer: this.cloudflaredInstaller };
+    this.lastCloudflaredInstallResult = result;
+    this.lastError = message;
+    this.output.appendLine(`[bridge] cloudflared install result (${code}): ${message}`);
+    throw new CloudflaredInstallError(message, result);
+  }
+
   async installCloudflared(): Promise<BridgeStatus> {
     if (this.installCloudflaredPromise) return this.installCloudflaredPromise;
     const installation = this.installCloudflaredInternal();
@@ -1243,6 +1438,7 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   private async installCloudflaredInternal(): Promise<BridgeStatus> {
+    if (this.tunnelCheckPromise) throw new Error(t("tunnelCheckBusy"));
     if (this.startPromise || this.state === "running" || this.state === "starting") {
       throw new Error(t("stopBeforeCloudflaredInstall"));
     }
@@ -1250,18 +1446,32 @@ export class BridgeManager implements vscode.Disposable {
     if (this.tunnelProvider !== "cloudflare" && this.tunnelProvider !== "cloudflare-named") {
       throw new Error(t("selectCloudflareBeforeInstall"));
     }
+    this.lastCloudflaredInstallResult = undefined;
     const existing = await this.checkCloudflared();
-    if (existing.tunnelInstalled) return this.tunnelProvider === "cloudflare-named" ? await this.checkNamedTunnel() : existing;
+    this.tunnelChecked = true;
+    if (existing.tunnelInstalled) {
+      const status = this.tunnelProvider === "cloudflare-named" ? await this.checkNamedTunnel() : existing;
+      this.lastCloudflaredInstallResult = {
+        code: "success",
+        installer: this.cloudflaredInstaller,
+        version: status.tunnelVersion,
+      };
+      return status;
+    }
+
+    if (this.cloudflaredInstallerAvailability !== "available" || !this.cloudflaredInstallerExecutable) {
+      const message = this.cloudflaredInstaller === "winget"
+        ? t("wingetNotFound")
+        : this.cloudflaredInstaller === "homebrew"
+          ? t("homebrewNotFound")
+          : t("cloudflaredAutoInstallUnavailable");
+      this.failCloudflaredInstall("installer-unavailable", message);
+    }
 
     try {
       if (process.platform === "win32") {
-        try {
-          await execFileAsync("winget", ["--version"], { windowsHide: true, timeout: 10_000 });
-        } catch {
-          throw new Error(t("wingetNotFound"));
-        }
         this.output.appendLine(`[bridge] installing cloudflared with Winget package ${CLOUDFLARED_WINGET_PACKAGE}...`);
-        const result = await execFileAsync("winget", [
+        const result = await execFileAsync(this.cloudflaredInstallerExecutable, [
           "install",
           "--id", CLOUDFLARED_WINGET_PACKAGE,
           "--exact",
@@ -1278,51 +1488,72 @@ export class BridgeManager implements vscode.Disposable {
         const output = [result.stdout, result.stderr].map((value) => String(value ?? "").trim()).filter(Boolean).join("\n");
         if (output) this.output.appendLine(`[winget] ${output}`);
       } else if (process.platform === "darwin") {
-        let brewExecutable: string | undefined;
-        for (const candidate of ["brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew"]) {
-          try {
-            await execFileAsync(candidate, ["--version"], { timeout: 10_000 });
-            brewExecutable = candidate;
-            break;
-          } catch {
-            // Try the next standard Homebrew location.
-          }
-        }
-        if (!brewExecutable) {
-          throw new Error(t("homebrewNotFound"));
-        }
-        this.output.appendLine(`[bridge] installing cloudflared with Homebrew (${brewExecutable})...`);
-        const result = await execFileAsync(brewExecutable, ["install", "cloudflared"], {
+        this.output.appendLine(`[bridge] installing cloudflared with Homebrew (${this.cloudflaredInstallerExecutable})...`);
+        const result = await execFileAsync(this.cloudflaredInstallerExecutable, ["install", "cloudflared"], {
           timeout: 15 * 60 * 1000,
           maxBuffer: 2 * 1024 * 1024,
         });
         const output = [result.stdout, result.stderr].map((value) => String(value ?? "").trim()).filter(Boolean).join("\n");
         if (output) this.output.appendLine(`[brew] ${output}`);
       } else {
-        throw new Error(t("cloudflaredAutoInstallUnavailable"));
+        this.failCloudflaredInstall("installer-unavailable", t("cloudflaredAutoInstallUnavailable"));
       }
     } catch (error) {
-      const details = error as Error & { stdout?: string | Buffer; stderr?: string | Buffer };
-      const output = [details.message, String(details.stdout ?? "").trim(), String(details.stderr ?? "").trim()].filter(Boolean).join("\n");
-      this.lastError = t("cloudflaredInstallFailed", output);
-      throw new Error(this.lastError);
+      if (error instanceof CloudflaredInstallError) throw error;
+      const outcome = classifyCloudflaredInstallFailure(error);
+      const details = processExecutionDetails(error);
+      const message = outcome === "cancelled"
+        ? t("cloudflaredInstallCancelled")
+        : outcome === "permission-denied"
+          ? t("cloudflaredInstallPermissionDenied", details)
+          : t("cloudflaredInstallCommandFailed", details);
+      this.failCloudflaredInstall(outcome, message);
     }
 
     const installed = await this.checkCloudflared();
     if (!installed.tunnelInstalled) {
-      this.lastError = t("cloudflaredInstallVerificationFailed");
-      throw new Error(this.lastError);
+      this.tunnelChecked = true;
+      this.failCloudflaredInstall("verification-failed", t("cloudflaredInstallVerificationFailed"));
     }
     this.output.appendLine(`[bridge] cloudflared installation verified: ${installed.tunnelVersion ?? "installed"}`);
-    return this.tunnelProvider === "cloudflare-named" ? await this.checkNamedTunnel() : installed;
+    const status = this.tunnelProvider === "cloudflare-named" ? await this.checkNamedTunnel() : installed;
+    this.tunnelChecked = true;
+    this.lastCloudflaredInstallResult = {
+      code: "success",
+      installer: this.cloudflaredInstaller,
+      version: status.tunnelVersion,
+    };
+    return status;
   }
 
-  async start(domain?: string): Promise<BridgeStatus> {
+  async start(domain?: string, options: BridgeStartOptions = {}): Promise<BridgeStatus> {
     if (this.installCloudflaredPromise) {
       throw new Error(t("cloudflaredInstallBusy"));
     }
     if (this.state === "running") return this.getStatus();
     if (this.startPromise) return this.startPromise;
+    // Refresh stopped-state settings before enforcing the manual check gate so an
+    // external settings.json change cannot reuse a check from the old provider/configuration.
+    this.getStatus();
+    const isCloudflare = this.tunnelProvider === "cloudflare" || this.tunnelProvider === "cloudflare-named";
+    if (options.automaticCheck) {
+      const tunnel = await this.checkTunnel();
+      if (tunnel.tunnelInstalled !== true || tunnel.tunnelConfigValid !== true) {
+        this.state = "stopped";
+        throw new Error(this.lastError ?? `${this.tunnelProvider} tunnel check did not pass.`);
+      }
+      // Another caller may have started the Bridge while this caller awaited the
+      // shared check Promise.
+      const current = this.getStatus();
+      if (current.state === "running") return current;
+      if (this.startPromise) return this.startPromise;
+    } else if (isCloudflare) {
+      if (this.tunnelCheckPromise) throw new Error(t("tunnelCheckBusy"));
+      if (!this.tunnelChecked) throw new Error(t("checkCloudflareBeforeStart"));
+      if (this.tunnelInstalled !== true || this.tunnelConfigValid !== true) {
+        throw new Error(t("cloudflareCheckNotReady"));
+      }
+    }
     // During automatic tunnel recovery the local HTTP/MCP runtime is intentionally kept alive.
     // A manual Start click must not create a second listener/tunnel while that recovery owns it.
     if (this.state === "starting" && this.httpServer) return this.getStatus();
@@ -1379,7 +1610,7 @@ export class BridgeManager implements vscode.Disposable {
       const folders = vscode.workspace.workspaceFolders;
       if (!folders?.length) throw new Error("Open a workspace folder before starting the Bridge.");
 
-      const tunnel = await this.checkTunnel();
+      const tunnel = await this.checkTunnelInternal(true);
       if (!tunnel.tunnelInstalled) throw new Error(this.lastError ?? `${this.tunnelProvider} tunnel client is not installed.`);
       if (!tunnel.tunnelConfigValid) throw new Error(this.lastError ?? `${this.tunnelProvider} tunnel configuration is invalid.`);
 
