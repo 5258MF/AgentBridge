@@ -371,8 +371,7 @@ export interface BridgeStatus {
    readonly managedShellOverrideWarning: string | null;
   /**
    * How external URL clicks in the AgentBridge panel are routed.
-   * - "auto": ChatGPT/arena.ai → VS Code Simple Browser; others → OS default browser (matches the
-   *   original ShunCode Bridge widget)
+   * - "auto": ChatGPT/arena.ai → VS Code Simple Browser; others → OS default browser
    * - "all": every external URL → VS Code Simple Browser (Cloudflare/ngrok OAuth may break in iframe)
    * - "external": every external URL → OS default browser (legacy fallback)
    * Set by `agentbridge.bridge.openInternalBrowser`; read fresh by the panel and the openExternal

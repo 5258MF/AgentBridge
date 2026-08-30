@@ -176,7 +176,7 @@
             "external"
           ],
           "enumDescriptions": [
-            "ChatGPT and arena.ai open inside the VS Code Simple Browser; other external links jump to the OS default browser. Matches the original ShunCode Bridge widget behavior.",
+            "ChatGPT and arena.ai open inside the VS Code Simple Browser; other external links jump to the OS default browser.",
             "Every external link opens inside the VS Code Simple Browser, including Cloudflare/ngrok dashboards. OAuth login flows may be blocked by iframe X-Frame-Options restrictions.",
             "Every external link jumps to the OS default browser. Equivalent to the pre-stage-14 behavior."
           ],
