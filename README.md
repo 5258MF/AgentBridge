@@ -4,6 +4,18 @@
   <img src="./media/icon.png" alt="VSC AgentBridge icon" width="128">
 </p>
 
+<p align="center">
+  <a href="https://marketplace.visualstudio.com/items?itemName=agentbridge.vsc-agentbridge">
+    <img src="https://img.shields.io/badge/VS_Marketplace-install-007ACC?style=flat-square&amp;logo=visualstudiocode&amp;logoColor=white" alt="Install from the VS Marketplace">
+  </a>
+  <a href="https://github.com/5258MF/AgentBridge/releases/latest">
+    <img src="https://img.shields.io/github/v/release/5258MF/AgentBridge?style=flat-square&amp;logo=github" alt="GitHub Release">
+  </a>
+  <a href="https://github.com/5258MF/AgentBridge/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/5258MF/AgentBridge?style=flat-square" alt="License">
+  </a>
+</p>
+
 Expose your VS Code workspace's tools — files, terminal, LSP, diagnostics, and images — to web-based AI assistants that support MCP (GPT, Arena, etc.) over a public HTTPS tunnel.
 
 > [中文文档 | README.zh-CN.md](./README.zh-CN.md)
@@ -146,4 +158,4 @@ Connecting the ChatGPT web app: see [docs/chatgpt-web-connector.md](docs/chatgpt
 
 MIT. See [LICENSE](./LICENSE) for the full text.
 
-Parts derived from `microsoft/vscode` are covered by that project's MIT license. See <https://github.com/microsoft/vscode> for details.
+Third-party notices, including the MIT terms for portions derived from `microsoft/vscode`, are listed in [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).

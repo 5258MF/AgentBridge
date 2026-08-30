@@ -1,6 +1,12 @@
+# Third-Party Notices
+
+VSC AgentBridge incorporates portions derived from [Microsoft Visual Studio Code](https://github.com/microsoft/vscode). Those portions are provided under the following MIT License:
+
+## Microsoft Visual Studio Code
+
 MIT License
 
-Copyright (c) 2026 AgentBridge Contributors
+Copyright (c) 2015 - present Microsoft Corporation
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

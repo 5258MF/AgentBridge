@@ -4,6 +4,18 @@
   <img src="./media/icon.png" alt="VSC AgentBridge 图标" width="128">
 </p>
 
+<p align="center">
+  <a href="https://marketplace.visualstudio.com/items?itemName=agentbridge.vsc-agentbridge">
+    <img src="https://img.shields.io/badge/VS_Marketplace-install-007ACC?style=flat-square&amp;logo=visualstudiocode&amp;logoColor=white" alt="从 VS Marketplace 安装">
+  </a>
+  <a href="https://github.com/5258MF/AgentBridge/releases/latest">
+    <img src="https://img.shields.io/github/v/release/5258MF/AgentBridge?style=flat-square&amp;logo=github" alt="GitHub 最新版本">
+  </a>
+  <a href="https://github.com/5258MF/AgentBridge/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/5258MF/AgentBridge?style=flat-square" alt="许可证">
+  </a>
+</p>
+
 把 VS Code 工作区的工具 — 文件、终端、LSP、诊断、图片 — 通过公共 HTTPS 隧道暴露给支持 MCP 的网页端大模型（如 GPT、Arena 等）。
 
 > [English | README.md](./README.md)
@@ -146,4 +158,4 @@ ChatGPT 网页版连接见 [docs/chatgpt-web-connector.md](docs/chatgpt-web-conn
 
 MIT，详见 [LICENSE](./LICENSE)。
 
-本项目部分代码派生自 `microsoft/vscode`，受其 MIT 许可协议约束，详见 <https://github.com/microsoft/vscode>。
+第三方声明（包括派生自 `microsoft/vscode` 的部分所适用的 MIT 条款）详见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
