@@ -1,5 +1,15 @@
 # Change Log
 
+## 0.1.7 (2026-08-30)
+
+Tunnel setup and workflow release. The MCP tool surface remains unchanged at 13 tools.
+
+- **Conservative cross-platform cloudflared setup** — Windows keeps its Winget installation path, macOS adds Homebrew installation with Apple Silicon and Intel default-path detection, and Linux detects existing binaries from PATH, `/usr/bin`, and `/usr/local/bin` while continuing to use Cloudflare's manual installation instructions instead of APT or sudo automation.
+- **Installer capability preflight and structured results** — Cloudflare checks now verify that Winget or Homebrew can actually run before showing one-click installation. Installation outcomes distinguish unavailable installers, permission errors, cancellation, command failures, and post-install verification failures; detailed failures are also written to AgentBridge Output.
+- **Explicit Cloudflare check gate** — Quick and Named Tunnel manual starts now require a completed, successful check. Installation success triggers automatic verification, configuration changes invalidate the prior check, and Persistent Mode performs its own preflight before starting while the final internal recheck remains in place.
+- **Safer tunnel lifecycle state** — tunnel checks and cloudflared installations are single-flight operations shared by the Extension Host and panel. Provider/configuration snapshots stay stable during checks, installs, and startup; checks are disabled while the Bridge is starting or running; panel polling no longer unlocks controls before the originating operation finishes.
+- **Bilingual setup experience** — the initial panel state is protected until Extension Host status arrives, installer availability and failure guidance are localized, and all 11 command-palette titles now use English/Chinese package localization files. Quick and Named Tunnel documentation now follows the check → install/verify → start workflow.
+
 ## 0.1.6 (2026-08-22)
 
 Reliability release. The MCP tool surface remains unchanged at 13 tools.
