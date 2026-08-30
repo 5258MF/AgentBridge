@@ -1,5 +1,9 @@
 # VSC AgentBridge
 
+<p align="center">
+  <img src="./media/icon.png" alt="VSC AgentBridge icon" width="128">
+</p>
+
 Expose your VS Code workspace's tools — files, terminal, LSP, diagnostics, and images — to web-based AI assistants that support MCP (GPT, Arena, etc.) over a public HTTPS tunnel.
 
 > [中文文档 | README.zh-CN.md](./README.zh-CN.md)

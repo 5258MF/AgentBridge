@@ -1,5 +1,9 @@
 # VSC AgentBridge
 
+<p align="center">
+  <img src="./media/icon.png" alt="VSC AgentBridge 图标" width="128">
+</p>
+
 把 VS Code 工作区的工具 — 文件、终端、LSP、诊断、图片 — 通过公共 HTTPS 隧道暴露给支持 MCP 的网页端大模型（如 GPT、Arena 等）。
 
 > [English | README.md](./README.md)
