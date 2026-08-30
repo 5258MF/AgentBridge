@@ -12,7 +12,7 @@
     <img src="https://img.shields.io/github/v/release/5258MF/AgentBridge?style=flat-square&amp;logo=github" alt="GitHub Release">
   </a>
   <a href="https://github.com/5258MF/AgentBridge/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/5258MF/AgentBridge?style=flat-square" alt="License">
+    <img src="https://img.shields.io/github/license/5258MF/AgentBridge?style=flat-square&amp;cacheSeconds=14400&amp;label=license" alt="License">
   </a>
 </p>
 
