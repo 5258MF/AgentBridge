@@ -138,7 +138,7 @@ Connecting the ChatGPT web app: see [docs/chatgpt-web-connector.md](docs/chatgpt
 ## Known limitations
 
 - **Cloudflare Quick Tunnel URL is ephemeral** — rotates every restart. Use Named Tunnel (or ngrok) for stable, shareable URLs.
-- **Restricted networks (教育网 / strict-firewall campus networks) can hang Quick Tunnel.** UDP/QUIC is often half-blocked. Work around it with `HTTP2`/`http` transport override and a routing rule to `cloudflare.com` in your proxy. Named Tunnel is the long-term fix.
+- **Cloudflare Tunnel requires outbound port 7844.** cloudflared defaults to `auto`: it uses QUIC over UDP 7844 and falls back to HTTP/2 over TCP 7844 when UDP is unavailable. If a campus, corporate, firewall, or proxy network blocks both transports, neither Quick Tunnel nor Named Tunnel can connect; allow one of the 7844 transports, switch networks, or use ngrok instead.
 - **Simple Browser + ChatGPT login sometimes bumps into Cloudflare managed challenges.** Multi-retry usually resolves; if it persists, switch to the OS browser via `agentbridge.bridge.openInternalBrowser: "external"`.
 - **ChatGPT Connectors caches `tools/list` at session start.** Adding / removing / modifying MCP tools requires the user to manually Refresh (or Remove + re-add) the Connector in `chatgpt.com → Settings → Connectors`. Stop+Start the Bridge alone is not enough.
 

@@ -14,6 +14,14 @@ import { getManagedShellChoice } from "./ide-tool-broker.js";
 import { managedShellExecutable, managedShellOverrideWarning } from "./ide-tool-broker.js";
 import type { IdeToolBroker } from "./ide-tool-broker.js";
 import { createTranslator, detectLang } from "./i18n.js";
+import {
+  appendCloudflaredDiagnosticOutput,
+  cloudflaredPrecheckFailureKind,
+  createCloudflaredProcessDiagnostics,
+  createRepeatedMessageThrottle,
+  type CloudflaredPrecheckFailureKind,
+  type CloudflaredProcessDiagnostics,
+} from "./cloudflared-diagnostics.js";
 
 const execFileAsync = promisify(execFile);
 const t = createTranslator(detectLang());
@@ -38,6 +46,8 @@ const SESSION_RETRY_INTERVAL_MS = 2_000;
 const SESSION_EVENT_STORE_LIMIT = 512;
 const PUBLIC_HEALTH_STARTUP_TIMEOUT_MS = 60_000;
 const PUBLIC_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
+const PUBLIC_HEALTH_LOG_THROTTLE_MS = 10_000;
+const CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS = 100;
 /** DoH endpoints used as a DNS fallback when the system resolver cannot
  * resolve the tunnel hostname (campus/corporate DNS often fails on
  * *.trycloudflare.com wildcard subdomains). Only the hostname is sent,
@@ -933,6 +943,7 @@ export class BridgeManager implements vscode.Disposable {
   private tunnelRecoveryGeneration: number | undefined;
   private tunnelGeneration = 0;
   private stoppingResources = false;
+  private readonly cloudflaredProcessDiagnostics = new WeakMap<ChildProcessWithoutNullStreams, CloudflaredProcessDiagnostics>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -1682,10 +1693,21 @@ export class BridgeManager implements vscode.Disposable {
         : process.env,
     });
     this.tunnelProcess = child;
+    const diagnostics = isCloudflare ? createCloudflaredProcessDiagnostics() : undefined;
+    if (diagnostics) this.cloudflaredProcessDiagnostics.set(child, diagnostics);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => this.output.append(`[${commandLabel}] ${String(chunk)}`));
-    child.stderr.on("data", (chunk) => this.output.append(`[${commandLabel}] ${String(chunk)}`));
+    child.stdout.on("data", (chunk) => {
+      const text = String(chunk);
+      this.output.append(`[${commandLabel}] ${text}`);
+      if (diagnostics) appendCloudflaredDiagnosticOutput(diagnostics, "stdout", text);
+    });
+    child.stderr.on("data", (chunk) => {
+      const text = String(chunk);
+      this.output.append(`[${commandLabel}] ${text}`);
+      if (diagnostics) appendCloudflaredDiagnosticOutput(diagnostics, "stderr", text);
+    });
+    child.once("close", () => this.cloudflaredProcessDiagnostics.delete(child));
     child.on("error", (error) => {
       this.output.appendLine(`[${commandLabel}] process error: ${error.message}`);
       this.lastError = error.message;
@@ -1717,8 +1739,11 @@ export class BridgeManager implements vscode.Disposable {
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       let output = "";
+      let startupTimer: ReturnType<typeof setTimeout> | undefined;
+      let precheckDetailTimer: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
-        clearTimeout(timer);
+        if (startupTimer) clearTimeout(startupTimer);
+        if (precheckDetailTimer) clearTimeout(precheckDetailTimer);
         child.off("exit", onExit);
         child.off("error", onError);
         child.stdout.off("data", onData);
@@ -1730,13 +1755,31 @@ export class BridgeManager implements vscode.Disposable {
         cleanup();
         if (error) reject(error); else resolve();
       };
+      const handlePrecheckFailure = (allowDetailGrace: boolean): boolean => {
+        const failure = this.cloudflaredPrecheckFailure(child);
+        if (!failure) return false;
+        if (allowDetailGrace && failure.kind === "generic") {
+          if (!precheckDetailTimer) {
+            precheckDetailTimer = setTimeout(() => {
+              precheckDetailTimer = undefined;
+              const completedFailure = this.cloudflaredPrecheckFailure(child);
+              if (completedFailure) finish(completedFailure.error);
+            }, CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS);
+          }
+          return true;
+        }
+        finish(failure.error);
+        return true;
+      };
       const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (handlePrecheckFailure(false)) return;
         const detail = output.trim().slice(-4_000);
         finish(new Error(`${this.tunnelProvider} tunnel exited during startup (code=${String(code)}, signal=${String(signal)}).${detail ? ` ${detail}` : ""}`));
       };
-      const onError = (error: Error) => finish(error);
+      const onError = (error: Error) => finish(this.cloudflaredPrecheckError(child) ?? error);
       const onData = (chunk: Buffer | string) => {
         output = `${output}${String(chunk)}`.slice(-16_000);
+        if (handlePrecheckFailure(true)) return;
         const lower = output.toLowerCase();
         if (this.tunnelProvider === "cloudflare") {
           const matches = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/ig);
@@ -1772,7 +1815,8 @@ export class BridgeManager implements vscode.Disposable {
       child.stderr.on("data", onData);
       // Public HTTPS health is the source of truth. Quick Tunnel must emit its generated hostname;
       // Named Tunnel and ngrok log wording can vary between releases.
-      const timer = setTimeout(() => {
+      startupTimer = setTimeout(() => {
+        if (handlePrecheckFailure(false)) return;
         if (this.tunnelProvider === "cloudflare") {
           finish(new Error(`cloudflared did not provide a trycloudflare.com URL. ${output.trim().slice(-4_000)}`));
         } else {
@@ -1786,33 +1830,96 @@ export class BridgeManager implements vscode.Disposable {
     return `https://${this.domain}/healthz/${this.routeToken}`;
   }
 
-  private async requestPublicHealth(): Promise<boolean> {
+  private cloudflaredPrecheckFailure(
+    child: ChildProcessWithoutNullStreams,
+  ): { kind: CloudflaredPrecheckFailureKind; error: Error } | undefined {
+    const kind = cloudflaredPrecheckFailureKind(this.cloudflaredProcessDiagnostics.get(child));
+    if (kind === "both-transports") return { kind, error: new Error(t("cloudflarePrecheckBothTransportsFailed")) };
+    if (kind === "dns") return { kind, error: new Error(t("cloudflarePrecheckDnsFailed")) };
+    if (kind === "generic") return { kind, error: new Error(t("cloudflarePrecheckFailed")) };
+    return undefined;
+  }
+
+  private cloudflaredPrecheckError(child: ChildProcessWithoutNullStreams): Error | undefined {
+    return this.cloudflaredPrecheckFailure(child)?.error;
+  }
+
+  private createPublicHealthLogThrottle(): { report: (message: string) => void; flush: () => void } {
+    const throttle = createRepeatedMessageThrottle(PUBLIC_HEALTH_LOG_THROTTLE_MS);
+    const emit = (message: string) => this.output.appendLine(`[bridge] ${message}`);
+    const report = (message: string) => {
+      const emission = throttle.report(message);
+      if (!emission) return;
+      emit(emission.suppressed > 0
+        ? t("publicHealthRepeatedFailures", emission.message, emission.suppressed)
+        : emission.message);
+    };
+    const flush = () => {
+      for (const emission of throttle.flush()) {
+        emit(t("publicHealthRepeatedFailures", emission.message, emission.suppressed));
+      }
+    };
+    return { report, flush };
+  }
+
+  private createPublicHealthAbortController(externalSignal?: AbortSignal): { signal: AbortSignal; dispose: () => void } {
     const controller = new AbortController();
+    const abortFromExternal = () => controller.abort();
+    if (externalSignal?.aborted) abortFromExternal();
+    else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
     const timer = setTimeout(() => controller.abort(), PUBLIC_HEALTH_REQUEST_TIMEOUT_MS);
+    return {
+      signal: controller.signal,
+      dispose: () => {
+        clearTimeout(timer);
+        externalSignal?.removeEventListener("abort", abortFromExternal);
+      },
+    };
+  }
+
+  private async waitForPublicHealthRetry(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, 750);
+      signal?.addEventListener("abort", finish, { once: true });
+      if (signal?.aborted) finish();
+    });
+  }
+
+  private async requestPublicHealth(reportFailure: (message: string) => void, signal?: AbortSignal): Promise<boolean> {
+    const requestAbort = this.createPublicHealthAbortController(signal);
     try {
       const response = await fetch(this.publicHealthUrl(), {
         method: "GET",
         cache: "no-store",
         headers: this.tunnelProvider === "ngrok" ? { "ngrok-skip-browser-warning": "true" } : undefined,
-        signal: controller.signal,
+        signal: requestAbort.signal,
       });
       if (!response.ok) {
-        this.output.appendLine(`[bridge] health check system-DNS failed: HTTP ${response.status}`);
+        reportFailure(t("publicHealthSystemHttpFailure", response.status));
+        await response.body?.cancel().catch(() => undefined);
         return false;
       }
       const payload = await response.json().catch(() => undefined) as { ok?: unknown } | undefined;
       if (payload?.ok !== true) {
-        this.output.appendLine(`[bridge] health check system-DNS failed: payload.ok !== true (${JSON.stringify(payload)})`);
+        reportFailure(t("publicHealthSystemPayloadFailure", JSON.stringify(payload)));
       }
       return payload?.ok === true;
     } catch (error) {
+      if (signal?.aborted) return false;
       const reason = error instanceof Error ? error.message : String(error);
-      this.output.appendLine(`[bridge] health check system-DNS error: ${reason}; trying DoH fallback...`);
-      const ok = await this.requestPublicHealthViaDoh();
-      this.output.appendLine(`[bridge] health check DoH fallback result: ${ok}`);
+      reportFailure(t("publicHealthSystemError", reason));
+      const ok = await this.requestPublicHealthViaDoh(reportFailure, signal);
+      if (signal?.aborted) return false;
+      reportFailure(t("publicHealthDohResult", ok));
       return ok;
     } finally {
-      clearTimeout(timer);
+      requestAbort.dispose();
     }
   }
 
@@ -1824,33 +1931,46 @@ export class BridgeManager implements vscode.Disposable {
    * retries against pinned Cloudflare anycast IPs. Uses node:https directly
    * with SNI + Host headers so TLS verification still runs against the real
    * hostname either way. */
-  private async requestPublicHealthViaDoh(): Promise<boolean> {
+  private async requestPublicHealthViaDoh(reportFailure: (message: string) => void, signal?: AbortSignal): Promise<boolean> {
     const hostname = this.domain;
-    if (!hostname) return false;
-    const ip = await this.resolveHostViaDoh(hostname);
+    if (!hostname || signal?.aborted) return false;
+    const ip = await this.resolveHostViaDoh(hostname, signal);
+    if (signal?.aborted) return false;
     if (ip) {
-      this.output.appendLine(`[bridge] DoH fallback: ${hostname} -> ${ip}, sending direct health request...`);
-      return this.sendPublicHealthRequest(hostname, ip);
+      reportFailure(`DoH fallback: ${hostname} -> ${ip}, sending direct health request...`);
+      return this.sendPublicHealthRequest(hostname, ip, reportFailure, signal);
     }
     if (this.tunnelProvider !== "cloudflare" || !hostname.endsWith(".trycloudflare.com")) {
-      this.output.appendLine(`[bridge] DoH fallback: could not resolve ${hostname} via any DoH endpoint`);
+      reportFailure(`DoH fallback: could not resolve ${hostname} via any DoH endpoint`);
       return false;
     }
     for (const anycastIp of PUBLIC_HEALTH_CF_ANYCAST_IPS) {
-      this.output.appendLine(`[bridge] DoH fallback exhausted, trying pinned Cloudflare anycast for *.trycloudflare.com: ${anycastIp}`);
-      if (await this.sendPublicHealthRequest(hostname, anycastIp)) return true;
+      if (signal?.aborted) return false;
+      reportFailure(`DoH fallback exhausted, trying pinned Cloudflare anycast for *.trycloudflare.com: ${anycastIp}`);
+      if (await this.sendPublicHealthRequest(hostname, anycastIp, reportFailure, signal)) return true;
     }
-    this.output.appendLine(`[bridge] DoH fallback: pinned anycast health checks failed for ${hostname}`);
+    reportFailure(`DoH fallback: pinned anycast health checks failed for ${hostname}`);
     return false;
   }
 
   /** Send one health request straight to an IP while keeping TLS verification
    * and routing anchored to the real hostname (SNI servername + Host header). */
-  private async sendPublicHealthRequest(hostname: string, ip: string): Promise<boolean> {
+  private async sendPublicHealthRequest(
+    hostname: string,
+    ip: string,
+    reportFailure: (message: string) => void,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     const { request } = await import("node:https");
     return await new Promise<boolean>((resolve) => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), PUBLIC_HEALTH_REQUEST_TIMEOUT_MS);
+      const requestAbort = this.createPublicHealthAbortController(signal);
+      let settled = false;
+      const finish = (healthy: boolean) => {
+        if (settled) return;
+        settled = true;
+        requestAbort.dispose();
+        resolve(healthy);
+      };
       const req = request(
         {
           hostname: ip,
@@ -1862,12 +1982,13 @@ export class BridgeManager implements vscode.Disposable {
             Host: hostname,
             ...(this.tunnelProvider === "ngrok" ? { "ngrok-skip-browser-warning": "true" } : {}),
           },
-          signal: controller.signal,
+          signal: requestAbort.signal,
         },
         (response) => {
           if (!response.statusCode || response.statusCode >= 400) {
-            this.output.appendLine(`[bridge] DoH fallback: direct request got HTTP ${response.statusCode ?? "none"}`);
-            resolve(false);
+            reportFailure(`DoH fallback: direct request got HTTP ${response.statusCode ?? "none"}`);
+            response.resume();
+            finish(false);
             return;
           }
           let body = "";
@@ -1876,36 +1997,44 @@ export class BridgeManager implements vscode.Disposable {
           response.on("end", () => {
             try {
               const payload = JSON.parse(body) as { ok?: unknown } | undefined;
-              resolve(payload?.ok === true);
+              finish(payload?.ok === true);
             } catch {
-              resolve(false);
+              finish(false);
             }
           });
         },
       );
       req.on("error", (error) => {
-        this.output.appendLine(`[bridge] DoH fallback: direct request error: ${error instanceof Error ? error.message : String(error)}`);
-        resolve(false);
+        if (!signal?.aborted) {
+          reportFailure(`DoH fallback: direct request error: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        finish(false);
       });
-      req.on("close", () => clearTimeout(timer));
+      req.on("close", requestAbort.dispose);
       req.end();
     });
   }
 
   /** Ask a DoH endpoint for an A record of the given hostname. Caches the
    * result briefly to avoid hammering the DoH server during startup retries. */
-  private async resolveHostViaDoh(hostname: string): Promise<string | null> {
+  private async resolveHostViaDoh(hostname: string, signal?: AbortSignal): Promise<string | null> {
     if (this.dohCache.hostname === hostname && Date.now() - this.dohCache.at < PUBLIC_HEALTH_DOH_CACHE_TTL_MS) {
       return this.dohCache.ip;
     }
     for (const endpoint of PUBLIC_HEALTH_DOH_ENDPOINTS) {
+      if (signal?.aborted) return null;
+      const requestAbort = this.createPublicHealthAbortController(signal);
       try {
         const url = `${endpoint}?name=${encodeURIComponent(hostname)}&type=A&rand=${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const response = await fetch(url, {
           cache: "no-store",
           headers: endpoint.includes("dns-query") ? { accept: "application/dns-json" } : undefined,
+          signal: requestAbort.signal,
         });
-        if (!response.ok) continue;
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => undefined);
+          continue;
+        }
         const payload = await response.json() as { Answer?: Array<{ type: number; data: string }> };
         const record = payload.Answer?.find((answer) => answer.type === 1);
         if (record?.data) {
@@ -1914,6 +2043,8 @@ export class BridgeManager implements vscode.Disposable {
         }
       } catch {
         // try the next DoH endpoint
+      } finally {
+        requestAbort.dispose();
       }
     }
     return null;
@@ -1923,17 +2054,73 @@ export class BridgeManager implements vscode.Disposable {
 
   private async waitForPublicHealth(child: ChildProcessWithoutNullStreams): Promise<void> {
     const deadline = Date.now() + PUBLIC_HEALTH_STARTUP_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      if (child.exitCode !== null || child.signalCode !== null || this.tunnelProcess !== child) {
-        throw new Error(`${this.tunnelProvider} tunnel exited before the public Bridge health endpoint became reachable.`);
+    const isCloudflare = this.tunnelProvider === "cloudflare" || this.tunnelProvider === "cloudflare-named";
+    const logThrottle = isCloudflare ? this.createPublicHealthLogThrottle() : undefined;
+    const reportFailure = logThrottle?.report ?? ((message: string) => this.output.appendLine(`[bridge] ${message}`));
+    const precheckAbort = new AbortController();
+    let observedPrecheckError: Error | undefined;
+    let precheckDetailTimer: ReturnType<typeof setTimeout> | undefined;
+    const abortWithPrecheckFailure = (error: Error) => {
+      observedPrecheckError = error;
+      precheckAbort.abort();
+    };
+    const onCloudflaredData = () => {
+      const failure = this.cloudflaredPrecheckFailure(child);
+      if (!failure) return;
+      if (failure.kind !== "generic") {
+        if (precheckDetailTimer) clearTimeout(precheckDetailTimer);
+        precheckDetailTimer = undefined;
+        abortWithPrecheckFailure(failure.error);
+        return;
       }
-      if (await this.requestPublicHealth()) return;
-      await new Promise<void>((resolve) => setTimeout(resolve, 750));
+      if (!precheckDetailTimer) {
+        precheckDetailTimer = setTimeout(() => {
+          precheckDetailTimer = undefined;
+          const completedFailure = this.cloudflaredPrecheckFailure(child);
+          if (completedFailure) abortWithPrecheckFailure(completedFailure.error);
+        }, CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS);
+      }
+    };
+    if (isCloudflare) {
+      child.stdout.on("data", onCloudflaredData);
+      child.stderr.on("data", onCloudflaredData);
+      onCloudflaredData();
     }
-    if (this.tunnelProvider === "cloudflare-named") {
-      throw new Error(`Cloudflare Named Tunnel connected, but ${this.publicHealthUrl()} could not reach Bridge. In Cloudflare Tunnels, set the published application hostname to ${this.configuredNamedDomain} and its Service URL to http://127.0.0.1:${this.namedTunnelLocalPort}.`);
+    try {
+      while (Date.now() < deadline) {
+        if (child.exitCode !== null || child.signalCode !== null || this.tunnelProcess !== child) {
+          throw new Error(`${this.tunnelProvider} tunnel exited before the public Bridge health endpoint became reachable.`);
+        }
+        const precheckError = observedPrecheckError;
+        if (precheckError) throw precheckError;
+        const healthy = await this.requestPublicHealth(reportFailure, isCloudflare ? precheckAbort.signal : undefined);
+        const postRequestPrecheckError = observedPrecheckError;
+        if (postRequestPrecheckError) throw postRequestPrecheckError;
+        if (healthy) {
+          const pendingFailure = this.cloudflaredPrecheckFailure(child);
+          if (!pendingFailure) return;
+          if (pendingFailure.kind !== "generic") throw pendingFailure.error;
+          await new Promise<void>((resolve) => setTimeout(resolve, CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS));
+          const completedFailure = observedPrecheckError ?? this.cloudflaredPrecheckError(child);
+          if (completedFailure) throw completedFailure;
+          return;
+        }
+        await this.waitForPublicHealthRetry(isCloudflare ? precheckAbort.signal : undefined);
+      }
+      const precheckError = observedPrecheckError ?? this.cloudflaredPrecheckError(child);
+      if (precheckError) throw precheckError;
+      if (this.tunnelProvider === "cloudflare-named") {
+        throw new Error(`Cloudflare Named Tunnel connected, but ${this.publicHealthUrl()} could not reach Bridge. In Cloudflare Tunnels, set the published application hostname to ${this.configuredNamedDomain} and its Service URL to http://127.0.0.1:${this.namedTunnelLocalPort}.`);
+      }
+      throw new Error(`Public Bridge health check timed out after ${Math.round(PUBLIC_HEALTH_STARTUP_TIMEOUT_MS / 1000)} seconds: ${this.publicHealthUrl()}`);
+    } finally {
+      if (isCloudflare) {
+        child.stdout.off("data", onCloudflaredData);
+        child.stderr.off("data", onCloudflaredData);
+      }
+      if (precheckDetailTimer) clearTimeout(precheckDetailTimer);
+      logThrottle?.flush();
     }
-    throw new Error(`Public Bridge health check timed out after ${Math.round(PUBLIC_HEALTH_STARTUP_TIMEOUT_MS / 1000)} seconds: ${this.publicHealthUrl()}`);
   }
 
   private async startTunnelOnce(): Promise<void> {
