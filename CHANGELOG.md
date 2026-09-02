@@ -1,5 +1,15 @@
 # Change Log
 
+## 0.1.8 (2026-09-02)
+
+Tunnel reliability release. The MCP tool surface remains unchanged at 13 tools.
+
+- **Tunnel transport control** — a new `agentbridge.bridge.tunnelProtocol` setting (`auto` / `quic` / `http2`, Cloudflare tunnels only) with a "Tunnel Transport (cloudflared)" radio group in the panel's advanced settings card. `auto` keeps cloudflared's own QUIC-first behavior with the spawned command line byte-identical to previous releases; `http2` forces TCP 7844. The value is re-read on every tunnel spawn, so changes apply on the next start or automatic reconnect without restarting the Bridge.
+- **QUIC self-heal with automatic HTTP/2 fallback** — on networks where QUIC handshakes pass but sustained UDP flows die (campus/corporate networks), cloudflared used to blind-retry QUIC until the 60s health check timed out and failed. AgentBridge now watches for repeated edge dial failures with zero registrations: after a 10s grace window it aborts the wait, restarts the tunnel with `--protocol http2`, announces the switch in the panel, and keeps HTTP/2 for automatic reconnects until the next manual start. Explicit quic/http2 choices are never overridden.
+- **Honest startup failure diagnostics** — cloudflared process diagnostics now track QUIC dial failures, tunnel registrations, and a rolling log tail. When the health check times out, the error distinguishes "tunnel never registered + QUIC unstable" (a 200-character log tail plus an http2 recommendation) from "registered but unreachable" (the existing ingress hint), instead of always claiming the tunnel connected.
+- **Tunnel child lifecycle hardening** — termination is unified in an idempotent `killTunnelProcess` (Windows: taskkill /T /F with a direct-kill fallback, so wrapper-script launches leave no orphaned grandchildren). The QUIC-fallback restart waits for the old process to exit under a 2s bound before spawning, so the startup health check cannot be routed to a dying connector.
+- **README known-limitations correction** — replaced the inaccurate "cloudflared falls back to HTTP/2 when UDP is unavailable" claim with the observed behavior (pre-check false positives, unreliable fallback) and documented the new self-heal and the `tunnelProtocol` setting.
+
 ## 0.1.7 (2026-08-30)
 
 Tunnel setup and workflow release. The MCP tool surface remains unchanged at 13 tools.
