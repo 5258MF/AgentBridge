@@ -952,6 +952,11 @@ export class BridgeManager implements vscode.Disposable {
    * spawn (including automatic reconnects) uses http2 until the next manual
    * start resets it. Explicit protocol settings are never overridden. */
   private tunnelTransportFallback: BridgeTunnelProtocol | undefined;
+  /** Children already handed to killTunnelProcess. The guard must be a
+   * WeakSet rather than child.killed alone: taskkill terminates the process
+   * externally, so child.killed stays false and cannot prevent duplicate
+   * taskkill runs on the same (dead) PID. */
+  private readonly killRequested = new WeakSet<ChildProcessWithoutNullStreams>();
   private domain = "";
   private configuredDomain = "";
   private configuredNamedDomain = "";
@@ -1754,7 +1759,10 @@ export class BridgeManager implements vscode.Disposable {
    * (.cmd/.bat) do not leave orphaned grandchildren behind; taskkill failures
    * fall back to a direct kill. Other platforms kill directly. */
   private async killTunnelProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
-    if (child.killed) return;
+    if (child.killed || this.killRequested.has(child)) return;
+    // Mark synchronously, before the first await, so a second fire-and-forget
+    // caller can never slip past the guard while taskkill is in flight.
+    this.killRequested.add(child);
     if (process.platform === "win32" && child.pid) {
       try {
         await execFileAsync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
@@ -2263,10 +2271,19 @@ export class BridgeManager implements vscode.Disposable {
         this.tunnelTransportFallback = "http2";
         this.output.appendLine("[bridge] QUIC transport unstable; restarting tunnel with --protocol http2.");
         void vscode.window.showInformationMessage(t("quicFallbackNotice")).then(undefined, () => undefined);
-        // Fire-and-forget: the replacement tunnel uses its own port and
-        // Cloudflare tolerates multiple connectors, so we do not wait for the
-        // old process to exit before spawning.
-        void this.killTunnelProcess(child);
+        // Fire-and-forget would leave the old connector registered at the edge
+        // for a few seconds; with Named Tunnels the startup health check could
+        // then be routed to the dying QUIC connector and see a 530 even though
+        // the replacement registered fine. Bound the wait (taskkill usually
+        // completes in tens of milliseconds) instead of letting the race be
+        // decided by scheduler luck.
+        await Promise.race([
+          this.killTunnelProcess(child),
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 2_000);
+            timer.unref?.();
+          }),
+        ]);
         this.tunnelProcess = undefined;
         await this.startTunnelOnceWithProtocol(expectedGeneration, "http2");
         return;
@@ -2803,7 +2820,7 @@ export class BridgeManager implements vscode.Disposable {
 
     const tunnel = this.tunnelProcess;
     this.tunnelProcess = undefined;
-    if (tunnel && !tunnel.killed) {
+    if (tunnel) {
       await this.killTunnelProcess(tunnel);
     }
 
