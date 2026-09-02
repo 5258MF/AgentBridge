@@ -139,7 +139,8 @@ ChatGPT 网页版连接见 [docs/chatgpt-web-connector.md](docs/chatgpt-web-conn
 ## 已知限制
 
 - **Cloudflare Quick Tunnel URL 易失** — 每次重启都换地址。要稳定可分享的 URL，用 Named Tunnel（或 ngrok）。
-- **Cloudflare Tunnel 需要出站端口 7844。** cloudflared 默认使用 `auto`：优先通过 UDP 7844 使用 QUIC，UDP 不可用时回退到 TCP 7844 上的 HTTP/2。如果校园网、企业网络、防火墙或代理同时阻断两种传输，Quick Tunnel 与 Named Tunnel 都无法连接；请开放其中一种 7844 出站连接、切换网络，或改用 ngrok。
+- **Cloudflare Tunnel 需要出站端口 7844。** cloudflared 优先使用 QUIC（UDP 7844）；TCP 7844（HTTP/2）是备用传输。如果校园网、企业网络、防火墙或代理同时阻断两种传输，Quick Tunnel 与 Named Tunnel 都无法连接；请开放其中一种 7844 出站连接、切换网络，或改用 ngrok。
+- **QUIC 可能在 cloudflared 预检通过的情况下依然不稳。** 预检只探测短促的 QUIC 握手；放行握手但掐断持续 UDP 流的网络（校园网/企业网常见）会让真实流量持续失败，且 cloudflared 在启动窗口内并不可靠地回落到 HTTP/2。AgentBridge 自带自愈：`tunnelProtocol: auto`（默认）下，反复的边缘拨号失败且零注册会自动改用 HTTP/2（TCP 7844）重启隧道并在面板通知；也可以把 `tunnelProtocol` 设为 `http2` 完全跳过 QUIC。
 - **在 Simple Browser 里登录 ChatGPT 偶尔撞 Cloudflare 托管质询。** 多试几次通常能过；若持续撞墙，把 `agentbridge.bridge.openInternalBrowser` 设 `external` 走 OS 浏览器。
 - **ChatGPT Connectors 在会话启动时缓存 `tools/list`。** 新增 / 移除 / 修改 MCP 工具后，需要在 `chatgpt.com → 设置 → Connectors` 里手动 Refresh（或 Remove 后重新 Add）才拉到新工具。仅 Stop+Start Bridge 不够。
 

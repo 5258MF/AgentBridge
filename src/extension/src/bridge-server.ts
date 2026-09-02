@@ -2276,14 +2276,19 @@ export class BridgeManager implements vscode.Disposable {
         // then be routed to the dying QUIC connector and see a 530 even though
         // the replacement registered fine. Bound the wait (taskkill usually
         // completes in tens of milliseconds) instead of letting the race be
-        // decided by scheduler luck.
-        await Promise.race([
-          this.killTunnelProcess(child),
-          new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, 2_000);
-            timer.unref?.();
-          }),
-        ]);
+        // decided by scheduler luck. killTunnelProcess cannot currently reject,
+        // but the catch keeps a future rejection from skipping the http2 retry,
+        // and the finally clears the timer once kill wins the race.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 2_000);
+          timer.unref?.();
+          void this.killTunnelProcess(child)
+            .catch(() => undefined)
+            .finally(() => {
+              clearTimeout(timer);
+              resolve();
+            });
+        });
         this.tunnelProcess = undefined;
         await this.startTunnelOnceWithProtocol(expectedGeneration, "http2");
         return;
