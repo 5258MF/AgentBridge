@@ -147,6 +147,7 @@ ChatGPT 网页版连接见 [docs/chatgpt-web-connector.md](docs/chatgpt-web-conn
 - VS Code 1.95+
 - Node 22+
 - Windows 上构建验证；macOS 支持 Homebrew 安装，Linux 支持检测现有 cloudflared 并提供手动安装入口。
+- 文件搜索在 Windows 上内置 ripgrep；macOS/Linux 优先使用 PATH 中的 `rg`，缺失时使用内置的有界 Node 引擎（内容搜索最多扫描 20,000 个文件且单文件不超过 2 MiB；文件发现最多收集 5,000 个候选）。
 
 ## 许可协议
 

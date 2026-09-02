@@ -102,6 +102,13 @@ export class CloudflaredInstallError extends Error {
   }
 }
 
+export class BridgeStartCancelledError extends Error {
+  constructor() {
+    super("Bridge start was cancelled by a newer lifecycle operation.");
+    this.name = "BridgeStartCancelledError";
+  }
+}
+
 function platformCloudflaredInstaller(): CloudflaredInstaller {
   return process.platform === "win32" ? "winget" : process.platform === "darwin" ? "homebrew" : "manual";
 }
@@ -1542,12 +1549,15 @@ export class BridgeManager implements vscode.Disposable {
     }
     if (this.state === "running") return this.getStatus();
     if (this.startPromise) return this.startPromise;
+    if (this.stoppingResources) throw new BridgeStartCancelledError();
+    const generation = this.tunnelGeneration;
     // Refresh stopped-state settings before enforcing the manual check gate so an
     // external settings.json change cannot reuse a check from the old provider/configuration.
     this.getStatus();
     const isCloudflare = this.tunnelProvider === "cloudflare" || this.tunnelProvider === "cloudflare-named";
     if (options.automaticCheck) {
       const tunnel = await this.checkTunnel();
+      if (generation !== this.tunnelGeneration || this.stoppingResources) return this.getStatus();
       if (tunnel.tunnelInstalled !== true || tunnel.tunnelConfigValid !== true) {
         this.state = "stopped";
         throw new Error(this.lastError ?? `${this.tunnelProvider} tunnel check did not pass.`);
@@ -1567,7 +1577,7 @@ export class BridgeManager implements vscode.Disposable {
     // During automatic tunnel recovery the local HTTP/MCP runtime is intentionally kept alive.
     // A manual Start click must not create a second listener/tunnel while that recovery owns it.
     if (this.state === "starting" && this.httpServer) return this.getStatus();
-    this.startPromise = this.startInternal(domain);
+    this.startPromise = this.startInternal(domain, generation);
     try {
       return await this.startPromise;
     } finally {
@@ -1598,18 +1608,23 @@ export class BridgeManager implements vscode.Disposable {
     }
   }
 
-  private async startInternal(domain?: string): Promise<BridgeStatus> {
-    this.stoppingResources = false;
+  private async startInternal(domain: string | undefined, generation: number): Promise<BridgeStatus> {
+    this.assertStartGeneration(generation);
     this.state = "starting";
     this.lastError = undefined;
     try {
-      if (!this.routeToken) await this.initialize();
+      if (!this.routeToken) {
+        await this.initialize();
+        this.assertStartGeneration(generation);
+      }
       this.tunnelProvider = this.readTunnelProvider();
       if (this.tunnelProvider === "ngrok") {
         const resolvedDomain = domain ?? (this.configuredDomain || this.readConfiguredDomain() || this.readPersistedDomain());
         await this.persistDomain(resolvedDomain);
+        this.assertStartGeneration(generation);
       } else if (this.tunnelProvider === "cloudflare-named") {
         this.namedTunnelToken = await this.context.secrets.get(CLOUDFLARE_NAMED_TOKEN_SECRET) ?? "";
+        this.assertStartGeneration(generation);
         this.restoreConfiguredNamedDomain();
         this.namedTunnelLocalPort = this.readNamedTunnelLocalPort();
         this.domain = this.configuredNamedDomain;
@@ -1621,17 +1636,23 @@ export class BridgeManager implements vscode.Disposable {
       if (!folders?.length) throw new Error("Open a workspace folder before starting the Bridge.");
 
       const tunnel = await this.checkTunnelInternal(true);
+      this.assertStartGeneration(generation);
       if (!tunnel.tunnelInstalled) throw new Error(this.lastError ?? `${this.tunnelProvider} tunnel client is not installed.`);
       if (!tunnel.tunnelConfigValid) throw new Error(this.lastError ?? `${this.tunnelProvider} tunnel configuration is invalid.`);
 
       await this.startHttpServer();
-      await this.startTunnelOnce();
+      this.assertStartGeneration(generation);
+      await this.startTunnelOnce(generation);
+      this.assertStartGeneration(generation);
 
       this.state = "running";
       const publicUrl = this.getStatus().publicUrl;
       this.output.appendLine(`[bridge] running ${publicUrl} -> 127.0.0.1:${this.localPort}`);
       return this.getStatus();
     } catch (error) {
+      if (error instanceof BridgeStartCancelledError || generation !== this.tunnelGeneration) {
+        return this.getStatus();
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.lastError = message;
       this.state = "error";
@@ -1923,6 +1944,12 @@ export class BridgeManager implements vscode.Disposable {
     }
   }
 
+  private assertStartGeneration(generation: number): void {
+    if (generation !== this.tunnelGeneration || this.stoppingResources) {
+      throw new BridgeStartCancelledError();
+    }
+  }
+
   /** Resolve the tunnel hostname through DoH and retry the health request
    * against the resolved IP. Fallback for networks whose DNS cannot resolve
    * *.trycloudflare.com wildcard subdomains (e.g. campus/corporate DNS). If
@@ -2123,11 +2150,13 @@ export class BridgeManager implements vscode.Disposable {
     }
   }
 
-  private async startTunnelOnce(): Promise<void> {
+  private async startTunnelOnce(expectedGeneration?: number): Promise<void> {
+    if (expectedGeneration !== undefined) this.assertStartGeneration(expectedGeneration);
     const child = this.startTunnelProcess();
     try {
       await this.waitForTunnelStartup(child);
       await this.waitForPublicHealth(child);
+      if (expectedGeneration !== undefined) this.assertStartGeneration(expectedGeneration);
       if (this.tunnelProcess !== child) throw new Error(`${this.tunnelProvider} tunnel changed before health verification completed.`);
       this.output.appendLine(`[bridge] public health verified: ${this.publicHealthUrl()}`);
     } catch (error) {
@@ -2149,7 +2178,7 @@ export class BridgeManager implements vscode.Disposable {
         if (this.stoppingResources || !this.httpServer || generation !== this.tunnelGeneration) return;
         try {
           this.output.appendLine(`[bridge] ${this.tunnelProvider} reconnect attempt ${attempt + 1}...`);
-          await this.startTunnelOnce();
+          await this.startTunnelOnce(generation);
           if (generation !== this.tunnelGeneration || this.stoppingResources) return;
           this.state = "running";
           this.lastError = undefined;
@@ -2157,6 +2186,7 @@ export class BridgeManager implements vscode.Disposable {
           this.output.appendLine(`[bridge] ${this.tunnelProvider} tunnel recovered: ${this.getStatus().publicUrl}`);
           return;
         } catch (error) {
+          if (generation !== this.tunnelGeneration || this.stoppingResources || !this.httpServer) return;
           this.lastError = error instanceof Error ? error.message : String(error);
           this.output.appendLine(`[bridge] ${this.tunnelProvider} reconnect attempt ${attempt + 1} failed: ${this.lastError}`);
           attempt += 1;

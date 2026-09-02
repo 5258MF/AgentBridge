@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { BridgeManager } from "./bridge-server.js";
+import { BridgeManager, BridgeStartCancelledError, type BridgeStatus } from "./bridge-server.js";
 import { BridgePanelProvider } from "./bridge-panel.js";
 import { IdeToolBroker, invalidateManagedShellCache } from "./ide-tool-broker.js";
 import { createTranslator, detectLang } from "./i18n.js";
@@ -95,7 +95,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("agentbridge.bridge.start", async (domain?: unknown) => {
       await bridgeReady;
       if (domain !== undefined && typeof domain !== "string") throw new Error("Bridge domain must be a string.");
-      const status = await bridge.start(domain as string | undefined);
+      let status: BridgeStatus;
+      try {
+        status = await bridge.start(domain as string | undefined);
+      } catch (error) {
+        if (!(error instanceof BridgeStartCancelledError)) throw error;
+        updateStatusBar();
+        return bridge.getStatus();
+      }
       updateStatusBar();
       if (status.publicUrl) {
         const copy = "Copy MCP URL";

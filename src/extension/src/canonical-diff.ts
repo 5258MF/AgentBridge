@@ -26,7 +26,11 @@ interface DecodedLines {
 }
 
 const DEFAULT_CONTEXT_LINES = 3;
-const MAX_MYERS_EDIT_DISTANCE = 10_000;
+// Myers stores a snapshot of the frontier for every edit-distance layer. Keep both
+// the number of layers and the total comparison work bounded so a remote patch
+// cannot monopolize the extension-host thread or exhaust its heap.
+const MAX_MYERS_EDIT_DISTANCE = 512;
+const MAX_MYERS_WORK_UNITS = 1_000_000;
 
 function decodeLines(bytes?: Uint8Array): DecodedLines {
   if (!bytes || bytes.byteLength === 0) return { lines: [], ends_with_newline: false };
@@ -92,10 +96,13 @@ function myersDiff(oldLines: string[], newLines: string[]): LineEdit[] {
   const v = new Map<number, number>();
   v.set(1, 0);
   const trace: Map<number, number>[] = [];
+  let workUnits = 0;
 
   for (let d = 0; d <= maxDistance; d += 1) {
     trace.push(new Map(v));
     for (let k = -d; k <= d; k += 2) {
+      workUnits += 1;
+      if (workUnits > MAX_MYERS_WORK_UNITS) return fallbackReplace(oldLines, newLines);
       const left = v.get(k - 1) ?? Number.NEGATIVE_INFINITY;
       const right = v.get(k + 1) ?? Number.NEGATIVE_INFINITY;
       let x = k === -d || (k !== d && left < right) ? right : left + 1;
@@ -103,6 +110,8 @@ function myersDiff(oldLines: string[], newLines: string[]): LineEdit[] {
       let y = x - k;
 
       while (x < oldLines.length && y < newLines.length && oldLines[x] === newLines[y]) {
+        workUnits += 1;
+        if (workUnits > MAX_MYERS_WORK_UNITS) return fallbackReplace(oldLines, newLines);
         x += 1;
         y += 1;
       }

@@ -1,6 +1,7 @@
 // AgentBridge build script: produces a single CJS bundle for VS Code.
 //   dist/extension.js   AgentBridge extension (external vscode)
-// rg.exe is loaded from runtime/bin/ via the packaged-ripgrep plugin.
+// Windows loads the bundled rg.exe from runtime/bin/. Other platforms use a
+// PATH-resolved rg when available and otherwise use the built-in Node fallback.
 import { build, context, transformSync } from "esbuild";
 import path from "node:path";
 import fs from "node:fs";
@@ -9,7 +10,8 @@ import { fileURLToPath } from "node:url";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const watch = process.argv.includes("--watch");
 
-// Replace @vscode/ripgrep with a path to the bundled rg binary.
+// Replace @vscode/ripgrep with the bundled Windows binary path. A Windows PE
+// binary must never be offered as a candidate on macOS/Linux.
 // The extension bundle lives in dist/extension.js, so __dirname = <root>/dist.
 // rg.exe is at <root>/runtime/bin/rg.exe → path.join(__dirname, "..", "runtime", "bin", "rg.exe").
 const packagedRipgrepPlugin = {
@@ -20,7 +22,7 @@ const packagedRipgrepPlugin = {
       namespace: "agentbridge-packaged-ripgrep-bin",
     }));
     target.onLoad({ filter: /.*/, namespace: "agentbridge-packaged-ripgrep-bin" }, () => ({
-      contents: 'export const rgPath = require("node:path").join(__dirname, "..", "runtime", "bin", "rg.exe");',
+      contents: 'export const rgPath = process.platform === "win32" ? require("node:path").join(__dirname, "..", "runtime", "bin", "rg.exe") : "";',
       loader: "js",
     }));
   },

@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { invalidateManagedShellCache, sanityCheckManagedShellPath } from "./ide-tool-broker.js";
-import type { BridgeManager, BridgeStatus } from "./bridge-server.js";
+import { BridgeStartCancelledError, type BridgeManager, type BridgeStatus } from "./bridge-server.js";
 import { createTranslator, detectLang, zhMessages, enMessages } from "./i18n.js";
 
 const POLL_INTERVAL_MS = 1500;
@@ -96,7 +96,9 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
           this.pushStatus(BUSY_PANEL_MESSAGE_TYPES.has(message.type) ? "operationFinished" : "status");
         }
       }, (error) => {
-        void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+        if (!(error instanceof BridgeStartCancelledError)) {
+          void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+        }
         if (message.type !== "installCloudflared" && this.view === webviewView) {
           this.pushStatus(BUSY_PANEL_MESSAGE_TYPES.has(message.type) ? "operationFinished" : "status");
         }
