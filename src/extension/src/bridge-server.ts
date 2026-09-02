@@ -56,10 +56,13 @@ const PUBLIC_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
 const PUBLIC_HEALTH_LOG_THROTTLE_MS = 10_000;
 const CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS = 100;
 /** Grace after the first QUIC dial failure before the "QUIC unstable" early
- * abort fires. Dial-failure bursts from a single dead connection arrive within
- * milliseconds; the grace window filters those while still self-healing in
- * seconds instead of burning the full 60 s health budget. */
-const QUIC_UNSTABLE_GRACE_MS = 6_000;
+ * abort fires. cloudflared's reconnect backoff (2s+4s) lands its third dial
+ * attempt ~6s in, so the window deliberately outlives it: a transient network
+ * recovers and registers inside the grace period — and any registration
+ * immediately clears the unstable verdict — while genuinely UDP-hostile
+ * networks keep failing and are self-healed at ~first-failure+10s instead of
+ * burning the full 60s health budget. */
+const QUIC_UNSTABLE_GRACE_MS = 10_000;
 /** DoH endpoints used as a DNS fallback when the system resolver cannot
  * resolve the tunnel hostname (campus/corporate DNS often fails on
  * *.trycloudflare.com wildcard subdomains). Only the hostname is sent,
@@ -1746,6 +1749,23 @@ export class BridgeManager implements vscode.Disposable {
     this.sessionPruneTimer.unref?.();
   }
 
+  /** Terminate a cloudflared/ngrok tunnel child. Windows routes through
+   * taskkill /T /F so users launching cloudflared via a wrapper script
+   * (.cmd/.bat) do not leave orphaned grandchildren behind; taskkill failures
+   * fall back to a direct kill. Other platforms kill directly. */
+  private async killTunnelProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
+    if (child.killed) return;
+    if (process.platform === "win32" && child.pid) {
+      try {
+        await execFileAsync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
+        return;
+      } catch {
+        // Process already gone or taskkill unavailable — fall through.
+      }
+    }
+    child.kill();
+  }
+
   private startTunnelProcess(protocolOverride?: BridgeTunnelProtocol): ChildProcessWithoutNullStreams {
     if (!this.localPort) throw new Error("Bridge local HTTP port is unavailable.");
     const isCloudflare = this.tunnelProvider === "cloudflare" || this.tunnelProvider === "cloudflare-named";
@@ -1792,7 +1812,7 @@ export class BridgeManager implements vscode.Disposable {
         if (this.tunnelProvider === "cloudflare") this.domain = "";
         this.state = "starting";
         this.revision += 1;
-        if (!child.killed) child.kill();
+        void this.killTunnelProcess(child);
         this.beginTunnelRecovery();
       }
     });
@@ -2206,10 +2226,10 @@ export class BridgeManager implements vscode.Disposable {
         throw new Error(`Cloudflare Named Tunnel connected, but ${this.publicHealthUrl()} could not reach Bridge. In Cloudflare Tunnels, set the published application hostname to ${this.configuredNamedDomain} and its Service URL to http://127.0.0.1:${this.namedTunnelLocalPort}.`);
       }
       if (!cloudflaredSawRegistration(diagnostics) && cloudflaredQuicDialFailures(diagnostics) >= QUIC_UNSTABLE_DIAL_FAILURES) {
-        throw new Error(t("tunnelNeverRegisteredQuicError", cloudflaredQuicDialFailures(diagnostics), cloudflaredLogTail(diagnostics)));
+        throw new Error(t("tunnelNeverRegisteredQuicError", cloudflaredQuicDialFailures(diagnostics), cloudflaredLogTail(diagnostics, 200)));
       }
       if (this.tunnelProvider === "cloudflare-named") {
-        throw new Error(t("tunnelNeverRegisteredError", cloudflaredLogTail(diagnostics)));
+        throw new Error(t("tunnelNeverRegisteredError", cloudflaredLogTail(diagnostics, 200)));
       }
       throw new Error(`Public Bridge health check timed out after ${Math.round(PUBLIC_HEALTH_STARTUP_TIMEOUT_MS / 1000)} seconds: ${this.publicHealthUrl()}`);
     } finally {
@@ -2243,7 +2263,10 @@ export class BridgeManager implements vscode.Disposable {
         this.tunnelTransportFallback = "http2";
         this.output.appendLine("[bridge] QUIC transport unstable; restarting tunnel with --protocol http2.");
         void vscode.window.showInformationMessage(t("quicFallbackNotice")).then(undefined, () => undefined);
-        if (!child.killed) child.kill();
+        // Fire-and-forget: the replacement tunnel uses its own port and
+        // Cloudflare tolerates multiple connectors, so we do not wait for the
+        // old process to exit before spawning.
+        void this.killTunnelProcess(child);
         this.tunnelProcess = undefined;
         await this.startTunnelOnceWithProtocol(expectedGeneration, "http2");
         return;
@@ -2253,7 +2276,7 @@ export class BridgeManager implements vscode.Disposable {
       this.output.appendLine(`[bridge] public health verified: ${this.publicHealthUrl()}`);
     } catch (error) {
       if (this.tunnelProcess === child) this.tunnelProcess = undefined;
-      if (!child.killed) child.kill();
+      void this.killTunnelProcess(child);
       throw error;
     }
   }
@@ -2781,15 +2804,7 @@ export class BridgeManager implements vscode.Disposable {
     const tunnel = this.tunnelProcess;
     this.tunnelProcess = undefined;
     if (tunnel && !tunnel.killed) {
-      if (process.platform === "win32" && tunnel.pid) {
-        try {
-          await execFileAsync("taskkill", ["/PID", String(tunnel.pid), "/T", "/F"], { windowsHide: true, timeout: 5_000 });
-        } catch {
-          tunnel.kill();
-        }
-      } else {
-        tunnel.kill();
-      }
+      await this.killTunnelProcess(tunnel);
     }
 
     this.activeRequests = 0;

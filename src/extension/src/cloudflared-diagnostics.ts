@@ -167,8 +167,13 @@ export function cloudflaredQuicUnstable(diagnostics: CloudflaredProcessDiagnosti
   return cloudflaredQuicDialFailures(diagnostics) >= QUIC_UNSTABLE_DIAL_FAILURES && !cloudflaredSawRegistration(diagnostics);
 }
 
-export function cloudflaredLogTail(diagnostics: CloudflaredProcessDiagnostics | undefined): string {
-  return (diagnostics?.logTail ?? "").trim();
+/** Rolling cloudflared output tail. The full 2000-char tail streams live to
+ * the AgentBridge output channel; error-message call sites pass a smaller
+ * maxChars so popups stay readable. */
+export function cloudflaredLogTail(diagnostics: CloudflaredProcessDiagnostics | undefined, maxChars = 2_000): string {
+  const tail = (diagnostics?.logTail ?? "").trim();
+  if (tail.length <= maxChars) return tail;
+  return `…${tail.slice(-maxChars)}`;
 }
 
 export function cloudflaredPrecheckFailureKind(
