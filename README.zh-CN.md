@@ -115,6 +115,7 @@ Cloudflare Quick Tunnel 与 Cloudflare Named Tunnel 共用同一套 `cloudflared
 | 配置键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `tunnelProvider` | enum | `cloudflare` | `cloudflare` / `cloudflare-named` / `ngrok` |
+| `tunnelProtocol` | enum | `auto` | cloudflared 与 Cloudflare 边缘之间的传输协议（仅 Cloudflare 隧道）：`auto` / `quic`（UDP 7844）/ `http2`（TCP 7844）。在 QUIC 不稳定的网络（校园网/企业网常掐断持续 UDP 流）建议用 `http2`。下次隧道启动或自动重连时生效。 |
 | `cloudflareNamedDomain` | string | `""` | 固定主机名（如 `mcp.example.com`） |
 | `cloudflareNamedLocalPort` | integer | `48271` | Named Tunnel 路由到的本地端口 |
 | `ngrokDomain` | string | `""` | ngrok 保留域名（如 `you.ngrok-free.dev`） |

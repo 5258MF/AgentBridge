@@ -316,6 +316,12 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         await vscode.workspace.getConfiguration("agentbridge.bridge").update("openInternalBrowser", v, vscode.ConfigurationTarget.Global);
         return;
       }
+      case "setTunnelProtocol": {
+        const v = message.value;
+        if (v !== "auto" && v !== "quic" && v !== "http2") throw new Error("Invalid tunnelProtocol value.");
+        await vscode.workspace.getConfiguration("agentbridge.bridge").update("tunnelProtocol", v, vscode.ConfigurationTarget.Global);
+        return;
+      }
       case "configureManagedShell": {
         const candidatePath = typeof message.path === "string" ? message.path.trim() : "";
         if (candidatePath !== "") {
@@ -869,6 +875,15 @@ private renderHtml(): string {
             <button class="secondary" id="managedShellResetButton" disabled>${t("resetToDefault")}</button>
           </div>
           <div id="managedShellWarning" style="color:var(--vscode-errorForeground); display:none; font-size:11px; line-height:1.4;"></div>
+        </div>
+      </div>
+      <div class="agentbridge-advanced-section">
+        <h4>${t("tunnelTransportSection")}</h4>
+        <p class="agentbridge-help">${t("tunnelTransportHelp")}</p>
+        <div class="agentbridge-controls" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">
+          <button class="secondary agentbridge-oib-radio" id="tunnelProtocolAuto" role="radio" aria-checked="true" disabled>${t("tunnelProtocolAutoLabel")}</button>
+          <button class="secondary agentbridge-oib-radio" id="tunnelProtocolQuic" role="radio" aria-checked="false" disabled>${t("tunnelProtocolQuicLabel")}</button>
+          <button class="secondary agentbridge-oib-radio" id="tunnelProtocolHttp2" role="radio" aria-checked="false" disabled>${t("tunnelProtocolHttp2Label")}</button>
         </div>
       </div>
       <div class="agentbridge-advanced-section">
@@ -1488,6 +1503,11 @@ private renderHtml(): string {
       $('openInternalBrowserAll').setAttribute('aria-checked', String(status.openInternalBrowser === 'all'));
       $('openInternalBrowserExternal').setAttribute('aria-checked', String(status.openInternalBrowser === 'external'));
     }
+    if (typeof status.tunnelProtocol === 'string' && ['auto','quic','http2'].includes(status.tunnelProtocol)) {
+      $('tunnelProtocolAuto').setAttribute('aria-checked', String(status.tunnelProtocol === 'auto'));
+      $('tunnelProtocolQuic').setAttribute('aria-checked', String(status.tunnelProtocol === 'quic'));
+      $('tunnelProtocolHttp2').setAttribute('aria-checked', String(status.tunnelProtocol === 'http2'));
+    }
     $('managedShellCurrentLabel').textContent = status.managedShellPath || t('unknown');
     const managedShellWarnEl = $('managedShellWarning');
     const managedShellWarn = status.managedShellOverrideWarning;
@@ -1550,6 +1570,9 @@ private renderHtml(): string {
     $('openInternalBrowserAuto').disabled = !statusLoaded || busy;
     $('openInternalBrowserAll').disabled = !statusLoaded || busy;
     $('openInternalBrowserExternal').disabled = !statusLoaded || busy;
+    $('tunnelProtocolAuto').disabled = !statusLoaded || busy;
+    $('tunnelProtocolQuic').disabled = !statusLoaded || busy;
+    $('tunnelProtocolHttp2').disabled = !statusLoaded || busy;
     updateSessionStartStopControl(lastStatus);
   }
 
@@ -1736,6 +1759,13 @@ private renderHtml(): string {
   $('openInternalBrowserAuto').addEventListener('click', () => setOib('auto'));
   $('openInternalBrowserAll').addEventListener('click', () => setOib('all'));
   $('openInternalBrowserExternal').addEventListener('click', () => setOib('external'));
+  const setTunnelProtocol = (v) => {
+    if (!lastStatus || busy) return;
+    vscode.postMessage({ type: 'setTunnelProtocol', value: v });
+  };
+  $('tunnelProtocolAuto').addEventListener('click', () => setTunnelProtocol('auto'));
+  $('tunnelProtocolQuic').addEventListener('click', () => setTunnelProtocol('quic'));
+  $('tunnelProtocolHttp2').addEventListener('click', () => setTunnelProtocol('http2'));
   $('quickProvider').addEventListener('click', () => selectTunnelProvider('cloudflare'));
   $('namedProvider').addEventListener('click', () => selectTunnelProvider('cloudflare-named'));
   $('ngrokProvider').addEventListener('click', () => selectTunnelProvider('ngrok'));

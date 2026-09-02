@@ -115,6 +115,7 @@ All settings live under the `agentbridge.bridge.*` namespace.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `tunnelProvider` | enum | `cloudflare` | `cloudflare` / `cloudflare-named` / `ngrok` |
+| `tunnelProtocol` | enum | `auto` | cloudflared↔Cloudflare edge transport (Cloudflare tunnels only): `auto` / `quic` (UDP 7844) / `http2` (TCP 7844). Use `http2` on networks where QUIC is unstable (campus/corporate networks often drop sustained UDP flows). Applies on the next tunnel start or automatic reconnect. |
 | `cloudflareNamedDomain` | string | `""` | Fixed hostname (e.g. `mcp.example.com`) |
 | `cloudflareNamedLocalPort` | integer | `48271` | Local port the named tunnel routes to |
 | `ngrokDomain` | string | `""` | Reserved ngrok domain (e.g. `you.ngrok-free.dev`) |

@@ -16,9 +16,15 @@ import type { IdeToolBroker } from "./ide-tool-broker.js";
 import { createTranslator, detectLang } from "./i18n.js";
 import {
   appendCloudflaredDiagnosticOutput,
+  cloudflaredFirstQuicFailureAt,
+  cloudflaredLogTail,
   cloudflaredPrecheckFailureKind,
+  cloudflaredQuicDialFailures,
+  cloudflaredQuicUnstable,
+  cloudflaredSawRegistration,
   createCloudflaredProcessDiagnostics,
   createRepeatedMessageThrottle,
+  QUIC_UNSTABLE_DIAL_FAILURES,
   type CloudflaredPrecheckFailureKind,
   type CloudflaredProcessDiagnostics,
 } from "./cloudflared-diagnostics.js";
@@ -33,6 +39,7 @@ const CLOUDFLARE_NAMED_DOMAIN_STATE_KEY = "agentbridge.bridge.cloudflareNamedDom
 const CLOUDFLARE_NAMED_TOKEN_SECRET = "agentbridge.bridge.cloudflareNamedTunnelToken";
 const CLOUDFLARE_NAMED_LOCAL_PORT_SETTING = "bridge.cloudflareNamedLocalPort";
 const TUNNEL_PROVIDER_SETTING = "bridge.tunnelProvider";
+const TUNNEL_PROTOCOL_SETTING = "bridge.tunnelProtocol";
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_ACTIVITY = 60;
 const MAX_TODOS = 24;
@@ -48,6 +55,11 @@ const PUBLIC_HEALTH_STARTUP_TIMEOUT_MS = 60_000;
 const PUBLIC_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
 const PUBLIC_HEALTH_LOG_THROTTLE_MS = 10_000;
 const CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS = 100;
+/** Grace after the first QUIC dial failure before the "QUIC unstable" early
+ * abort fires. Dial-failure bursts from a single dead connection arrive within
+ * milliseconds; the grace window filters those while still self-healing in
+ * seconds instead of burning the full 60 s health budget. */
+const QUIC_UNSTABLE_GRACE_MS = 6_000;
 /** DoH endpoints used as a DNS fallback when the system resolver cannot
  * resolve the tunnel hostname (campus/corporate DNS often fails on
  * *.trycloudflare.com wildcard subdomains). Only the hostname is sent,
@@ -72,6 +84,11 @@ const CLOUDFLARED_WINGET_PACKAGE = "Cloudflare.cloudflared";
 const DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT = 48271;
 
 export type BridgeTunnelProvider = "cloudflare" | "cloudflare-named" | "ngrok";
+
+/** cloudflared transport protocol between the local daemon and Cloudflare's edge.
+ * "auto" keeps cloudflared's own QUIC-first behavior; "quic"/"http2" pin the
+ * transport explicitly via the --protocol CLI flag. */
+export type BridgeTunnelProtocol = "auto" | "quic" | "http2";
 export type CloudflaredInstaller = "winget" | "homebrew" | "manual";
 export type CloudflaredInstallerAvailability = "unchecked" | "available" | "unavailable" | "manual-only";
 export type CloudflaredInstallResultCode =
@@ -106,6 +123,17 @@ export class BridgeStartCancelledError extends Error {
   constructor() {
     super("Bridge start was cancelled by a newer lifecycle operation.");
     this.name = "BridgeStartCancelledError";
+  }
+}
+
+/** Thrown out of waitForPublicHealth when cloudflared shows the "QUIC
+ * unstable" signature (repeated edge dial failures, zero registrations).
+ * startTunnelOnce catches it once per bridge session and retries the tunnel
+ * with an explicit http2 transport instead of burning the whole health budget. */
+export class BridgeQuicUnstableError extends Error {
+  constructor() {
+    super("cloudflared could not sustain QUIC connections to the Cloudflare edge.");
+    this.name = "BridgeQuicUnstableError";
   }
 }
 
@@ -395,6 +423,13 @@ export interface BridgeStatus {
    * handler at request time — no cache, so changes apply immediately without `onDidChangeConfiguration`.
    */
   readonly openInternalBrowser: "auto" | "all" | "external";
+  /**
+   * cloudflared ↔ Cloudflare edge transport protocol, read fresh from
+   * `agentbridge.bridge.tunnelProtocol` on every getStatus() call (same
+   * no-cache pattern as openInternalBrowser). Rendered by the panel's
+   * Tunnel Transport radio group in the advanced settings card.
+   */
+  readonly tunnelProtocol: "auto" | "quic" | "http2";
   /**
    * When true, tools that modify the local environment (apply_patch,
    * run_command, send_command_input) are hidden from tools/list and
@@ -910,6 +945,10 @@ function cancellationFromAbortSignal(signal: AbortSignal | undefined): { token?:
 export class BridgeManager implements vscode.Disposable {
   private state: BridgeStatus["state"] = "stopped";
   private tunnelProvider: BridgeTunnelProvider = "cloudflare";
+  /** Sticky http2 fallback: once an "auto" tunnel is found QUIC-unstable, every
+   * spawn (including automatic reconnects) uses http2 until the next manual
+   * start resets it. Explicit protocol settings are never overridden. */
+  private tunnelTransportFallback: BridgeTunnelProtocol | undefined;
   private domain = "";
   private configuredDomain = "";
   private configuredNamedDomain = "";
@@ -1049,6 +1088,7 @@ export class BridgeManager implements vscode.Disposable {
       managedShellPath: managedShellExecutable(),
       managedShellOverrideWarning: managedShellOverrideWarning(),
       openInternalBrowser: vscode.workspace.getConfiguration("agentbridge.bridge").get<"auto" | "all" | "external">("openInternalBrowser", "auto"),
+      tunnelProtocol: this.readTunnelProtocol(),
       readOnlyMode: this.readOnlyMode,
     };
   }
@@ -1077,6 +1117,13 @@ export class BridgeManager implements vscode.Disposable {
   private readTunnelProvider(): BridgeTunnelProvider {
     const provider = vscode.workspace.getConfiguration("agentbridge").get<BridgeTunnelProvider>(TUNNEL_PROVIDER_SETTING, "cloudflare");
     return provider === "ngrok" || provider === "cloudflare-named" ? provider : "cloudflare";
+  }
+
+  /** Read the configured cloudflared transport protocol. Unknown values are
+   * clamped to "auto" so a hand-edited settings.json can never break spawns. */
+  private readTunnelProtocol(): BridgeTunnelProtocol {
+    const protocol = vscode.workspace.getConfiguration("agentbridge").get<BridgeTunnelProtocol>(TUNNEL_PROTOCOL_SETTING, "auto");
+    return protocol === "quic" || protocol === "http2" ? protocol : "auto";
   }
 
   private readReadOnlyMode(): boolean {
@@ -1612,6 +1659,9 @@ export class BridgeManager implements vscode.Disposable {
     this.assertStartGeneration(generation);
     this.state = "starting";
     this.lastError = undefined;
+    // A manual start re-opens the QUIC door: the sticky http2 fallback only
+    // applies within a single start-to-stop lifecycle.
+    this.tunnelTransportFallback = undefined;
     try {
       if (!this.routeToken) {
         await this.initialize();
@@ -1696,16 +1746,21 @@ export class BridgeManager implements vscode.Disposable {
     this.sessionPruneTimer.unref?.();
   }
 
-  private startTunnelProcess(): ChildProcessWithoutNullStreams {
+  private startTunnelProcess(protocolOverride?: BridgeTunnelProtocol): ChildProcessWithoutNullStreams {
     if (!this.localPort) throw new Error("Bridge local HTTP port is unavailable.");
     const isCloudflare = this.tunnelProvider === "cloudflare" || this.tunnelProvider === "cloudflare-named";
     const command = isCloudflare ? this.cloudflaredExecutable : "ngrok";
     const commandLabel = isCloudflare ? "cloudflared" : "ngrok";
+    // "auto" keeps cloudflared's own QUIC-first behavior: the flag is omitted so
+    // the spawned command line stays byte-identical to pre-setting releases.
+    const protocol = protocolOverride ?? this.readTunnelProtocol();
+    const protocolArgs = isCloudflare && protocol !== "auto" ? ["--protocol", protocol] : [];
     const args = this.tunnelProvider === "cloudflare"
-      ? ["tunnel", "--url", `http://127.0.0.1:${this.localPort}`]
+      ? ["tunnel", ...protocolArgs, "--url", `http://127.0.0.1:${this.localPort}`]
       : this.tunnelProvider === "cloudflare-named"
-        ? ["tunnel", "run"]
+        ? ["tunnel", "run", ...protocolArgs]
         : ["http", String(this.localPort), "--url", `https://${this.configuredDomain}`, "--log=stdout", "--log-format=json"];
+    if (protocolArgs.length) this.output.appendLine(`[bridge] tunnel transport protocol: ${protocol}`);
     const child = spawn(command, args, {
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
@@ -2114,12 +2169,22 @@ export class BridgeManager implements vscode.Disposable {
       onCloudflaredData();
     }
     try {
+      // Only "auto" (cloudflared's own QUIC-first choice) is eligible for the
+      // early abort + http2 fallback; an explicit quic/http2 choice is honored.
+      const allowQuicFallback = isCloudflare && !this.tunnelTransportFallback && this.readTunnelProtocol() === "auto";
       while (Date.now() < deadline) {
         if (child.exitCode !== null || child.signalCode !== null || this.tunnelProcess !== child) {
           throw new Error(`${this.tunnelProvider} tunnel exited before the public Bridge health endpoint became reachable.`);
         }
         const precheckError = observedPrecheckError;
         if (precheckError) throw precheckError;
+        if (allowQuicFallback) {
+          const diagnostics = this.cloudflaredProcessDiagnostics.get(child);
+          const firstQuicFailureAt = cloudflaredFirstQuicFailureAt(diagnostics);
+          if (cloudflaredQuicUnstable(diagnostics) && firstQuicFailureAt !== undefined && Date.now() - firstQuicFailureAt >= QUIC_UNSTABLE_GRACE_MS) {
+            throw new BridgeQuicUnstableError();
+          }
+        }
         const healthy = await this.requestPublicHealth(reportFailure, isCloudflare ? precheckAbort.signal : undefined);
         const postRequestPrecheckError = observedPrecheckError;
         if (postRequestPrecheckError) throw postRequestPrecheckError;
@@ -2136,8 +2201,15 @@ export class BridgeManager implements vscode.Disposable {
       }
       const precheckError = observedPrecheckError ?? this.cloudflaredPrecheckError(child);
       if (precheckError) throw precheckError;
-      if (this.tunnelProvider === "cloudflare-named") {
+      const diagnostics = this.cloudflaredProcessDiagnostics.get(child);
+      if (this.tunnelProvider === "cloudflare-named" && cloudflaredSawRegistration(diagnostics)) {
         throw new Error(`Cloudflare Named Tunnel connected, but ${this.publicHealthUrl()} could not reach Bridge. In Cloudflare Tunnels, set the published application hostname to ${this.configuredNamedDomain} and its Service URL to http://127.0.0.1:${this.namedTunnelLocalPort}.`);
+      }
+      if (!cloudflaredSawRegistration(diagnostics) && cloudflaredQuicDialFailures(diagnostics) >= QUIC_UNSTABLE_DIAL_FAILURES) {
+        throw new Error(t("tunnelNeverRegisteredQuicError", cloudflaredQuicDialFailures(diagnostics), cloudflaredLogTail(diagnostics)));
+      }
+      if (this.tunnelProvider === "cloudflare-named") {
+        throw new Error(t("tunnelNeverRegisteredError", cloudflaredLogTail(diagnostics)));
       }
       throw new Error(`Public Bridge health check timed out after ${Math.round(PUBLIC_HEALTH_STARTUP_TIMEOUT_MS / 1000)} seconds: ${this.publicHealthUrl()}`);
     } finally {
@@ -2151,11 +2223,31 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   private async startTunnelOnce(expectedGeneration?: number): Promise<void> {
+    await this.startTunnelOnceWithProtocol(expectedGeneration, this.tunnelTransportFallback);
+  }
+
+  private async startTunnelOnceWithProtocol(expectedGeneration: number | undefined, protocolOverride: BridgeTunnelProtocol | undefined): Promise<void> {
     if (expectedGeneration !== undefined) this.assertStartGeneration(expectedGeneration);
-    const child = this.startTunnelProcess();
+    const child = this.startTunnelProcess(protocolOverride);
     try {
       await this.waitForTunnelStartup(child);
-      await this.waitForPublicHealth(child);
+      try {
+        await this.waitForPublicHealth(child);
+      } catch (error) {
+        // One self-heal attempt per bridge session: when "auto" QUIC proves
+        // unstable (repeated edge dial failures, zero registrations), restart
+        // the tunnel with an explicit http2 transport instead of failing.
+        // Precheck failures and ordinary timeouts propagate unchanged.
+        if (!(error instanceof BridgeQuicUnstableError) || this.tunnelTransportFallback) throw error;
+        if (expectedGeneration !== undefined) this.assertStartGeneration(expectedGeneration);
+        this.tunnelTransportFallback = "http2";
+        this.output.appendLine("[bridge] QUIC transport unstable; restarting tunnel with --protocol http2.");
+        void vscode.window.showInformationMessage(t("quicFallbackNotice")).then(undefined, () => undefined);
+        if (!child.killed) child.kill();
+        this.tunnelProcess = undefined;
+        await this.startTunnelOnceWithProtocol(expectedGeneration, "http2");
+        return;
+      }
       if (expectedGeneration !== undefined) this.assertStartGeneration(expectedGeneration);
       if (this.tunnelProcess !== child) throw new Error(`${this.tunnelProvider} tunnel changed before health verification completed.`);
       this.output.appendLine(`[bridge] public health verified: ${this.publicHealthUrl()}`);

@@ -15,6 +15,16 @@ export interface CloudflaredProcessDiagnostics {
   complete: boolean;
   stdoutBuffer: string;
   stderrBuffer: string;
+  /** Whole-process rolling tail of cloudflared's output (both streams), capped.
+   * Precheck buffers only hold the trailing partial line, so error evidence
+   * (QUIC dial failures, registrations) would otherwise be lost. */
+  logTail: string;
+  /** Count of "Failed to dial ... quic connection" log lines for this process. */
+  quicDialFailures: number;
+  /** Count of "Registered tunnel connection" log lines for this process. */
+  registrationCount: number;
+  /** Date.now() of the first observed QUIC dial failure, for fallback grace. */
+  firstQuicFailureAt?: number;
 }
 
 export interface RepeatedMessageEmission {
@@ -28,6 +38,9 @@ export interface RepeatedMessageThrottle {
 }
 
 const MAX_PENDING_LINE_LENGTH = 8 * 1024;
+const MAX_LOG_TAIL_CHARS = 2_000;
+/** QUIC dial failures tolerated before the transport is declared unstable. */
+export const QUIC_UNSTABLE_DIAL_FAILURES = 2;
 
 export function createCloudflaredProcessDiagnostics(): CloudflaredProcessDiagnostics {
   return {
@@ -42,6 +55,9 @@ export function createCloudflaredProcessDiagnostics(): CloudflaredProcessDiagnos
     complete: false,
     stdoutBuffer: "",
     stderrBuffer: "",
+    logTail: "",
+    quicDialFailures: 0,
+    registrationCount: 0,
   };
 }
 
@@ -100,6 +116,22 @@ function parseCloudflaredDiagnosticLine(diagnostics: CloudflaredProcessDiagnosti
   }
 }
 
+/** Track transport-level lifecycle evidence from plain cloudflared log lines
+ * (no run_id prefix): QUIC dial failures and successful tunnel registrations.
+ * These counters span the whole process lifetime — unlike the precheck state,
+ * which is reset per run_id — because the "QUIC unstable" verdict compares
+ * failures that predate a registration attempt. */
+function parseCloudflaredLifecycleLine(diagnostics: CloudflaredProcessDiagnostics, line: string): void {
+  if (/\bRegistered tunnel connection\b/i.test(line)) {
+    diagnostics.registrationCount += 1;
+    return;
+  }
+  if (/\bfailed to dial\b[^\n]*\bquic connection\b/i.test(line)) {
+    diagnostics.quicDialFailures += 1;
+    diagnostics.firstQuicFailureAt ??= Date.now();
+  }
+}
+
 export function appendCloudflaredDiagnosticOutput(
   diagnostics: CloudflaredProcessDiagnostics,
   stream: CloudflaredDiagnosticStream,
@@ -108,7 +140,35 @@ export function appendCloudflaredDiagnosticOutput(
   const bufferKey = stream === "stdout" ? "stdoutBuffer" : "stderrBuffer";
   const lines = `${diagnostics[bufferKey]}${chunk}`.split(/\r?\n/);
   diagnostics[bufferKey] = (lines.pop() ?? "").slice(-MAX_PENDING_LINE_LENGTH);
-  for (const line of lines) parseCloudflaredDiagnosticLine(diagnostics, line);
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    diagnostics.logTail = `${diagnostics.logTail}${line}\n`.slice(-MAX_LOG_TAIL_CHARS);
+    parseCloudflaredLifecycleLine(diagnostics, line);
+    parseCloudflaredDiagnosticLine(diagnostics, line);
+  }
+}
+
+export function cloudflaredSawRegistration(diagnostics: CloudflaredProcessDiagnostics | undefined): boolean {
+  return (diagnostics?.registrationCount ?? 0) > 0;
+}
+
+export function cloudflaredQuicDialFailures(diagnostics: CloudflaredProcessDiagnostics | undefined): number {
+  return diagnostics?.quicDialFailures ?? 0;
+}
+
+export function cloudflaredFirstQuicFailureAt(diagnostics: CloudflaredProcessDiagnostics | undefined): number | undefined {
+  return diagnostics?.firstQuicFailureAt;
+}
+
+/** QUIC transport instability verdict: repeated edge dial failures with zero
+ * successful registrations. Once any connection registers, the verdict stays
+ * false so a running tunnel is never declared unstable mid-flight. */
+export function cloudflaredQuicUnstable(diagnostics: CloudflaredProcessDiagnostics | undefined): boolean {
+  return cloudflaredQuicDialFailures(diagnostics) >= QUIC_UNSTABLE_DIAL_FAILURES && !cloudflaredSawRegistration(diagnostics);
+}
+
+export function cloudflaredLogTail(diagnostics: CloudflaredProcessDiagnostics | undefined): string {
+  return (diagnostics?.logTail ?? "").trim();
 }
 
 export function cloudflaredPrecheckFailureKind(

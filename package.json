@@ -200,6 +200,22 @@
           "scope": "application",
           "description": "Public tunnel provider used by AgentBridge."
         },
+        "agentbridge.bridge.tunnelProtocol": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "quic",
+            "http2"
+          ],
+          "enumDescriptions": [
+            "cloudflared chooses the transport itself (QUIC first, HTTP/2 fallback). QUIC handshakes can pass on networks that later drop sustained UDP flows, so this may stay unstable on some campus/corporate networks.",
+            "Force QUIC over UDP 7844. Fastest when the network allows long-lived UDP flows; rarely survives restrictive networks.",
+            "Force HTTP/2 over TCP 7844. Recommended on networks where QUIC is unstable or blocked (campus/corporate networks, VPNs). Cloudflare's edge accepts both transports on the same port."
+          ],
+          "default": "auto",
+          "scope": "application",
+          "description": "Transport protocol between cloudflared and the Cloudflare edge. Cloudflare tunnels only (ignored for ngrok). Read when the tunnel process spawns, so changes apply on the next tunnel start or automatic reconnect without restarting the Bridge."
+        },
         "agentbridge.bridge.persistentMode": {
           "type": "boolean",
           "default": false,
