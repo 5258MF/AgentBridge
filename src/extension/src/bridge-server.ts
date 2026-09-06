@@ -54,6 +54,7 @@ const SESSION_EVENT_STORE_LIMIT = 512;
 const PUBLIC_HEALTH_STARTUP_TIMEOUT_MS = 60_000;
 const PUBLIC_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
 const PUBLIC_HEALTH_LOG_THROTTLE_MS = 10_000;
+const HTTP_SERVER_SHUTDOWN_TIMEOUT_MS = 3_000;
 const CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS = 100;
 /** Grace after the first QUIC dial failure before the "QUIC unstable" early
  * abort fires. cloudflared's reconnect backoff (2s+4s) lands its third dial
@@ -1048,6 +1049,9 @@ export class BridgeManager implements vscode.Disposable {
     }
     const localUrl = this.localPort && this.routeToken ? `http://127.0.0.1:${this.localPort}/mcp/${this.routeToken}` : undefined;
     const publicUrl = this.domain && this.routeToken ? `https://${this.domain}/mcp/${this.routeToken}` : undefined;
+    const visibleToolNames = BRIDGE_TOOL_DEFINITIONS
+      .map((tool) => tool.name)
+      .filter((name) => !this.readOnlyMode || !READ_ONLY_BLOCKED_TOOL_NAMES.has(name));
     return {
       state: this.state,
       transport: "streamable-http",
@@ -1071,8 +1075,8 @@ export class BridgeManager implements vscode.Disposable {
       tunnelVersion: this.tunnelVersion,
       tunnelConfigValid: this.tunnelConfigValid,
       lastError: this.lastError,
-      toolNames: BRIDGE_TOOL_DEFINITIONS.map((tool) => tool.name).filter((name) => !this.readOnlyMode || !READ_ONLY_BLOCKED_TOOL_NAMES.has(name)),
-      toolCount: BRIDGE_TOOL_DEFINITIONS.length,
+      toolNames: visibleToolNames,
+      toolCount: visibleToolNames.length,
       activeRequests: this.activeRequests,
       connected: this.sessions.size > 0,
       revision: this.revision,
@@ -2493,8 +2497,9 @@ export class BridgeManager implements vscode.Disposable {
     const instructions = this.readOnlyMode
       ? `${BRIDGE_SERVER_INSTRUCTIONS}\n\nRead-only mode is ACTIVE: apply_patch, run_command, and send_command_input are disabled. Do not attempt file modifications or command execution; report findings and proposed changes to the user instead.`
       : BRIDGE_SERVER_INSTRUCTIONS;
+    const packageVersion = String(this.context.extension.packageJSON.version ?? "").trim() || "0.0.0";
     const server = new McpServer(
-      { name: "agentbridge", version: "0.1.7" },
+      { name: "agentbridge", version: packageVersion },
       { capabilities: { tools: {}, logging: {} }, instructions },
     );
     let transport!: StreamableHTTPServerTransport;
@@ -2682,8 +2687,7 @@ export class BridgeManager implements vscode.Disposable {
     if (!session) return;
     this.sessions.delete(sessionId);
     this.revision += 1;
-    try { void session.transport.close(); } catch { /* ignore */ }
-    try { void session.server.close(); } catch { /* ignore */ }
+    void session.server.close().catch(() => undefined);
     this.output.appendLine(`[bridge] session destroyed: ${sessionId}`);
   }
 
@@ -2834,7 +2838,35 @@ export class BridgeManager implements vscode.Disposable {
     const server = this.httpServer;
     this.httpServer = undefined;
     if (server) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          resolve();
+        };
+
+        if (!server.listening) {
+          finish();
+          return;
+        }
+
+        timer = setTimeout(() => {
+          try {
+            server.closeAllConnections();
+          } finally {
+            finish();
+          }
+        }, HTTP_SERVER_SHUTDOWN_TIMEOUT_MS);
+
+        try {
+          server.close(() => finish());
+        } catch {
+          finish();
+        }
+      });
     }
     this.localPort = undefined;
     if (this.tunnelProvider === "cloudflare") this.domain = "";
