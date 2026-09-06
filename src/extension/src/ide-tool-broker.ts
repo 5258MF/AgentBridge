@@ -45,7 +45,13 @@ interface CommandState {
   background: boolean;
   status: "running" | "completed" | "failed" | "killed";
   exitCode: number | null;
-  output: Buffer;
+  // Captured output as a chunk list. outputChunkHead marks the first live chunk and
+  // outputHeadSkip the offset within it (not an absolute output offset); trimming drops
+  // whole chunks so appends stay amortized O(1) under sustained output.
+  outputChunks: Buffer[];
+  outputChunkHead: number;
+  outputHeadSkip: number;
+  retainedOutputBytes: number;
   outputStartOffset: number;
   totalOutputBytes: number;
   ansiPending: string;
@@ -1334,7 +1340,7 @@ class TerminalCommandManager implements vscode.Disposable {
     // Backspace redraw fragments that leak past the echo gate: erase the character before
     // each backspace, mirroring the terminal's delete semantics.
     clean = clean.replace(/.?\u0008/g, "");
-    if (state.output.length === 0) {
+    if (state.totalOutputBytes === 0) {
       // Strip leading blank lines that leaked past the gate before the first real byte of
       // captured output. Deliberately NOT stripping prompt-shaped text here: commands whose
       // genuine output starts with "$ " or "PS ..." (e.g. echo '$ 100') would lose bytes.
@@ -1344,11 +1350,25 @@ class TerminalCommandManager implements vscode.Disposable {
     if (!clean) return;
     const bytes = Buffer.from(clean, "utf8");
     state.totalOutputBytes += bytes.length;
-    state.output = Buffer.concat([state.output, bytes]);
-    if (state.output.length > MAX_CAPTURED_OUTPUT_BYTES) {
-      state.output = state.output.subarray(state.output.length - MAX_CAPTURED_OUTPUT_BYTES);
+    state.outputChunks.push(bytes);
+    state.retainedOutputBytes += bytes.length;
+    while (state.retainedOutputBytes > MAX_CAPTURED_OUTPUT_BYTES) {
+      const head = state.outputChunks[state.outputChunkHead];
+      const drop = Math.min(head.length - state.outputHeadSkip, state.retainedOutputBytes - MAX_CAPTURED_OUTPUT_BYTES);
+      state.outputHeadSkip += drop;
+      state.retainedOutputBytes -= drop;
+      if (state.outputHeadSkip >= head.length) {
+        state.outputChunkHead += 1;
+        state.outputHeadSkip = 0;
+      }
     }
-    state.outputStartOffset = state.totalOutputBytes - state.output.length;
+    // Chunks left of the head are unreachable; compact so the chunk array itself cannot
+    // grow without bound under sustained output.
+    if (state.outputChunkHead > 0 && state.outputChunkHead * 2 >= state.outputChunks.length) {
+      state.outputChunks = state.outputChunks.slice(state.outputChunkHead);
+      state.outputChunkHead = 0;
+    }
+    state.outputStartOffset = state.totalOutputBytes - state.retainedOutputBytes;
   }
 
   private finishState(state: CommandState, exitCode: number | null, status?: CommandState["status"]): void {
@@ -1367,9 +1387,22 @@ class TerminalCommandManager implements vscode.Disposable {
     const limit = Math.min(MAX_OUTPUT_BYTES, Math.max(1, maxBytes));
     const outputLost = requestedOffset < state.outputStartOffset;
     const actualOffset = Math.max(state.outputStartOffset, Math.min(requestedOffset, state.totalOutputBytes));
-    const localStart = actualOffset - state.outputStartOffset;
-    const available = state.output.subarray(localStart);
-    const slice = available.subarray(0, limit);
+    const windowStart = actualOffset - state.outputStartOffset;
+    const windowEnd = Math.min(windowStart + limit, state.retainedOutputBytes);
+    const slices: Buffer[] = [];
+    let position = 0;
+    for (let index = state.outputChunkHead; index < state.outputChunks.length && position < windowEnd; index += 1) {
+      const chunk = state.outputChunks[index];
+      const liveStart = index === state.outputChunkHead ? state.outputHeadSkip : 0;
+      const liveLength = chunk.length - liveStart;
+      if (position + liveLength > windowStart) {
+        const from = liveStart + Math.max(0, windowStart - position);
+        const to = liveStart + Math.min(position + liveLength, windowEnd) - position;
+        slices.push(chunk.subarray(from, to));
+      }
+      position += liveLength;
+    }
+    const slice = slices.length === 1 ? slices[0] : slices.length === 0 ? Buffer.alloc(0) : Buffer.concat(slices);
     const nextOffset = actualOffset + slice.length;
     return {
       command_id: state.id,
@@ -1425,7 +1458,10 @@ class TerminalCommandManager implements vscode.Disposable {
       background,
       status: "running",
       exitCode: null,
-      output: Buffer.alloc(0),
+      outputChunks: [],
+      outputChunkHead: 0,
+      outputHeadSkip: 0,
+      retainedOutputBytes: 0,
       outputStartOffset: 0,
       totalOutputBytes: 0,
       ansiPending: "",
