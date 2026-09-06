@@ -202,7 +202,7 @@ Use:
 - apply_patch for workspace changes
 - get_diagnostics after edits
 - run_command for builds and tests
-- terminate_command to force-kill a stuck command and free its managed terminal
+- terminate_command for a hard stop when cooperative Ctrl+C does not stop a command
 - set_todos to maintain the complete task list for multi-step work
 - report_progress to report transient progress for the current task
 

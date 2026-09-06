@@ -7,6 +7,7 @@
 - **Terminal pool hard cap** — live managed terminals (busy/background included) are capped at 8. When the cap is reached, a command whose cwd matches no idle terminal recycles the least recently used idle one; if every terminal is busy, `run_command` fails fast with a deterministic error listing each busy terminal's id and a truncated command summary (pointing at `terminate_command`) instead of spawning an unbounded number of terminals.
 - **Quadratic output capture removed** — captured `run_command` output is stored as a chunk list with per-chunk offsets: appending no longer re-copies the whole 2 MiB retention buffer on every output chunk, and `get_command_output` locates the requested window by binary search so read cost is bounded by the window (up to 128 KiB) — polling an offset already at the end of the stream returns immediately. `output_lost` / `has_more` / offset semantics are unchanged.
 - **Open Terminal activity action fixed** — terminal activity cards now read `terminal_id` from their presentation payload, so `run_command` / `get_command_output` can show the action again. Successfully killed commands do not offer an Open Terminal action for the terminal that was just closed.
+- **MCP tool descriptions cleaned up** — `apply_patch` no longer refers to Codex or GPT-family models, image-tool wording is client-neutral and matches the actual base64 file payload, terminal descriptions distinguish cooperative Ctrl+C from a hard stop, and `run_command` now documents the 8-terminal pool limit.
 
 ## 0.1.8 (2026-09-02)
 

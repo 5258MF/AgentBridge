@@ -28,7 +28,7 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "run_command",
     vscodeToolName: "agentbridge_run_command",
     capability: "execute",
-    description: "Run a shell command in a AgentBridge-managed persistent real PTY that is independent of the user's terminal profiles and VS Code Shell Integration. ${RUNTIME_SHELL_DESCRIPTION}. ${RUNTIME_SHELL_SYNTAX_HINT} Shell state such as environment variables, functions and the current directory persists when the same terminal is reused. Omit cwd to continue from the most recently used idle AgentBridge terminal's current directory; the first command defaults to the workspace root. Interactive input, terminal resize and TTY-aware CLI behavior are supported. Concurrent/busy commands may use additional terminals. Always explicitly choose background=true for long-running servers/watchers and background=false for commands whose result should be awaited. Returns a command_id for later output inspection or interactive input.",
+    description: "Run a shell command in an AgentBridge-managed persistent real PTY that is independent of the user's terminal profiles and VS Code Shell Integration. ${RUNTIME_SHELL_DESCRIPTION}. ${RUNTIME_SHELL_SYNTAX_HINT} Shell state such as environment variables, functions and the current directory persists when the same terminal is reused. Omit cwd to continue from the most recently used idle AgentBridge terminal's current directory; a new terminal starts at the workspace root. Interactive input, resize, and TTY-aware CLI behavior are supported. Concurrent commands may use additional managed terminals, up to 8 live terminals total; when all are busy, additional run_command calls fail until a terminal becomes available or a stuck command is terminated. Explicitly choose background=true for long-running servers/watchers and background=false for commands whose result should be awaited. Returns a command_id for later output inspection or interactive input.",
     inputSchema: {
       type: "object",
       required: ["command", "background"],
@@ -61,7 +61,7 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "send_command_input",
     vscodeToolName: "agentbridge_send_command_input",
     capability: "execute",
-    description: "Send text to the terminal of a running command. Use for interactive prompts or REPL input. A newline is appended by default. Sending the control character \\u0003 (Ctrl+C) with append_newline=false requests an interrupt of the foreground program; Ctrl+C is cooperative and may not terminate REPLs, SSH sessions, or programs that handle or ignore the signal — use terminate_command if the command keeps running.",
+    description: "Send text to a running managed terminal for prompts, REPLs, or other interactive input. A newline is appended by default. To request Ctrl+C, send \\u0003 with append_newline=false. Ctrl+C is cooperative and may leave the command running; check with get_command_output and use terminate_command when a hard stop is required.",
     inputSchema: {
       type: "object",
       required: ["command_id", "input"],
@@ -77,7 +77,7 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "terminate_command",
     vscodeToolName: "agentbridge_terminate_command",
     capability: "execute",
-    description: "Force-terminate a running command by command_id and close its AgentBridge terminal. Kills the whole managed shell, so shell state in that terminal (cwd, environment, history) is lost. Use when a command is stuck (an interactive REPL, an SSH session, or a process that ignores input/signals) and get_command_output still reports status=running. Prefer send_command_input with input=\"\\u0003\" (Ctrl+C) and append_newline=false first: Ctrl+C is cooperative and may not terminate REPLs or SSH sessions. Returns status=killed, or the current status when the command has already finished.",
+    description: "Hard-stop a running AgentBridge command by terminating its managed shell and closing that terminal. Terminal-local state such as cwd, environment changes, and history is discarded. Use when cooperative Ctrl+C did not stop the command and get_command_output still reports status=running. To try Ctrl+C first, call send_command_input with input=\"\\u0003\" and append_newline=false. Calling this for an already-finished command is idempotent and returns its current status.",
     inputSchema: {
       type: "object",
       required: ["command_id"],
