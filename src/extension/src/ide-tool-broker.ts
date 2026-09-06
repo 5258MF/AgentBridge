@@ -45,10 +45,13 @@ interface CommandState {
   background: boolean;
   status: "running" | "completed" | "failed" | "killed";
   exitCode: number | null;
-  // Captured output as a chunk list. outputChunkHead marks the first live chunk and
-  // outputHeadSkip the offset within it (not an absolute output offset); trimming drops
-  // whole chunks so appends stay amortized O(1) under sustained output.
+  // Captured output as a chunk list. outputChunkStarts[i] is the absolute output offset of
+  // outputChunks[i]'s first byte, letting readOutput binary-search straight to the chunk
+  // holding a requested offset. outputChunkHead marks the first live chunk and outputHeadSkip
+  // the offset within it (not an absolute output offset); trimming drops whole chunks so
+  // appends stay amortized O(1) under sustained output.
   outputChunks: Buffer[];
+  outputChunkStarts: number[];
   outputChunkHead: number;
   outputHeadSkip: number;
   retainedOutputBytes: number;
@@ -1349,8 +1352,9 @@ class TerminalCommandManager implements vscode.Disposable {
     }
     if (!clean) return;
     const bytes = Buffer.from(clean, "utf8");
-    state.totalOutputBytes += bytes.length;
+    state.outputChunkStarts.push(state.totalOutputBytes);
     state.outputChunks.push(bytes);
+    state.totalOutputBytes += bytes.length;
     state.retainedOutputBytes += bytes.length;
     while (state.retainedOutputBytes > MAX_CAPTURED_OUTPUT_BYTES) {
       const head = state.outputChunks[state.outputChunkHead];
@@ -1366,6 +1370,7 @@ class TerminalCommandManager implements vscode.Disposable {
     // grow without bound under sustained output.
     if (state.outputChunkHead > 0 && state.outputChunkHead * 2 >= state.outputChunks.length) {
       state.outputChunks = state.outputChunks.slice(state.outputChunkHead);
+      state.outputChunkStarts = state.outputChunkStarts.slice(state.outputChunkHead);
       state.outputChunkHead = 0;
     }
     state.outputStartOffset = state.totalOutputBytes - state.retainedOutputBytes;
@@ -1387,22 +1392,7 @@ class TerminalCommandManager implements vscode.Disposable {
     const limit = Math.min(MAX_OUTPUT_BYTES, Math.max(1, maxBytes));
     const outputLost = requestedOffset < state.outputStartOffset;
     const actualOffset = Math.max(state.outputStartOffset, Math.min(requestedOffset, state.totalOutputBytes));
-    const windowStart = actualOffset - state.outputStartOffset;
-    const windowEnd = Math.min(windowStart + limit, state.retainedOutputBytes);
-    const slices: Buffer[] = [];
-    let position = 0;
-    for (let index = state.outputChunkHead; index < state.outputChunks.length && position < windowEnd; index += 1) {
-      const chunk = state.outputChunks[index];
-      const liveStart = index === state.outputChunkHead ? state.outputHeadSkip : 0;
-      const liveLength = chunk.length - liveStart;
-      if (position + liveLength > windowStart) {
-        const from = liveStart + Math.max(0, windowStart - position);
-        const to = liveStart + Math.min(position + liveLength, windowEnd) - position;
-        slices.push(chunk.subarray(from, to));
-      }
-      position += liveLength;
-    }
-    const slice = slices.length === 1 ? slices[0] : slices.length === 0 ? Buffer.alloc(0) : Buffer.concat(slices);
+    const slice = this.readRetainedSlice(state, actualOffset, limit);
     const nextOffset = actualOffset + slice.length;
     return {
       command_id: state.id,
@@ -1421,6 +1411,37 @@ class TerminalCommandManager implements vscode.Disposable {
       output_lost: outputLost,
       has_more: nextOffset < state.totalOutputBytes,
     };
+  }
+
+  /**
+   * Collects the retained-stream bytes [offset, offset + limit). Chunk start offsets let the
+   * binary search land directly on the chunk overlapping the window, so read cost is bounded
+   * by the window instead of the retained buffer — polling an offset already at the end of
+   * the stream (the dominant get_command_output pattern) returns without touching chunks.
+   */
+  private readRetainedSlice(state: CommandState, offset: number, limit: number): Buffer {
+    const end = Math.min(offset + limit, state.totalOutputBytes);
+    if (offset >= end) return Buffer.alloc(0);
+    let low = state.outputChunkHead;
+    let high = state.outputChunks.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (state.outputChunkStarts[mid] + state.outputChunks[mid].length <= offset) low = mid + 1;
+      else high = mid;
+    }
+    const slices: Buffer[] = [];
+    let collected = 0;
+    for (let index = low; index < state.outputChunks.length && collected < limit; index += 1) {
+      const chunk = state.outputChunks[index];
+      const chunkStart = state.outputChunkStarts[index];
+      const from = Math.max(offset, chunkStart) - chunkStart;
+      const to = Math.min(chunkStart + chunk.length, offset + limit) - chunkStart;
+      if (to > from) {
+        slices.push(chunk.subarray(from, to));
+        collected += to - from;
+      }
+    }
+    return slices.length === 1 ? slices[0] : slices.length === 0 ? Buffer.alloc(0) : Buffer.concat(slices);
   }
 
   async run(input: Record<string, unknown>): Promise<string> {
@@ -1459,6 +1480,7 @@ class TerminalCommandManager implements vscode.Disposable {
       status: "running",
       exitCode: null,
       outputChunks: [],
+      outputChunkStarts: [],
       outputChunkHead: 0,
       outputHeadSkip: 0,
       retainedOutputBytes: 0,
@@ -1566,6 +1588,7 @@ class TerminalCommandManager implements vscode.Disposable {
         "=== TERMINATE_COMMAND BEGIN ===",
         `command_id: ${id}`,
         `terminal_id: ${state.terminalId}`,
+        `terminal_name: ${JSON.stringify(state.terminal.name)}`,
         `status: ${state.status}`,
         `exit_code: ${state.exitCode ?? "null"}`,
         "already_finished: true",
@@ -1810,11 +1833,13 @@ export class IdeToolBroker implements vscode.Disposable {
           ? `Sent command input · ${input.command_id}`
           : "Sent command input";
         break;
-      case "terminate_command":
+      case "terminate_command": {
+        const alreadyFinished = /^already_finished: true$/m.test(text);
         result.toolResultMessage = typeof input.command_id === "string" && input.command_id
-          ? `Terminated command · ${input.command_id}`
-          : "Terminated command";
+          ? `${alreadyFinished ? "Command already finished" : "Terminated command"} · ${input.command_id}`
+          : alreadyFinished ? "Command already finished" : "Terminated command";
         break;
+      }
     }
     return result;
   }
