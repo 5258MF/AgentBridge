@@ -1209,10 +1209,10 @@ private renderHtml(): string {
     const pres = activity.presentation || {};
     if (pres.kind !== 'edit' && pres.items && pres.items.length) renderToolItems(activity, body);
     if (pres.kind === 'edit' && pres.diffPreview) renderMiniDiff(pres.diffPreview, body);
-    if (activity.terminalId) {
+    if (pres.terminalId) {
       const actions = el('div', 'agentbridge-tool-actions');
       const button = el('button', 'agentbridge-tool-action', t('openTerminal'));
-      button.addEventListener('click', () => vscode.postMessage({ type: 'openTerminal', terminalId: activity.terminalId }));
+      button.addEventListener('click', () => vscode.postMessage({ type: 'openTerminal', terminalId: pres.terminalId }));
       actions.appendChild(button);
       body.appendChild(actions);
     }
