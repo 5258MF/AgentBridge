@@ -1492,6 +1492,48 @@ class TerminalCommandManager implements vscode.Disposable {
     ].join("\n");
   }
 
+  terminate(input: Record<string, unknown>): string {
+    const id = asString(input.command_id);
+    const state = this.states.get(id);
+    if (!state) throw new Error(`Unknown command_id: ${id}. Only the ${MAX_COMPLETED_STATES} most recent finished commands are retained.`);
+    if (state.status !== "running") {
+      return [
+        "=== TERMINATE_COMMAND BEGIN ===",
+        `command_id: ${id}`,
+        `terminal_id: ${state.terminalId}`,
+        `status: ${state.status}`,
+        `exit_code: ${state.exitCode ?? "null"}`,
+        "already_finished: true",
+        "=== TERMINATE_COMMAND END ===",
+      ].join("\n");
+    }
+    const slot = state.slot;
+    // Retire the slot before anything else: finishState clears busyCommandId, and until the
+    // terminal-close event lands (debounced by PTY_EXIT_DATA_FLUSH_MS) acquireTerminal could
+    // otherwise hand the dying terminal to a new command.
+    slot.closed = true;
+    this.slots.delete(slot.id);
+    slot.pty.terminateActiveProcess();
+    // finishState must run before terminal.dispose(): the onDidCloseTerminal listener also
+    // marks running states killed, and if it wins the race this call would be skipped by the
+    // status guard, leaving the finished-state pruning and slot bookkeeping undone.
+    this.finishState(state, null, "killed");
+    try {
+      slot.terminal.dispose();
+    } catch {
+      // The terminal may already be closing.
+    }
+    return [
+      "=== TERMINATE_COMMAND BEGIN ===",
+      `command_id: ${id}`,
+      `terminal_id: ${slot.id}`,
+      `terminal_name: ${JSON.stringify(slot.terminal.name)}`,
+      "status: killed",
+      "terminal_closed: true",
+      "=== TERMINATE_COMMAND END ===",
+    ].join("\n");
+  }
+
   revealTerminal(terminalId: string): boolean {
     const slot = this.slots.get(terminalId);
     if (!slot || slot.closed) return false;
@@ -1665,6 +1707,7 @@ export class IdeToolBroker implements vscode.Disposable {
       case "run_command": return this.terminalResult(name, input, await this.terminalManager.run(input));
       case "get_command_output": return this.terminalResult(name, input, this.terminalManager.getOutput(input));
       case "send_command_input": return this.terminalResult(name, input, this.terminalManager.sendInput(input));
+      case "terminate_command": return this.terminalResult(name, input, this.terminalManager.terminate(input));
       case "get_diagnostics": return toolResult(getDiagnostics(input));
       case "lsp": return toolResult(await invokeLspTool(input));
       default: throw new Error(`Unsupported IDE tool: ${name}`);
@@ -1701,6 +1744,11 @@ export class IdeToolBroker implements vscode.Disposable {
         result.toolResultMessage = typeof input.command_id === "string" && input.command_id
           ? `Sent command input · ${input.command_id}`
           : "Sent command input";
+        break;
+      case "terminate_command":
+        result.toolResultMessage = typeof input.command_id === "string" && input.command_id
+          ? `Terminated command · ${input.command_id}`
+          : "Terminated command";
         break;
     }
     return result;

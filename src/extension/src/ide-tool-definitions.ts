@@ -61,7 +61,7 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "send_command_input",
     vscodeToolName: "agentbridge_send_command_input",
     capability: "execute",
-    description: "Send text to the terminal of a running command. Use for interactive prompts or REPL input. A newline is appended by default.",
+    description: "Send text to the terminal of a running command. Use for interactive prompts or REPL input. A newline is appended by default. Sending the control character \\u0003 (Ctrl+C) with append_newline=false requests an interrupt of the foreground program; Ctrl+C is cooperative and may not terminate REPLs, SSH sessions, or programs that handle or ignore the signal — use terminate_command if the command keeps running.",
     inputSchema: {
       type: "object",
       required: ["command_id", "input"],
@@ -69,6 +69,20 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
         command_id: { type: "string", minLength: 1 },
         input: { type: "string" },
         append_newline: { type: "boolean", default: true }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "terminate_command",
+    vscodeToolName: "agentbridge_terminate_command",
+    capability: "execute",
+    description: "Force-terminate a running command by command_id and close its AgentBridge terminal. Kills the whole managed shell, so shell state in that terminal (cwd, environment, history) is lost. Use when a command is stuck (an interactive REPL, an SSH session, or a process that ignores input/signals) and get_command_output still reports status=running. Prefer send_command_input with input=\"\\u0003\" (Ctrl+C) and append_newline=false first: Ctrl+C is cooperative and may not terminate REPLs or SSH sessions. Returns status=killed, or the current status when the command has already finished.",
+    inputSchema: {
+      type: "object",
+      required: ["command_id"],
+      properties: {
+        command_id: { type: "string", minLength: 1 }
       },
       additionalProperties: false
     }

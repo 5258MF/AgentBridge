@@ -20,9 +20,9 @@ Published to the [Visual Studio Marketplace](https://marketplace.visualstudio.co
 
 ## Features
 
-- **13 MCP tools** spanning:
+- **14 MCP tools** spanning:
   - **File system** — `read_files`, `apply_patch`, `search_files`, `find_files`, `list_directory`, `read_image_file`
-  - **Terminal** — `run_command`, `get_command_output`, `send_command_input`
+  - **Terminal** — `run_command`, `get_command_output`, `send_command_input`, `terminate_command`
   - **LSP / diagnostics** — `get_diagnostics`, `lsp`
   - **Bridge state** — `set_todos`, `report_progress`
 - **3 tunnel providers** — Cloudflare Quick Tunnel (default, zero-config), Cloudflare Named Tunnel (stable hostname), ngrok (reserved domain).

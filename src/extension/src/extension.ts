@@ -257,7 +257,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   output.appendLine("[extension] AgentBridge registered: Streamable HTTP MCP + Cloudflare Quick/Named Tunnel + ngrok");
-  output.appendLine("[extension] IDE tool broker registered: list_directory, run_command, get_command_output, send_command_input, get_diagnostics, lsp");
+  output.appendLine("[extension] IDE tool broker registered: list_directory, run_command, get_command_output, send_command_input, terminate_command, get_diagnostics, lsp");
 
   if (vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false)) {
     output.appendLine("[extension] persistent Bridge mode enabled; auto-starting");

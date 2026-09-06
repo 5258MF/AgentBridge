@@ -219,7 +219,7 @@ export const zhMessages = {
   persistentOffTitle: "Bridge 将仅在手动启动时运行",
 
   readOnlyLabel: "只读模式",
-  readOnlyHelp: "禁用 apply_patch、run_command 和 send_command_input,远程 AI 只能读取和分析,不能修改文件或执行命令。切换立即生效。",
+  readOnlyHelp: "禁用 apply_patch、run_command、send_command_input 和 terminate_command,远程 AI 只能读取和分析,不能修改文件或执行命令。切换立即生效。",
   readOnlyOnTitle: "只读模式已启用:修改与执行类工具已被拦截",
   readOnlyOffTitle: "只读模式未启用:AI 可修改文件并执行命令",
   readOnlyBadge: "只读模式",
@@ -547,7 +547,7 @@ export const enMessages: Record<MessageKey, string> = {
   persistentOffTitle: "Bridge will only run when started manually",
 
   readOnlyLabel: "Read-only mode",
-  readOnlyHelp: "Disables apply_patch, run_command, and send_command_input. The remote AI can read and analyze but cannot modify files or execute commands. Changes take effect immediately.",
+  readOnlyHelp: "Disables apply_patch, run_command, send_command_input, and terminate_command. The remote AI can read and analyze but cannot modify files or execute commands. Changes take effect immediately.",
   readOnlyOnTitle: "Read-only mode is on: modification and execution tools are blocked",
   readOnlyOffTitle: "Read-only mode is off: the AI can modify files and run commands",
   readOnlyBadge: "Read-only",

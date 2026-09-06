@@ -202,6 +202,7 @@ Use:
 - apply_patch for workspace changes
 - get_diagnostics after edits
 - run_command for builds and tests
+- terminate_command to force-kill a stuck command and free its managed terminal
 - set_todos to maintain the complete task list for multi-step work
 - report_progress to report transient progress for the current task
 
@@ -289,8 +290,12 @@ export const BRIDGE_TOOL_DEFINITIONS = [
  * - send_command_input: feeds input into running processes (defense in depth —
  *   it depends on command ids produced by run_command, but blocking it closes
  *   the "drive an already-running REPL" bypass completely).
+ * - terminate_command: force-kills a managed shell. Its only reach is
+ *   AgentBridge's own terminals, but a read-only agent reports findings
+ *   instead of acting on the environment, so it stays blocked for consistency
+ *   with the other execute tools.
  */
-const READ_ONLY_BLOCKED_TOOL_NAMES = new Set<string>(["apply_patch", "run_command", "send_command_input"]);
+const READ_ONLY_BLOCKED_TOOL_NAMES = new Set<string>(["apply_patch", "run_command", "send_command_input", "terminate_command"]);
 
 export interface BridgeActivity {
   readonly id: number;
@@ -436,9 +441,10 @@ export interface BridgeStatus {
   readonly tunnelProtocol: "auto" | "quic" | "http2";
   /**
    * When true, tools that modify the local environment (apply_patch,
-   * run_command, send_command_input) are hidden from tools/list and
-   * hard-blocked at call time. Backed by `agentbridge.bridge.readOnlyMode`
-   * (application scope so workspace settings cannot override it).
+   * run_command, send_command_input, terminate_command) are hidden from
+   * tools/list and hard-blocked at call time. Backed by
+   * `agentbridge.bridge.readOnlyMode` (application scope so workspace
+   * settings cannot override it).
    */
   readonly readOnlyMode: boolean;
 }
@@ -787,6 +793,12 @@ function bridgePresentation(
   if (toolName === "send_command_input") {
     const commandId = typeof args.command_id === "string" ? args.command_id : undefined;
     return { kind: "terminal", title: "Sent command input", subtitle: commandId, input: boundedText(args.input, 2_000), terminalId: stringField(resultText, "terminal_id"), commandId, output: isError ? output : undefined };
+  }
+
+  if (toolName === "terminate_command") {
+    const commandId = typeof args.command_id === "string" ? args.command_id : undefined;
+    const status = stringField(resultText, "status");
+    return { kind: "terminal", title: "Terminated command", subtitle: [commandId, status].filter(Boolean).join(" · ") || undefined, input: undefined, terminalId: stringField(resultText, "terminal_id"), commandId, output: isError ? output : undefined };
   }
 
   if (toolName === "get_diagnostics") {
@@ -2495,7 +2507,7 @@ export class BridgeManager implements vscode.Disposable {
 
   private createSession(): { transport: StreamableHTTPServerTransport; server: McpServer } {
     const instructions = this.readOnlyMode
-      ? `${BRIDGE_SERVER_INSTRUCTIONS}\n\nRead-only mode is ACTIVE: apply_patch, run_command, and send_command_input are disabled. Do not attempt file modifications or command execution; report findings and proposed changes to the user instead.`
+      ? `${BRIDGE_SERVER_INSTRUCTIONS}\n\nRead-only mode is ACTIVE: apply_patch, run_command, send_command_input, and terminate_command are disabled. Do not attempt file modifications or command execution; report findings and proposed changes to the user instead.`
       : BRIDGE_SERVER_INSTRUCTIONS;
     const packageVersion = String(this.context.extension.packageJSON.version ?? "").trim() || "0.0.0";
     const server = new McpServer(

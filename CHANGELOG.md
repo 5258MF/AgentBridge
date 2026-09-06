@@ -1,5 +1,10 @@
 # Change Log
 
+## Unreleased
+
+- **New `terminate_command` MCP tool** — the tool surface grows from 13 to 14 tools. A foreground command that outlives its timeout keeps running by design, and a command stuck in a REPL / SSH session never finishes, which permanently occupied its terminal slot (busy slots are never pruned, so every later `run_command` spawned another terminal). `terminate_command` force-kills the managed shell by `command_id` and closes the terminal, freeing the slot; shell state in that terminal (cwd, environment, history) is lost. The call is idempotent for already-finished commands and returns a hard error for unknown ids. Prefer `send_command_input` with `\u0003` (Ctrl+C) first — the `send_command_input` description now documents that Ctrl+C is cooperative and may not terminate REPLs or SSH sessions.
+- **Read-only mode also blocks `terminate_command`** — `apply_patch`, `run_command`, `send_command_input`, and `terminate_command` are hidden from `tools/list` and hard-blocked at call time; panel copy, server instructions, and the setting description were updated to list all four.
+
 ## 0.1.8 (2026-09-02)
 
 Tunnel reliability release. The MCP tool surface remains unchanged at 13 tools.

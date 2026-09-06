@@ -20,9 +20,9 @@
 
 ## 核心特性
 
-- **13 个 MCP 工具**，覆盖：
+- **14 个 MCP 工具**，覆盖：
   - **文件系统** — `read_files`、`apply_patch`、`search_files`、`find_files`、`list_directory`、`read_image_file`
-  - **终端** — `run_command`、`get_command_output`、`send_command_input`
+  - **终端** — `run_command`、`get_command_output`、`send_command_input`、`terminate_command`
   - **LSP / 诊断** — `get_diagnostics`、`lsp`
   - **Bridge 状态** — `set_todos`、`report_progress`
 - **3 种公共隧道供应商** — Cloudflare Quick Tunnel（默认，零配置）、Cloudflare Named Tunnel（固定主机名）、ngrok（保留域名）。
