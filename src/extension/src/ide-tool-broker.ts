@@ -12,6 +12,7 @@ const MAX_COMPLETED_STATES = 32;
 const DEFAULT_OUTPUT_BYTES = 32 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_IDLE_TERMINALS = 4;
+const MAX_TOTAL_TERMINALS = 8;
 const PTY_EXIT_DATA_FLUSH_MS = 100;
 const COMMAND_ECHO_TIMEOUT_MS = 3000;
 const MAX_ECHO_HUNT_BYTES = 1024 * 1024;
@@ -1243,6 +1244,34 @@ class TerminalCommandManager implements vscode.Disposable {
       slot.lastUsedAt = Date.now();
       slot.terminal.show(true);
       return { slot, reused: true, effectiveCwd: this.currentSlotCwd(slot) };
+    }
+
+    // Hard cap on live managed terminals. Idle slots are pruned to MAX_IDLE_TERMINALS, but
+    // busy/background slots grow without bound — a stuck command would otherwise earn a new
+    // terminal for every follow-up run_command.
+    if (this.slots.size >= MAX_TOTAL_TERMINALS) {
+      // Reaching this point with idle candidates means every one mismatched the requested cwd
+      // (a matching candidate would have returned above); recycle the least recently used.
+      const oldestIdle = candidates[candidates.length - 1];
+      if (oldestIdle) {
+        this.disposeIdleSlot(oldestIdle);
+      } else {
+        const busyLines = [...this.slots.values()]
+          .filter((slot) => !slot.closed && slot.busyCommandId)
+          .sort((a, b) => b.lastUsedAt - a.lastUsedAt)
+          .map((slot) => {
+            const state = slot.busyCommandId ? this.states.get(slot.busyCommandId) : undefined;
+            // busyCommandId is set before the command state enters this.states, so the state
+            // can legitimately be missing here.
+            const summary = state ? summarizeCommand(state.command, 80) : "command summary unavailable";
+            return `${slot.id} · ${slot.busyCommandId ?? "?"} · ${summary}`;
+          })
+          .join("\n");
+        throw new Error(
+          `AgentBridge terminal limit reached (${MAX_TOTAL_TERMINALS} live terminals, all busy). ` +
+          `Call terminate_command on one of the stuck commands, or wait for them to finish:\n${busyLines}`,
+        );
+      }
     }
 
     const initialCwd = cwdInfo?.absolute ?? resolveWorkspacePath(".").absolute;
