@@ -1267,18 +1267,29 @@ class TerminalCommandManager implements vscode.Disposable {
       } else {
         const busyLines = [...this.slots.values()]
           .filter((slot) => !slot.closed && slot.busyCommandId)
-          .sort((a, b) => b.lastUsedAt - a.lastUsedAt)
-          .map((slot) => {
-            const state = slot.busyCommandId ? this.states.get(slot.busyCommandId) : undefined;
+          .map((slot) => ({
+            slot,
             // busyCommandId is set before the command state enters this.states, so the state
             // can legitimately be missing here.
+            state: slot.busyCommandId ? this.states.get(slot.busyCommandId) : undefined,
+          }))
+          .sort((a, b) => {
+            // Show likely-stuck foreground work before intentionally long-lived background
+            // tasks. Within the same class, oldest first is the most useful inspection order.
+            const aPriority = a.state ? (a.state.background ? 2 : 0) : 1;
+            const bPriority = b.state ? (b.state.background ? 2 : 0) : 1;
+            return aPriority - bPriority || a.slot.lastUsedAt - b.slot.lastUsedAt;
+          })
+          .map(({ slot, state }) => {
+            const mode = state ? (state.background ? "background" : "foreground") : "unknown";
             const summary = state ? summarizeCommand(state.command, 80) : "command summary unavailable";
-            return `${slot.id} · ${slot.busyCommandId ?? "?"} · ${summary}`;
+            return `${slot.id} · ${slot.busyCommandId ?? "?"} · ${mode} · ${summary}`;
           })
           .join("\n");
         throw new Error(
           `AgentBridge terminal limit reached (${MAX_TOTAL_TERMINALS} live terminals, all busy). ` +
-          `Call terminate_command on one of the stuck commands, or wait for them to finish:\n${busyLines}`,
+          `Foreground commands are listed first; background commands may be intentionally long-lived. ` +
+          `Wait for intended work to finish, or use terminate_command only for a command that is actually stuck:\n${busyLines}`,
         );
       }
     }
