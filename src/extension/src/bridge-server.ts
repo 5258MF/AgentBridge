@@ -798,7 +798,8 @@ function bridgePresentation(
   if (toolName === "terminate_command") {
     const commandId = typeof args.command_id === "string" ? args.command_id : undefined;
     const status = stringField(resultText, "status");
-    return { kind: "terminal", title: "Terminated command", subtitle: [commandId, status].filter(Boolean).join(" · ") || undefined, input: undefined, terminalId: stringField(resultText, "terminal_id"), commandId, output: isError ? output : undefined };
+    const terminalId = status === "killed" ? undefined : stringField(resultText, "terminal_id");
+    return { kind: "terminal", title: "Terminated command", subtitle: [commandId, status].filter(Boolean).join(" · ") || undefined, input: undefined, terminalId, commandId, output: isError ? output : undefined };
   }
 
   if (toolName === "get_diagnostics") {
