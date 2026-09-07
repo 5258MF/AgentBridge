@@ -10,6 +10,7 @@
 - **MCP tool descriptions cleaned up** — `apply_patch` no longer refers to Codex or GPT-family models, image-tool wording is client-neutral and matches the actual base64 file payload, terminal descriptions distinguish cooperative Ctrl+C from a hard stop, and `run_command` now documents the 8-terminal pool limit.
 - **Resource bounds tightened** — per-session MCP replay events now have an 8 MiB serialized-payload cap in addition to the 512-event count cap; `search_files` admits at most 16 MiB of source-file bytes into its contextual full-file cache per call; `apply_patch` no longer keeps two full preflight snapshot sets alive at once; and pending MCP initializations count toward the 64-session admission limit.
 - **Replay/context edge cases fixed** — expired SSE replay cursors are now rejected cleanly instead of creating a stream that cannot receive future events, and unavailable `search_files` context no longer appears as fabricated blank source lines.
+- **Idle UI/resource cleanup improved** — the Bridge panel stops its 1.5-second UI polling while hidden and resumes with an immediate refresh when shown; Quick Tunnel clipboard failures are attempted once per URL instead of retried forever; completed foreground commands clear their timeout handles; `find_files` skips candidates that disappear before `stat`; and stale expanded activity-card ids are pruned with activity history.
 
 ## 0.1.8 (2026-09-02)
 

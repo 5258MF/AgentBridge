@@ -451,14 +451,20 @@ async function mapWithConcurrency<T, R>(values: T[], concurrency: number, fn: (v
 }
 
 async function enrichFiles(paths: string[], options: NormalizedOptions, config: FindFilesConfig): Promise<FoundFile[]> {
-  const files = await mapWithConcurrency(paths, config.statConcurrency, async (filePath) => {
-    const fileStat = await stat(filePath);
-    return {
-      path: displayPath(options.scopeRoot, filePath),
-      size_bytes: fileStat.size,
-      modified_ms: fileStat.mtimeMs,
-    } satisfies FoundFile;
+  const enriched = await mapWithConcurrency<string, FoundFile | undefined>(paths, config.statConcurrency, async (filePath) => {
+    try {
+      const fileStat = await stat(filePath);
+      return {
+        path: displayPath(options.scopeRoot, filePath),
+        size_bytes: fileStat.size,
+        modified_ms: fileStat.mtimeMs,
+      } satisfies FoundFile;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
   });
+  const files = enriched.filter((file): file is FoundFile => file !== undefined);
 
   if (options.sort === "path_asc") {
     files.sort((a, b) => a.path.localeCompare(b.path));

@@ -1516,7 +1516,17 @@ class TerminalCommandManager implements vscode.Disposable {
     }
 
     if (!background) {
-      await Promise.race([done, new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))]);
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          done,
+          new Promise<void>((resolve) => {
+            timeoutHandle = setTimeout(resolve, timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
     } else {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }

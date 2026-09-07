@@ -104,9 +104,11 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         }
       });
     });
-    this.startPolling();
+    if (webviewView.visible) this.startPolling();
     webviewView.onDidChangeVisibility(() => {
-      if (this.view === webviewView && webviewView.visible) this.startPolling();
+      if (this.view !== webviewView) return;
+      if (webviewView.visible) this.startPolling();
+      else this.stopPolling();
     });
     webviewView.onDidDispose(() => {
       if (this.view !== webviewView) return;
@@ -135,7 +137,6 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       const url = status.publicUrl;
       this.lastCopiedQuickTunnelUrl = url;
       void vscode.env.clipboard.writeText(url).then(undefined, (error) => {
-        if (this.lastCopiedQuickTunnelUrl === url) this.lastCopiedQuickTunnelUrl = "";
         console.error(`[AgentBridge panel] Failed to copy Quick Tunnel URL: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
@@ -1232,6 +1233,10 @@ private renderHtml(): string {
 
   function renderTimeline(activities) {
     timelineEl.textContent = '';
+    const liveActivityIds = new Set((activities || []).map((activity) => activity.id));
+    for (const activityId of expandedToolActivities) {
+      if (!liveActivityIds.has(activityId)) expandedToolActivities.delete(activityId);
+    }
     if (!activities || activities.length === 0) {
       const empty = el('div', 'agentbridge-session-empty');
       empty.appendChild(el('div', 'agentbridge-session-empty-icon', '◌'));
