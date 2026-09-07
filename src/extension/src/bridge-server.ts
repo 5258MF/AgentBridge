@@ -1756,8 +1756,7 @@ export class BridgeManager implements vscode.Disposable {
       this.assertStartGeneration(generation);
 
       this.state = "running";
-      const publicUrl = this.getStatus().publicUrl;
-      this.output.appendLine(`[bridge] running ${publicUrl} -> 127.0.0.1:${this.localPort}`);
+      this.output.appendLine(`[bridge] running ${this.publicEndpointLogUrl()} -> 127.0.0.1:${this.localPort}`);
       return this.getStatus();
     } catch (error) {
       if (error instanceof BridgeStartCancelledError || generation !== this.tunnelGeneration) {
@@ -1986,6 +1985,19 @@ export class BridgeManager implements vscode.Disposable {
     return `https://${this.domain}/healthz/${this.routeToken}`;
   }
 
+  private redactRouteToken(value: string): string {
+    return this.routeToken ? value.split(this.routeToken).join("<redacted>") : value;
+  }
+
+  private publicEndpointLogUrl(): string {
+    const publicUrl = this.getStatus().publicUrl;
+    return publicUrl ? this.redactRouteToken(publicUrl) : "<unavailable>";
+  }
+
+  private publicHealthLogUrl(): string {
+    return this.redactRouteToken(this.publicHealthUrl());
+  }
+
   private cloudflaredPrecheckFailure(
     child: ChildProcessWithoutNullStreams,
   ): { kind: CloudflaredPrecheckFailureKind; error: Error } | undefined {
@@ -2002,7 +2014,7 @@ export class BridgeManager implements vscode.Disposable {
 
   private createPublicHealthLogThrottle(): { report: (message: string) => void; flush: () => void } {
     const throttle = createRepeatedMessageThrottle(PUBLIC_HEALTH_LOG_THROTTLE_MS);
-    const emit = (message: string) => this.output.appendLine(`[bridge] ${message}`);
+    const emit = (message: string) => this.output.appendLine(`[bridge] ${this.redactRouteToken(message)}`);
     const report = (message: string) => {
       const emission = throttle.report(message);
       if (!emission) return;
@@ -2069,7 +2081,7 @@ export class BridgeManager implements vscode.Disposable {
     } catch (error) {
       if (signal?.aborted) return false;
       const reason = error instanceof Error ? error.message : String(error);
-      reportFailure(t("publicHealthSystemError", reason));
+      reportFailure(t("publicHealthSystemError", this.redactRouteToken(reason)));
       const ok = await this.requestPublicHealthViaDoh(reportFailure, signal);
       if (signal?.aborted) return false;
       reportFailure(t("publicHealthDohResult", ok));
@@ -2283,7 +2295,7 @@ export class BridgeManager implements vscode.Disposable {
       if (precheckError) throw precheckError;
       const diagnostics = this.cloudflaredProcessDiagnostics.get(child);
       if (this.tunnelProvider === "cloudflare-named" && cloudflaredSawRegistration(diagnostics)) {
-        throw new Error(`Cloudflare Named Tunnel connected, but ${this.publicHealthUrl()} could not reach Bridge. In Cloudflare Tunnels, set the published application hostname to ${this.configuredNamedDomain} and its Service URL to http://127.0.0.1:${this.namedTunnelLocalPort}.`);
+        throw new Error(`Cloudflare Named Tunnel connected, but ${this.publicHealthLogUrl()} could not reach Bridge. In Cloudflare Tunnels, set the published application hostname to ${this.configuredNamedDomain} and its Service URL to http://127.0.0.1:${this.namedTunnelLocalPort}.`);
       }
       if (!cloudflaredSawRegistration(diagnostics) && cloudflaredQuicDialFailures(diagnostics) >= QUIC_UNSTABLE_DIAL_FAILURES) {
         throw new Error(t("tunnelNeverRegisteredQuicError", cloudflaredQuicDialFailures(diagnostics), cloudflaredLogTail(diagnostics, 200)));
@@ -2291,7 +2303,7 @@ export class BridgeManager implements vscode.Disposable {
       if (this.tunnelProvider === "cloudflare-named") {
         throw new Error(t("tunnelNeverRegisteredError", cloudflaredLogTail(diagnostics, 200)));
       }
-      throw new Error(`Public Bridge health check timed out after ${Math.round(PUBLIC_HEALTH_STARTUP_TIMEOUT_MS / 1000)} seconds: ${this.publicHealthUrl()}`);
+      throw new Error(`Public Bridge health check timed out after ${Math.round(PUBLIC_HEALTH_STARTUP_TIMEOUT_MS / 1000)} seconds: ${this.publicHealthLogUrl()}`);
     } finally {
       if (isCloudflare) {
         child.stdout.off("data", onCloudflaredData);
@@ -2347,7 +2359,7 @@ export class BridgeManager implements vscode.Disposable {
       }
       if (expectedGeneration !== undefined) this.assertStartGeneration(expectedGeneration);
       if (this.tunnelProcess !== child) throw new Error(`${this.tunnelProvider} tunnel changed before health verification completed.`);
-      this.output.appendLine(`[bridge] public health verified: ${this.publicHealthUrl()}`);
+      this.output.appendLine(`[bridge] public health verified: ${this.publicHealthLogUrl()}`);
     } catch (error) {
       if (this.tunnelProcess === child) this.tunnelProcess = undefined;
       void this.killTunnelProcess(child);
@@ -2372,7 +2384,7 @@ export class BridgeManager implements vscode.Disposable {
           this.state = "running";
           this.lastError = undefined;
           this.revision += 1;
-          this.output.appendLine(`[bridge] ${this.tunnelProvider} tunnel recovered: ${this.getStatus().publicUrl}`);
+          this.output.appendLine(`[bridge] ${this.tunnelProvider} tunnel recovered: ${this.publicEndpointLogUrl()}`);
           return;
         } catch (error) {
           if (generation !== this.tunnelGeneration || this.stoppingResources || !this.httpServer) return;
