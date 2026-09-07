@@ -265,7 +265,8 @@ export function activate(context: vscode.ExtensionContext): void {
       void bridgeReady.then(() => bridge.start(undefined, { automaticCheck: true })).then(
         (status) => {
           updateStatusBar();
-          output.appendLine(`[bridge] persistent start: ${status.state} ${status.publicUrl ?? ""}`);
+          const endpoint = status.domain ? `https://${status.domain}/mcp/<redacted>` : "";
+          output.appendLine(`[bridge] persistent start: ${status.state}${endpoint ? ` ${endpoint}` : ""}`);
         },
         (error) => output.appendLine(`[bridge] persistent start failed: ${error instanceof Error ? error.message : String(error)}`),
       );
