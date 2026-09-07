@@ -9,6 +9,7 @@
 - **Open Terminal activity action fixed** — terminal activity cards now read `terminal_id` from their presentation payload, so `run_command` / `get_command_output` can show the action again. Successfully killed commands do not offer an Open Terminal action for the terminal that was just closed.
 - **MCP tool descriptions cleaned up** — `apply_patch` no longer refers to Codex or GPT-family models, image-tool wording is client-neutral and matches the actual base64 file payload, terminal descriptions distinguish cooperative Ctrl+C from a hard stop, and `run_command` now documents the 8-terminal pool limit.
 - **Resource bounds tightened** — per-session MCP replay events now have an 8 MiB serialized-payload cap in addition to the 512-event count cap; `search_files` admits at most 16 MiB of source-file bytes into its contextual full-file cache per call; `apply_patch` no longer keeps two full preflight snapshot sets alive at once; and pending MCP initializations count toward the 64-session admission limit.
+- **Replay/context edge cases fixed** — expired SSE replay cursors are now rejected cleanly instead of creating a stream that cannot receive future events, and unavailable `search_files` context no longer appears as fabricated blank source lines.
 
 ## 0.1.8 (2026-09-02)
 

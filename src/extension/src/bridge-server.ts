@@ -866,6 +866,10 @@ class BoundedInMemoryEventStore implements EventStore {
     return eventId;
   }
 
+  async getStreamIdForEventId(eventId: string): Promise<string | undefined> {
+    return this.events.get(eventId)?.streamId;
+  }
+
   async replayEventsAfter(lastEventId: string, { send }: { send: (eventId: string, message: JSONRPCMessage) => Promise<void> }): Promise<string> {
     const previous = this.events.get(lastEventId);
     if (!previous) return "";

@@ -699,7 +699,7 @@ async function addContext(
   config: SearchFilesConfig,
   truncationReasons: Set<SearchTruncationReason>,
 ): Promise<SearchMatch[]> {
-  const cache = new Map<string, string[]>();
+  const cache = new Map<string, string[] | null>();
   const result: SearchMatch[] = [];
   let cachedFileBytes = 0;
 
@@ -719,13 +719,13 @@ async function addContext(
     }
 
     let lines = cache.get(match.absolutePath);
-    if (!lines) {
+    if (lines === undefined) {
       try {
         const fileStat = await stat(match.absolutePath);
         if (fileStat.size > config.maxFallbackFileBytes) {
-          lines = [];
+          lines = null;
         } else if (cachedFileBytes + fileStat.size > config.maxContextCacheBytes) {
-          lines = [];
+          lines = null;
           truncationReasons.add("CONTEXT_CACHE_BYTE_BUDGET");
         } else {
           const text = await readFile(match.absolutePath, "utf8");
@@ -733,20 +733,22 @@ async function addContext(
           cachedFileBytes += fileStat.size;
         }
       } catch {
-        lines = [];
+        lines = null;
       }
       cache.set(match.absolutePath, lines);
     }
 
     const before: SearchContextLine[] = [];
     const after: SearchContextLine[] = [];
-    for (let lineNumber = Math.max(1, match.line - contextLines); lineNumber < match.line; lineNumber += 1) {
-      const value = truncateLine(lines[lineNumber - 1] ?? "", config.maxLineChars);
-      before.push({ line: lineNumber, text: value.text, truncated: value.truncated });
-    }
-    for (let lineNumber = match.line + 1; lineNumber <= Math.min(lines.length, match.line + contextLines); lineNumber += 1) {
-      const value = truncateLine(lines[lineNumber - 1] ?? "", config.maxLineChars);
-      after.push({ line: lineNumber, text: value.text, truncated: value.truncated });
+    if (lines !== null) {
+      for (let lineNumber = Math.max(1, match.line - contextLines); lineNumber < match.line; lineNumber += 1) {
+        const value = truncateLine(lines[lineNumber - 1] ?? "", config.maxLineChars);
+        before.push({ line: lineNumber, text: value.text, truncated: value.truncated });
+      }
+      for (let lineNumber = match.line + 1; lineNumber <= Math.min(lines.length, match.line + contextLines); lineNumber += 1) {
+        const value = truncateLine(lines[lineNumber - 1] ?? "", config.maxLineChars);
+        after.push({ line: lineNumber, text: value.text, truncated: value.truncated });
+      }
     }
 
     result.push({
