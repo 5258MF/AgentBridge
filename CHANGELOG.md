@@ -18,6 +18,7 @@
 - **Command cwd symlink boundary hardened** — an explicit `run_command.cwd` now resolves the real filesystem target before a managed terminal is acquired, so a workspace-local symlink/junction cannot silently place the terminal's initial working directory outside the workspace. This does not sandbox shell commands themselves.
 - **Transitive dependency advisories cleared** — the lockfile now resolves `fast-uri` 3.1.7 and `qs` 6.16.0 through the existing MCP SDK dependency tree, clearing the previously reported high/moderate production audit findings without changing AgentBridge's direct dependency surface.
 - **MCP route tokens redacted from logs** — Bridge startup (including Persistent Mode auto-start), tunnel recovery, public-health success, and health-check failure text now replace the secret route token with `<redacted>` before it reaches VS Code Output or propagated diagnostic errors. The full endpoint URL remains available only where it is required for actual MCP requests, panel display, and explicit copy actions.
+- **SSE replay eviction race closed** — if a resumable MCP cursor passes the SDK's initial lookup but is evicted before replay begins, AgentBridge now fails that resume request instead of returning an empty stream id that could be registered as a non-functional ghost stream. Normally stale cursors are still rejected by the SDK's existing HTTP 400 pre-check.
 
 ## 0.1.8 (2026-09-02)
 

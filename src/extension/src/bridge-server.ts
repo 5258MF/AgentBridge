@@ -872,7 +872,11 @@ class BoundedInMemoryEventStore implements EventStore {
 
   async replayEventsAfter(lastEventId: string, { send }: { send: (eventId: string, message: JSONRPCMessage) => Promise<void> }): Promise<string> {
     const previous = this.events.get(lastEventId);
-    if (!previous) return "";
+    // The SDK validates the cursor with getStreamIdForEventId() immediately before replay,
+    // but another request can still evict that event while the await continuation is queued.
+    // Fail the resume instead of returning an empty stream id, which the SDK would otherwise
+    // register as a resumable "ghost" stream that can never receive the intended events.
+    if (!previous) throw new Error("MCP replay cursor expired before replay could begin.");
     let found = false;
     for (const eventId of this.order) {
       if (eventId === lastEventId) {
