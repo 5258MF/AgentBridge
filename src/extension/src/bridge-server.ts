@@ -960,6 +960,24 @@ function writeJsonError(response: ServerResponse, statusCode: number, message: s
   }));
 }
 
+function validateMcpOrigin(
+  request: IncomingMessage,
+  allowedHostnames: readonly string[],
+): { allowed: true; origin?: string } | { allowed: false } {
+  const originHeader = request.headers.origin;
+  if (!originHeader) return { allowed: true };
+
+  try {
+    const origin = new URL(originHeader);
+    if (origin.protocol !== "http:" && origin.protocol !== "https:") return { allowed: false };
+    const normalizedHostname = origin.hostname.toLowerCase();
+    if (!allowedHostnames.some((hostname) => hostname.toLowerCase() === normalizedHostname)) return { allowed: false };
+    return { allowed: true, origin: origin.origin };
+  } catch {
+    return { allowed: false };
+  }
+}
+
 function cancellationFromAbortSignal(signal: AbortSignal | undefined): { token?: vscode.CancellationToken; dispose(): void } {
   if (!signal) return { token: undefined, dispose: () => undefined };
   const source = new vscode.CancellationTokenSource();
@@ -2397,7 +2415,16 @@ export class BridgeManager implements vscode.Disposable {
       return;
     }
 
-    response.setHeader("Access-Control-Allow-Origin", "*");
+    const originValidation = validateMcpOrigin(request, ["127.0.0.1", "localhost", "[::1]", this.domain].filter(Boolean));
+    if (!originValidation.allowed) {
+      response.setHeader("Cache-Control", "no-store");
+      writeJsonError(response, 403, "Forbidden Origin.");
+      return;
+    }
+    if (originValidation.origin) {
+      response.setHeader("Access-Control-Allow-Origin", originValidation.origin);
+      response.setHeader("Vary", "Origin");
+    }
     response.setHeader("Access-Control-Allow-Headers", "content-type, accept, mcp-session-id, mcp-protocol-version, mcp-method, mcp-name, last-event-id, authorization");
     response.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
     response.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
