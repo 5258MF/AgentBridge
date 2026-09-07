@@ -14,6 +14,8 @@
 - **Quick Tunnel copy status is truthful** — the panel now distinguishes a clipboard attempt from a successful copy. A failed automatic copy no longer leaves the UI claiming success and instead shows a localized warning directing the user to the manual copy button.
 - **Quick Tunnel copy ordering hardened** — automatic clipboard writes are serialized and stale completion callbacks are ignored, so a slower copy from an older temporary URL cannot overwrite the clipboard/UI state after a newer Quick Tunnel URL has already been generated; stale failures also no longer show misleading warnings.
 - **MCP browser-origin checks tightened** — Streamable HTTP requests without an `Origin` header remain fully compatible with normal server-side MCP clients, while browser-originated requests are accepted only when the Origin hostname matches AgentBridge's known loopback hosts or the current Tunnel domain. Invalid or cross-site origins now receive HTTP 403, and the endpoint no longer advertises wildcard CORS.
+- **Workspace symlink boundaries hardened** — `list_directory` and LSP file/project anchors now resolve canonical filesystem targets before reading or opening documents, and workspace-symbol warm-up skips candidates whose real target escapes the workspace. Symlinks that stay inside the workspace continue to work.
+- **Transitive dependency advisories cleared** — the lockfile now resolves `fast-uri` 3.1.7 and `qs` 6.16.0 through the existing MCP SDK dependency tree, clearing the previously reported high/moderate production audit findings without changing AgentBridge's direct dependency surface.
 
 ## 0.1.8 (2026-09-02)
 

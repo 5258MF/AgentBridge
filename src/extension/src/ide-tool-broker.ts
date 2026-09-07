@@ -1091,6 +1091,16 @@ function resolveWorkspacePath(relative = "."): { root: string; absolute: string;
   return { root, absolute, relative: normalizedRelative, uri: vscode.Uri.file(absolute) };
 }
 
+async function resolveExistingWorkspacePath(relative = "."): Promise<{ root: string; absolute: string; relative: string; uri: vscode.Uri }> {
+  const lexical = resolveWorkspacePath(relative);
+  const [root, absolute] = await Promise.all([
+    fs.promises.realpath(lexical.root),
+    fs.promises.realpath(lexical.absolute),
+  ]);
+  if (!isInside(root, absolute)) throw new Error(`Path is outside the workspace: ${relative}`);
+  return { root, absolute, relative: lexical.relative, uri: vscode.Uri.file(absolute) };
+}
+
 function toolResult(text: string): vscode.LanguageModelToolResult {
   return makeToolResult(text);
 }
@@ -1652,7 +1662,7 @@ class TerminalCommandManager implements vscode.Disposable {
 }
 
 async function listDirectory(input: Record<string, unknown>): Promise<string> {
-  const scope = resolveWorkspacePath(asString(input.path, "."));
+  const scope = await resolveExistingWorkspacePath(asString(input.path, "."));
   const depth = asInteger(input.depth, 1, 1, 2);
   const includeHidden = asBoolean(input.include_hidden, false);
   const noIgnore = asBoolean(input.no_ignore, false);

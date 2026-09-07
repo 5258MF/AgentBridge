@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 import * as vscode from "vscode";
 
@@ -64,21 +65,41 @@ function isInside(root: string, candidate: string): boolean {
   return candidateCmp === rootCmp || candidateCmp.startsWith(`${rootCmp}${path.sep}`);
 }
 
-function resolveWorkspaceFile(inputPath: string): { root: string; relative: string; uri: vscode.Uri } {
-  const root = workspaceRoot();
+async function canonicalWorkspaceRoot(): Promise<string> {
+  return realpath(workspaceRoot());
+}
+
+async function resolveWorkspaceFile(inputPath: string): Promise<{ root: string; relative: string; uri: vscode.Uri }> {
+  const lexicalRoot = workspaceRoot();
   const raw = inputPath.trim();
   if (!raw) throw new Error("path must be a non-empty workspace path");
   const normalized = raw.replace(/\\/g, "/").replace(/^\.\//, "");
   const absolute = path.isAbsolute(raw) || path.isAbsolute(normalized)
     ? path.resolve(raw)
-    : path.resolve(root, normalized);
-  if (!isInside(root, absolute)) throw new Error(`Path is outside the workspace: ${inputPath}`);
-  const relative = path.relative(root, absolute).replace(/\\/g, "/") || ".";
+    : path.resolve(lexicalRoot, normalized);
+  if (!isInside(lexicalRoot, absolute)) throw new Error(`Path is outside the workspace: ${inputPath}`);
+  const [root, target] = await Promise.all([realpath(lexicalRoot), realpath(absolute)]);
+  if (!isInside(root, target)) throw new Error(`Path is outside the workspace: ${inputPath}`);
+  const relative = path.relative(root, target).replace(/\\/g, "/") || ".";
   return {
     root,
     relative,
-    uri: vscode.Uri.file(absolute),
+    uri: vscode.Uri.file(target),
   };
+}
+
+async function resolveWorkspaceCandidate(root: string, uri: vscode.Uri): Promise<{ relative: string; uri: vscode.Uri } | undefined> {
+  if (uri.scheme !== "file") return undefined;
+  try {
+    const target = await realpath(uri.fsPath);
+    if (!isInside(root, target)) return undefined;
+    return {
+      relative: path.relative(root, target).replace(/\\/g, "/") || ".",
+      uri: vscode.Uri.file(target),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function symbolQueryTokens(query: string): string[] {
@@ -101,11 +122,11 @@ function warmupCandidateScore(relativePath: string, query: string, tokens: strin
 }
 
 async function warmWorkspaceSymbolProjects(query: string, anchorPath?: string): Promise<string[]> {
-  const root = workspaceRoot();
+  const root = await canonicalWorkspaceRoot();
   const candidates = new Map<string, vscode.Uri>();
   let searchBase: vscode.Uri | undefined;
   if (anchorPath?.trim()) {
-    const anchor = resolveWorkspaceFile(anchorPath);
+    const anchor = await resolveWorkspaceFile(anchorPath);
     try {
       const stat = await vscode.workspace.fs.stat(anchor.uri);
       if (stat.type & vscode.FileType.Directory) searchBase = anchor.uri;
@@ -124,9 +145,9 @@ async function warmWorkspaceSymbolProjects(query: string, anchorPath?: string): 
       16,
     );
     for (const uri of matches) {
-      if (uri.scheme !== "file" || !isInside(root, uri.fsPath)) continue;
-      const relative = path.relative(root, uri.fsPath).replace(/\\/g, "/");
-      candidates.set(relative, uri);
+      const candidate = await resolveWorkspaceCandidate(root, uri);
+      if (!candidate) continue;
+      candidates.set(candidate.relative, candidate.uri);
       if (candidates.size >= WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES) break;
     }
     if (candidates.size >= WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES) break;
@@ -140,9 +161,9 @@ async function warmWorkspaceSymbolProjects(query: string, anchorPath?: string): 
       WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES,
     );
     for (const uri of broadMatches) {
-      if (uri.scheme !== "file" || !isInside(root, uri.fsPath)) continue;
-      const relative = path.relative(root, uri.fsPath).replace(/\\/g, "/");
-      candidates.set(relative, uri);
+      const candidate = await resolveWorkspaceCandidate(root, uri);
+      if (!candidate) continue;
+      candidates.set(candidate.relative, candidate.uri);
       if (candidates.size >= WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES) break;
     }
   }
@@ -165,7 +186,7 @@ async function warmWorkspaceSymbolProjects(query: string, anchorPath?: string): 
 }
 
 async function resolvePosition(input: Record<string, unknown>): Promise<{ root: string; relative: string; uri: vscode.Uri; position: vscode.Position; languageId: string }> {
-  const file = resolveWorkspaceFile(asString(input.path));
+  const file = await resolveWorkspaceFile(asString(input.path));
   if (!Number.isInteger(input.line) || Number(input.line) < 1) throw new Error("line must be a 1-based integer >= 1");
   if (!Number.isInteger(input.column) || Number(input.column) < 1) throw new Error("column must be a 1-based integer >= 1");
 
@@ -369,12 +390,12 @@ async function locationOperation(
 }
 
 async function workspaceSymbols(input: Record<string, unknown>, maxResults: number): Promise<string> {
-  const root = workspaceRoot();
+  const root = await canonicalWorkspaceRoot();
   const query = asString(input.query).trim();
   if (!query) throw new Error("workspace_symbols requires a non-empty query");
 
   const anchorPath = asString(input.path).trim();
-  const explicitAnchor = anchorPath ? resolveWorkspaceFile(anchorPath) : undefined;
+  const explicitAnchor = anchorPath ? await resolveWorkspaceFile(anchorPath) : undefined;
   let warmupDocuments: string[] = [];
 
   let symbols = await vscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>("vscode.executeWorkspaceSymbolProvider", query) ?? [];
@@ -428,7 +449,7 @@ async function workspaceSymbols(input: Record<string, unknown>, maxResults: numb
 }
 
 async function documentSymbols(input: Record<string, unknown>, maxResults: number): Promise<string> {
-  const file = resolveWorkspaceFile(asString(input.path));
+  const file = await resolveWorkspaceFile(asString(input.path));
   const document = await vscode.workspace.openTextDocument(file.uri);
   const symbols = await vscode.commands.executeCommand<Array<vscode.SymbolInformation | vscode.DocumentSymbol> | undefined>(
     "vscode.executeDocumentSymbolProvider",
