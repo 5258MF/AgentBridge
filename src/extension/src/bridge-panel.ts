@@ -76,6 +76,7 @@ const BUSY_PANEL_MESSAGE_TYPES = new Set([
 export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
+  private quickTunnelCopyQueue: Promise<void> = Promise.resolve();
   private lastAttemptedQuickTunnelUrl = "";
   private lastCopiedQuickTunnelUrl = "";
 
@@ -131,18 +132,37 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private isCurrentQuickTunnelUrl(url: string): boolean {
+    const status = this.bridge.getStatus();
+    return status.tunnelProvider === "cloudflare"
+      && status.state === "running"
+      && status.publicUrl === url
+      && this.lastAttemptedQuickTunnelUrl === url;
+  }
+
   private pushStatus(type: "status" | "operationFinished" = "status"): void {
     if (!this.view) return;
     const status = this.bridge.getStatus();
     if (status.tunnelProvider === "cloudflare" && status.state === "running" && status.publicUrl && status.publicUrl !== this.lastAttemptedQuickTunnelUrl) {
       const url = status.publicUrl;
       this.lastAttemptedQuickTunnelUrl = url;
-      void vscode.env.clipboard.writeText(url).then(() => {
-        this.lastCopiedQuickTunnelUrl = url;
+      this.quickTunnelCopyQueue = this.quickTunnelCopyQueue.then(async () => {
+        // Skip queued writes that became stale before they reached the clipboard.
+        if (!this.isCurrentQuickTunnelUrl(url)) return;
+        try {
+          await vscode.env.clipboard.writeText(url);
+        } catch (error) {
+          console.error(`[AgentBridge panel] Failed to copy Quick Tunnel URL: ${error instanceof Error ? error.message : String(error)}`);
+          if (this.isCurrentQuickTunnelUrl(url)) {
+            void vscode.window.showWarningMessage(t("quickAddressCopyFailed"));
+          }
+          if (this.view?.visible) this.pushStatus();
+          return;
+        }
+        if (this.isCurrentQuickTunnelUrl(url)) {
+          this.lastCopiedQuickTunnelUrl = url;
+        }
         if (this.view?.visible) this.pushStatus();
-      }, (error) => {
-        console.error(`[AgentBridge panel] Failed to copy Quick Tunnel URL: ${error instanceof Error ? error.message : String(error)}`);
-        void vscode.window.showWarningMessage(t("quickAddressCopyFailed"));
       });
     }
     const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
