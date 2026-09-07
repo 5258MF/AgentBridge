@@ -76,6 +76,7 @@ const BUSY_PANEL_MESSAGE_TYPES = new Set([
 export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
+  private lastAttemptedQuickTunnelUrl = "";
   private lastCopiedQuickTunnelUrl = "";
 
   constructor(
@@ -133,15 +134,20 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private pushStatus(type: "status" | "operationFinished" = "status"): void {
     if (!this.view) return;
     const status = this.bridge.getStatus();
-    if (status.tunnelProvider === "cloudflare" && status.state === "running" && status.publicUrl && status.publicUrl !== this.lastCopiedQuickTunnelUrl) {
+    if (status.tunnelProvider === "cloudflare" && status.state === "running" && status.publicUrl && status.publicUrl !== this.lastAttemptedQuickTunnelUrl) {
       const url = status.publicUrl;
-      this.lastCopiedQuickTunnelUrl = url;
-      void vscode.env.clipboard.writeText(url).then(undefined, (error) => {
+      this.lastAttemptedQuickTunnelUrl = url;
+      void vscode.env.clipboard.writeText(url).then(() => {
+        this.lastCopiedQuickTunnelUrl = url;
+        if (this.view?.visible) this.pushStatus();
+      }, (error) => {
         console.error(`[AgentBridge panel] Failed to copy Quick Tunnel URL: ${error instanceof Error ? error.message : String(error)}`);
+        void vscode.window.showWarningMessage(t("quickAddressCopyFailed"));
       });
     }
     const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
-    void this.view.webview.postMessage({ type, status, persistentMode });
+    const quickTunnelCopied = status.publicUrl !== undefined && status.publicUrl === this.lastCopiedQuickTunnelUrl;
+    void this.view.webview.postMessage({ type, status, persistentMode, quickTunnelCopied });
   }
 
   private async handleMessage(message: PanelMessage, sourceWebview: vscode.Webview): Promise<void> {
@@ -1330,13 +1336,13 @@ private renderHtml(): string {
     badge.textContent = state === 'running' ? t('running') : state === 'starting' ? t('starting') : state === 'error' ? t('error') : t('stopped');
   }
 
-  function refreshStatus(status, persistentMode) {
+  function refreshStatus(status, persistentMode, quickTunnelCopied) {
     lastStatus = status;
     // Keep the primary action synchronized before rendering non-critical session/UI details.
     // If any later renderer fails, the visible label and click action must still agree.
     updateControls();
     try {
-      renderStatus(status, persistentMode);
+      renderStatus(status, persistentMode, quickTunnelCopied);
     } catch (error) {
       const detail = error instanceof Error ? (error.stack || error.message) : String(error);
       console.error('[AgentBridge panel] status render failed', error);
@@ -1370,7 +1376,7 @@ private renderHtml(): string {
     notice.style.display = '';
   }
 
-  function renderStatus(status, persistentMode) {
+  function renderStatus(status, persistentMode, quickTunnelCopied) {
     renderSession(status);
     const isNgrok = status.tunnelProvider === 'ngrok';
     const isNamed = status.tunnelProvider === 'cloudflare-named';
@@ -1459,7 +1465,7 @@ private renderHtml(): string {
       $('publicUrlValue').value = status.publicUrl;
       $('publicUrlValue').title = status.publicUrl;
     }
-    if (isQuick && status.state === 'running' && status.publicUrl) {
+    if (isQuick && status.state === 'running' && status.publicUrl && quickTunnelCopied) {
       $('addressNotice').style.display = '';
       $('addressNotice').textContent = t('quickAddressCopied');
     } else {
@@ -1851,16 +1857,16 @@ private renderHtml(): string {
   window.addEventListener('message', (event) => {
     const message = event.data;
     if (message && message.type === 'status' && message.status) {
-      refreshStatus(message.status, message.persistentMode);
+      refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
     } else if (message && message.type === 'operationFinished') {
       try {
-        if (message.status) refreshStatus(message.status, message.persistentMode);
+        if (message.status) refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
       } finally {
         if (!installingCloudflared) resetBusy();
       }
     } else if (message && message.type === 'cloudflaredInstallFinished') {
       try {
-        if (message.status) refreshStatus(message.status, message.persistentMode);
+        if (message.status) refreshStatus(message.status, message.persistentMode, false);
       } finally {
         resetBusy();
       }

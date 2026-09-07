@@ -11,6 +11,7 @@
 - **Resource bounds tightened** — per-session MCP replay events now have an 8 MiB serialized-payload cap in addition to the 512-event count cap; `search_files` admits at most 16 MiB of source-file bytes into its contextual full-file cache per call; `apply_patch` no longer keeps two full preflight snapshot sets alive at once; and pending MCP initializations count toward the 64-session admission limit.
 - **Replay/context edge cases fixed** — expired SSE replay cursors are now rejected cleanly instead of creating a stream that cannot receive future events, and unavailable `search_files` context no longer appears as fabricated blank source lines.
 - **Idle UI/resource cleanup improved** — the Bridge panel stops its 1.5-second UI polling while hidden and resumes with an immediate refresh when shown; Quick Tunnel clipboard failures are attempted once per URL instead of retried forever; completed foreground commands clear their timeout handles; `find_files` skips candidates that disappear before `stat`; and stale expanded activity-card ids are pruned with activity history.
+- **Quick Tunnel copy status is truthful** — the panel now distinguishes a clipboard attempt from a successful copy. A failed automatic copy no longer leaves the UI claiming success and instead shows a localized warning directing the user to the manual copy button.
 
 ## 0.1.8 (2026-09-02)
 
