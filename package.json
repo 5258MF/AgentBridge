@@ -142,19 +142,22 @@
         "agentbridge.bridge.ngrokDomain": {
           "type": "string",
           "default": "",
-          "description": "Reserved ngrok HTTPS hostname used by the Bridge, for example your-name.ngrok-free.dev."
+          "scope": "application",
+          "description": "Reserved ngrok HTTPS hostname used by the Bridge, for example your-name.ngrok-free.dev. Stored as an application-wide user setting so a workspace cannot override the Bridge's public identity."
         },
         "agentbridge.bridge.cloudflareNamedDomain": {
           "type": "string",
           "default": "",
-          "description": "Fixed HTTPS hostname configured as a Cloudflare Tunnel published application, for example mcp.example.com."
+          "scope": "application",
+          "description": "Fixed HTTPS hostname configured as a Cloudflare Tunnel published application, for example mcp.example.com. Stored as an application-wide user setting so a workspace cannot override the Bridge's public identity."
         },
         "agentbridge.bridge.cloudflareNamedLocalPort": {
           "type": "integer",
           "default": 48271,
           "minimum": 1024,
           "maximum": 65535,
-          "description": "Fixed localhost port used by Cloudflare Named Tunnel. Configure the Cloudflare published application Service URL as http://127.0.0.1:<port>."
+          "scope": "machine",
+          "description": "Fixed localhost port used by Cloudflare Named Tunnel on this machine. This machine-specific setting is not synchronized or workspace-overridable. Configure the Cloudflare published application Service URL as http://127.0.0.1:<port>."
         },
         "agentbridge.bridge.managedShell.windows": {
           "type": "string",
