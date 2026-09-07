@@ -1480,7 +1480,7 @@ class TerminalCommandManager implements vscode.Disposable {
     if (typeof input.background !== "boolean") throw new Error("background must be explicitly true or false");
     const timeoutMs = asInteger(input.timeout_ms, 120_000, 1_000, 120_000);
     const cwdInfo = typeof input.cwd === "string" && input.cwd.trim()
-      ? resolveWorkspacePath(input.cwd)
+      ? await resolveExistingWorkspacePath(input.cwd)
       : undefined;
     const id = `cmd_${Date.now()}_${this.nextCommandId++}`;
     const { slot, reused, effectiveCwd } = await this.acquireTerminal(id, cwdInfo);
