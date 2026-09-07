@@ -37,6 +37,7 @@ export interface SearchFilesConfig {
   maxEstimatedTokens: number;
   maxLineChars: number;
   maxFallbackFileBytes: number;
+  maxContextCacheBytes: number;
   maxFallbackFilesScanned: number;
   binaryProbeBytes: number;
   ripgrepPath?: string;
@@ -54,6 +55,7 @@ export const DEFAULT_SEARCH_FILES_CONFIG: SearchFilesConfig = {
   maxEstimatedTokens: 30_000,
   maxLineChars: 1_200,
   maxFallbackFileBytes: 2 * 1024 * 1024,
+  maxContextCacheBytes: 16 * 1024 * 1024,
   maxFallbackFilesScanned: 20_000,
   binaryProbeBytes: 8 * 1024,
   commonExcludes: [
@@ -105,7 +107,8 @@ export type SearchTruncationReason =
   | "MAX_MATCHES_PER_FILE"
   | "OUTPUT_BYTE_BUDGET"
   | "OUTPUT_TOKEN_BUDGET"
-  | "MAX_FILES_SCANNED";
+  | "MAX_FILES_SCANNED"
+  | "CONTEXT_CACHE_BYTE_BUDGET";
 
 export interface SearchFilesResult {
   pattern: string;
@@ -694,9 +697,11 @@ async function addContext(
   rawMatches: RawMatch[],
   contextLines: number,
   config: SearchFilesConfig,
+  truncationReasons: Set<SearchTruncationReason>,
 ): Promise<SearchMatch[]> {
   const cache = new Map<string, string[]>();
   const result: SearchMatch[] = [];
+  let cachedFileBytes = 0;
 
   for (const match of rawMatches) {
     const hit = truncateLine(match.text, config.maxLineChars);
@@ -719,9 +724,13 @@ async function addContext(
         const fileStat = await stat(match.absolutePath);
         if (fileStat.size > config.maxFallbackFileBytes) {
           lines = [];
+        } else if (cachedFileBytes + fileStat.size > config.maxContextCacheBytes) {
+          lines = [];
+          truncationReasons.add("CONTEXT_CACHE_BYTE_BUDGET");
         } else {
           const text = await readFile(match.absolutePath, "utf8");
           lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+          cachedFileBytes += fileStat.size;
         }
       } catch {
         lines = [];
@@ -813,7 +822,7 @@ export async function searchFiles(input: SearchFilesInput, context: SearchFilesC
     }
 
     const engine = await searchWithPreferredEngine(options, config, context.signal, context.checkPermission);
-    const enriched = await addContext(engine.matches, options.contextLines, config);
+    const enriched = await addContext(engine.matches, options.contextLines, config, engine.truncationReasons);
     const bounded = applyOutputBudget(enriched, config, engine.truncationReasons);
     const filesWithMatches = new Set(bounded.map((match) => match.path)).size;
 

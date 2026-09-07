@@ -51,6 +51,7 @@ const MAX_SESSIONS = 64;
 const SESSION_KEEPALIVE_INTERVAL_MS = 15_000;
 const SESSION_RETRY_INTERVAL_MS = 2_000;
 const SESSION_EVENT_STORE_LIMIT = 512;
+const SESSION_EVENT_STORE_MAX_BYTES = 8 * 1024 * 1024;
 const PUBLIC_HEALTH_STARTUP_TIMEOUT_MS = 60_000;
 const PUBLIC_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
 const PUBLIC_HEALTH_LOG_THROTTLE_MS = 10_000;
@@ -837,19 +838,30 @@ interface McpSession {
 }
 
 class BoundedInMemoryEventStore implements EventStore {
-  private readonly events = new Map<string, { streamId: string; message: JSONRPCMessage }>();
+  private readonly events = new Map<string, { streamId: string; message: JSONRPCMessage; sizeBytes: number }>();
   private readonly order: string[] = [];
   private sequence = 0;
+  private totalBytes = 0;
 
-  constructor(private readonly limit = SESSION_EVENT_STORE_LIMIT) {}
+  constructor(
+    private readonly limit = SESSION_EVENT_STORE_LIMIT,
+    private readonly maxBytes = SESSION_EVENT_STORE_MAX_BYTES,
+  ) {}
 
   async storeEvent(streamId: string, message: JSONRPCMessage): Promise<string> {
     const eventId = `${Date.now().toString(36)}-${(++this.sequence).toString(36)}-${randomUUID()}`;
-    this.events.set(eventId, { streamId, message });
+    const sizeBytes = Buffer.byteLength(JSON.stringify(message), "utf8");
+    this.events.set(eventId, { streamId, message, sizeBytes });
     this.order.push(eventId);
-    while (this.order.length > this.limit) {
+    this.totalBytes += sizeBytes;
+    // An individual event larger than the byte budget is still assigned an id for the live
+    // response, but is evicted immediately and therefore cannot be replayed after disconnect.
+    while (this.order.length > this.limit || this.totalBytes > this.maxBytes) {
       const oldest = this.order.shift();
-      if (oldest) this.events.delete(oldest);
+      if (!oldest) break;
+      const removed = this.events.get(oldest);
+      if (removed) this.totalBytes = Math.max(0, this.totalBytes - removed.sizeBytes);
+      this.events.delete(oldest);
     }
     return eventId;
   }
@@ -979,6 +991,7 @@ export class BridgeManager implements vscode.Disposable {
   private routeToken = "";
   private readOnlyMode = false;
   private readonly sessions = new Map<string, McpSession>();
+  private pendingInitializations = 0;
   private httpServer: HttpServer | undefined;
   private tunnelProcess: ChildProcessWithoutNullStreams | undefined;
   private localPort: number | undefined;
@@ -2438,23 +2451,34 @@ export class BridgeManager implements vscode.Disposable {
       return;
     }
     this.makeRoomForSession();
-    if (this.sessions.size >= MAX_SESSIONS) {
+    if (this.sessions.size + this.pendingInitializations >= MAX_SESSIONS) {
       writeJsonError(response, 503, "Bridge session capacity reached. Close an existing MCP session and retry.");
       return;
     }
 
     // No session ID: validated initialization request. Create a new session.
-    const { transport, server } = this.createSession();
+    this.pendingInitializations += 1;
+    let reservationActive = true;
+    const releaseInitializationReservation = () => {
+      if (!reservationActive) return;
+      reservationActive = false;
+      this.pendingInitializations = Math.max(0, this.pendingInitializations - 1);
+    };
     this.activeRequests += 1;
+    let transport: StreamableHTTPServerTransport | undefined;
     try {
+      const created = this.createSession(releaseInitializationReservation);
+      transport = created.transport;
+      const server = created.server;
       await server.connect(transport);
       await transport.handleRequest(request, response, body);
     } catch (error) {
       // If session creation failed during initialization, clean up
-      const newSessionId = transport.sessionId;
+      const newSessionId = transport?.sessionId;
       if (newSessionId) this.destroySession(newSessionId);
       throw error;
     } finally {
+      releaseInitializationReservation();
       this.activeRequests = Math.max(0, this.activeRequests - 1);
     }
   }
@@ -2506,7 +2530,7 @@ export class BridgeManager implements vscode.Disposable {
     this.destroySession(sessionId);
   }
 
-  private createSession(): { transport: StreamableHTTPServerTransport; server: McpServer } {
+  private createSession(onSessionInitialized?: () => void): { transport: StreamableHTTPServerTransport; server: McpServer } {
     const instructions = this.readOnlyMode
       ? `${BRIDGE_SERVER_INSTRUCTIONS}\n\nRead-only mode is ACTIVE: apply_patch, run_command, send_command_input, and terminate_command are disabled. Do not attempt file modifications or command execution; report findings and proposed changes to the user instead.`
       : BRIDGE_SERVER_INSTRUCTIONS;
@@ -2523,6 +2547,7 @@ export class BridgeManager implements vscode.Disposable {
       keepAliveMs: SESSION_KEEPALIVE_INTERVAL_MS,
       retryInterval: SESSION_RETRY_INTERVAL_MS,
       onsessioninitialized: (sid) => {
+        onSessionInitialized?.();
         this.sessions.set(sid, {
           transport,
           server,
@@ -2682,7 +2707,7 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   private makeRoomForSession(): void {
-    this.trimInactiveSessions(MAX_SESSIONS - 1);
+    this.trimInactiveSessions(Math.max(0, MAX_SESSIONS - this.pendingInitializations - 1));
   }
 
   private trimInactiveSessions(maxSize: number): void {

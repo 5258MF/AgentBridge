@@ -535,6 +535,27 @@ async function loadSnapshot(filePath: string, displayPath: string, config: Apply
   return decodeSnapshot(await readFile(filePath), config, displayPath);
 }
 
+async function collectLockPaths(operations: ParsedOperation[], context: ApplyPatchContext): Promise<string[]> {
+  const lockPaths: string[] = [];
+  for (const operation of operations) {
+    if (context.signal?.aborted) throw new DOMException("Patch application was cancelled.", "AbortError");
+
+    if (operation.action === "add") {
+      const destination = await resolveNewPath(operation.path, context.workspaceRoots);
+      lockPaths.push(destination.absolutePath);
+      continue;
+    }
+
+    const source = await resolveExistingPath(operation.path, context.workspaceRoots);
+    lockPaths.push(source.absolutePath);
+    if (operation.action === "update" && operation.moveTo) {
+      const destination = await resolveNewPath(operation.moveTo, context.workspaceRoots);
+      lockPaths.push(destination.absolutePath);
+    }
+  }
+  return lockPaths;
+}
+
 async function preflight(
   operations: ParsedOperation[],
   input: ApplyPatchInput,
@@ -822,9 +843,9 @@ export async function applyPatch(input: ApplyPatchInput, context: ApplyPatchCont
       throw new PatchToolError("INVALID_PATCH", "patch must be a non-empty string.");
     }
     const operations = parsePatch(input.patch, config);
-    const initial = await preflight(operations, input, context, config);
+    const lockPaths = await collectLockPaths(operations, context);
 
-    return await withFileLocks(initial.lockPaths, async () => {
+    return await withFileLocks(lockPaths, async () => {
       // Re-run all validation while locks are held. This protects concurrent AgentBridge writers and makes
       // expected_version/context checks authoritative immediately before mutation.
       const locked = await preflight(operations, input, context, config);
