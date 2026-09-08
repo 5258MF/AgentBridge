@@ -13,7 +13,7 @@ import { BRIDGE_EXCLUDED_TOOL_NAMES, getIdeToolDefinition, IDE_TOOL_DEFINITIONS 
 import { getManagedShellChoice } from "./ide-tool-broker.js";
 import { managedShellExecutable, managedShellOverrideWarning } from "./ide-tool-broker.js";
 import type { IdeToolBroker } from "./ide-tool-broker.js";
-import { createTranslator, detectLang } from "./i18n.js";
+import { translate } from "./i18n.js";
 import {
   appendCloudflaredDiagnosticOutput,
   cloudflaredFirstQuicFailureAt,
@@ -30,7 +30,7 @@ import {
 } from "./cloudflared-diagnostics.js";
 
 const execFileAsync = promisify(execFile);
-const t = createTranslator(detectLang());
+const t = translate;
 const ROUTE_TOKEN_SECRET = "agentbridge.bridge.routeToken";
 const NGROK_DOMAIN_SETTING = "bridge.ngrokDomain";
 const NGROK_DOMAIN_STATE_KEY = "agentbridge.bridge.ngrokDomain";

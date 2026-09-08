@@ -30,7 +30,7 @@ Published to the [Visual Studio Marketplace](https://marketplace.visualstudio.co
 - **Managed shell support matrix** — PowerShell 5.1 / PowerShell 7+ (Windows), bash (Linux) and zsh (macOS) fully support `run_command` via per-prompt protocol hooks; cmd, sh and fish are rejected up front with a clear error instead of timing out. The syntax hint shown to the AI updates automatically when you switch shells.
 - **Vision-capable `read_image_file`** — returns MCP `ImageContent` blocks (PNG / JPEG / GIF / WebP / BMP) up to 5 MiB so vision-capable clients see pixels natively. SVG stays text via `read_files`.
 - **External link routing** — `agentbridge.bridge.openInternalBrowser` (`auto` / `all` / `external`) controls whether ChatGPT / Arena open inside VS Code's Simple Browser or in the OS default browser. Default `auto` matches the original in-editor experience.
-- **Bridge panel** — Activity Bar view with tunnel provider radio, status hero, persistent toggle, sessions timeline with mini diffs, and an advanced card covering managed shell, link routing, copy-MCP-prompt, and reset routeToken.
+- **Bridge panel** — Activity Bar view with tunnel provider radio, status hero, persistent toggle, sessions timeline with mini diffs, and an advanced card covering interface language, managed shell, link routing, copy-MCP-prompt, and reset routeToken.
 - **Auto-start** — flip `agentbridge.bridge.persistentMode` to bring the Bridge up on extension activation.
 - **Client compatibility** — verified against ChatGPT Connectors, Claude Desktop, Cursor, Cline, Continue.
 
@@ -110,10 +110,11 @@ When a check cannot find `cloudflared`, AgentBridge also verifies whether Winget
 
 ## Configuration
 
-All settings live under the `agentbridge.bridge.*` namespace.
+The interface-language override is `agentbridge.language`; Bridge and tunnel settings live under `agentbridge.bridge.*`.
 
 | Key | Type | Default | Scope | Notes |
 |---|---|---|---|---|
+| `agentbridge.language` | enum | `auto` | `application` | `auto` follows the VS Code display language; `zh-CN` / `en` override AgentBridge's own panel and runtime messages |
 | `tunnelProvider` | enum | `cloudflare` | `application` | `cloudflare` / `cloudflare-named` / `ngrok` |
 | `tunnelProtocol` | enum | `auto` | `application` | cloudflared↔Cloudflare edge transport (Cloudflare tunnels only): `auto` / `quic` (UDP 7844) / `http2` (TCP 7844). Use `http2` on networks where QUIC is unstable (campus/corporate networks often drop sustained UDP flows). Applies on the next tunnel start or automatic reconnect. |
 | `cloudflareNamedDomain` | string | `""` | `application` | Fixed hostname (e.g. `mcp.example.com`) |
@@ -124,7 +125,7 @@ All settings live under the `agentbridge.bridge.*` namespace.
 | `openInternalBrowser` | enum | `auto` | `machine-overridable` | `auto` / `all` / `external`; controls whether external links open in VS Code Simple Browser or OS default browser |
 | `persistentMode` | boolean | `false` | `application` | Start the Bridge automatically on extension activation |
 
-Runtime toggles for managed shell and open-internally-browser live on the Bridge panel's **advanced** card.
+Interface language, managed shell, and link-routing controls also live on the Bridge panel's **advanced** card.
 
 ### Cloudflare Named Tunnel walkthrough
 

@@ -1,6 +1,9 @@
 import * as vscode from "vscode";
 
 export type Lang = "zh" | "en";
+export type LanguagePreference = "auto" | "zh-CN" | "en";
+
+export const LANGUAGE_SETTING = "language";
 
 // Message catalogs are serialized into the webview with JSON.stringify.
 // Keep every value as a string and use {0}, {1}, ... for runtime arguments.
@@ -228,6 +231,11 @@ export const zhMessages = {
 
   // advanced
   advancedSettings: "高级设置",
+  interfaceLanguage: "界面语言",
+  interfaceLanguageHelp: "默认跟随 VS Code 的显示语言；也可以只覆盖 AgentBridge 自身的面板与运行时提示。VS Code 原生命令和设置标题仍由 VS Code 的语言决定。",
+  languageFollowVscode: "跟随 VS Code",
+  languageChinese: "简体中文",
+  languageEnglish: "English",
   transportProtocol: "传输协议",
   securityAccess: "安全与访问",
   securityHelp: "若 MCP 地址泄露，可重置密钥路径。所有使用旧地址的客户端将立即失效。",
@@ -556,6 +564,11 @@ export const enMessages: Record<MessageKey, string> = {
   readOnlyDisabledNotice: "Read-only mode is off; clients list all tools again after they refresh their tool list.",
 
   advancedSettings: "Advanced Settings",
+  interfaceLanguage: "Interface Language",
+  interfaceLanguageHelp: "Follows the VS Code display language by default. You can override only AgentBridge's panel and runtime messages; VS Code-native command and settings titles still follow the VS Code locale.",
+  languageFollowVscode: "Follow VS Code",
+  languageChinese: "简体中文",
+  languageEnglish: "English",
   transportProtocol: "Transport Protocol",
   securityAccess: "Security & Access",
   securityHelp: "If the MCP address leaks, you can rotate the endpoint. All clients using the old address stop working immediately.",
@@ -689,11 +702,23 @@ function formatMessage(template: string, args: readonly unknown[]): string {
 
 validateMessageCatalogs();
 
+export function readLanguagePreference(): LanguagePreference {
+  const configured = vscode.workspace.getConfiguration("agentbridge").get<unknown>(LANGUAGE_SETTING, "auto");
+  return configured === "zh-CN" || configured === "en" ? configured : "auto";
+}
+
 export function detectLang(): Lang {
+  const preference = readLanguagePreference();
+  if (preference === "zh-CN") return "zh";
+  if (preference === "en") return "en";
   return vscode.env.language.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
 
 export function createTranslator(lang: Lang) {
   const dict = lang === "zh" ? zhMessages : enMessages;
   return (key: MessageKey, ...args: unknown[]): string => formatMessage(dict[key], args);
+}
+
+export function translate(key: MessageKey, ...args: unknown[]): string {
+  return createTranslator(detectLang())(key, ...args);
 }

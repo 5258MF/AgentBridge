@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { BridgeManager, BridgeStartCancelledError, type BridgeStatus } from "./bridge-server.js";
 import { BridgePanelProvider } from "./bridge-panel.js";
 import { IdeToolBroker, invalidateManagedShellCache } from "./ide-tool-broker.js";
-import { createTranslator, detectLang } from "./i18n.js";
+import { translate } from "./i18n.js";
 
 let activeBridge: BridgeManager | undefined;
 
@@ -41,7 +41,7 @@ function bridgeDiffSnippet(diff: string, filePath?: string): { before: string; a
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  const t = createTranslator(detectLang());
+  const t = translate;
   const output = vscode.window.createOutputChannel("AgentBridge");
   const ideToolBroker = new IdeToolBroker();
   const bridge = new BridgeManager(context, output, ideToolBroker);

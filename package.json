@@ -139,6 +139,22 @@
     "configuration": {
       "title": "AgentBridge",
       "properties": {
+        "agentbridge.language": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "zh-CN",
+            "en"
+          ],
+          "enumDescriptions": [
+            "Follow the VS Code display language.",
+            "Force AgentBridge's own interface and runtime messages to Simplified Chinese.",
+            "Force AgentBridge's own interface and runtime messages to English."
+          ],
+          "default": "auto",
+          "scope": "application",
+          "description": "Controls the language of AgentBridge's own panel and runtime messages. VS Code-native command and settings titles continue to follow the VS Code display language."
+        },
         "agentbridge.bridge.ngrokDomain": {
           "type": "string",
           "default": "",

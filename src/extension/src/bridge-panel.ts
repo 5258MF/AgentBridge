@@ -1,12 +1,11 @@
 import * as vscode from "vscode";
 import { invalidateManagedShellCache, sanityCheckManagedShellPath } from "./ide-tool-broker.js";
 import { BridgeStartCancelledError, type BridgeManager, type BridgeStatus } from "./bridge-server.js";
-import { createTranslator, detectLang, zhMessages, enMessages } from "./i18n.js";
+import { createTranslator, detectLang, enMessages, readLanguagePreference, translate, zhMessages } from "./i18n.js";
 
 const POLL_INTERVAL_MS = 1500;
 
-const LANG = detectLang();
-const t = createTranslator(LANG);
+const t = translate;
 const CLOUDFLARE_DOWNLOADS_URL = "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/";
 const CAN_AUTO_INSTALL_CLOUDFLARED = process.platform === "win32" || process.platform === "darwin";
 
@@ -76,6 +75,7 @@ const BUSY_PANEL_MESSAGE_TYPES = new Set([
 export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
+  private keepAdvancedOpenOnLanguageChange = false;
   private quickTunnelCopyQueue: Promise<void> = Promise.resolve();
   private lastAttemptedQuickTunnelUrl = "";
   private lastCopiedQuickTunnelUrl = "";
@@ -106,6 +106,12 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         }
       });
     });
+    const configurationSubscription = vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration("agentbridge.language") || this.view !== webviewView) return;
+      const advancedOpen = this.keepAdvancedOpenOnLanguageChange;
+      this.keepAdvancedOpenOnLanguageChange = false;
+      webviewView.webview.html = this.renderHtml(advancedOpen);
+    });
     if (webviewView.visible) this.startPolling();
     webviewView.onDidChangeVisibility(() => {
       if (this.view !== webviewView) return;
@@ -113,6 +119,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       else this.stopPolling();
     });
     webviewView.onDidDispose(() => {
+      configurationSubscription.dispose();
       if (this.view !== webviewView) return;
       this.view = undefined;
       this.stopPolling();
@@ -349,6 +356,19 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         await vscode.workspace.getConfiguration("agentbridge.bridge").update("tunnelProtocol", v, vscode.ConfigurationTarget.Global);
         return;
       }
+      case "setLanguage": {
+        const v = message.value;
+        if (v !== "auto" && v !== "zh-CN" && v !== "en") throw new Error("Invalid AgentBridge language value.");
+        if (readLanguagePreference() === v) return;
+        this.keepAdvancedOpenOnLanguageChange = message.advancedOpen === true;
+        try {
+          await vscode.workspace.getConfiguration("agentbridge").update("language", v, vscode.ConfigurationTarget.Global);
+        } catch (error) {
+          this.keepAdvancedOpenOnLanguageChange = false;
+          throw error;
+        }
+        return;
+      }
       case "configureManagedShell": {
         const candidatePath = typeof message.path === "string" ? message.path.trim() : "";
         if (candidatePath !== "") {
@@ -386,10 +406,13 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
-private renderHtml(): string {
-    const dict = LANG === "zh" ? zhMessages : enMessages;
+private renderHtml(advancedOpen = false): string {
+    const lang = detectLang();
+    const languagePreference = readLanguagePreference();
+    const t = createTranslator(lang);
+    const dict = lang === "zh" ? zhMessages : enMessages;
     return /* html */ `<!DOCTYPE html>
- <html lang="${LANG === "zh" ? "zh-CN" : "en"}">
+ <html lang="${lang === "zh" ? "zh-CN" : "en"}">
  <head>
  <meta charset="UTF-8">
  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this.view?.webview.cspSource ?? ""} 'unsafe-inline'; script-src 'unsafe-inline';">
@@ -861,10 +884,19 @@ private renderHtml(): string {
     </div>
   </details>
 
-  <details class="agentbridge-card agentbridge-advanced-card" id="advancedCard">
+  <details class="agentbridge-card agentbridge-advanced-card" id="advancedCard"${advancedOpen ? " open" : ""}>
     <summary><h3>${t("advancedSettings")}</h3></summary>
     <div class="agentbridge-advanced-body">
-      <div class="agentbridge-static-row">
+      <div class="agentbridge-field" style="margin-top:0;">
+        <label class="agentbridge-label" for="languageSelect">${t("interfaceLanguage")}</label>
+        <select class="agentbridge-select" id="languageSelect">
+          <option value="auto"${languagePreference === "auto" ? " selected" : ""}>${t("languageFollowVscode")}</option>
+          <option value="zh-CN"${languagePreference === "zh-CN" ? " selected" : ""}>${t("languageChinese")}</option>
+          <option value="en"${languagePreference === "en" ? " selected" : ""}>${t("languageEnglish")}</option>
+        </select>
+        <div class="agentbridge-help">${t("interfaceLanguageHelp")}</div>
+      </div>
+      <div class="agentbridge-static-row" style="margin-top:12px;">
         <div class="agentbridge-label">${t("transportProtocol")}</div>
         <div class="agentbridge-static-value">Streamable HTTP</div>
       </div>
@@ -1797,6 +1829,9 @@ private renderHtml(): string {
   $('tunnelProtocolAuto').addEventListener('click', () => setTunnelProtocol('auto'));
   $('tunnelProtocolQuic').addEventListener('click', () => setTunnelProtocol('quic'));
   $('tunnelProtocolHttp2').addEventListener('click', () => setTunnelProtocol('http2'));
+  $('languageSelect').addEventListener('change', () => {
+    vscode.postMessage({ type: 'setLanguage', value: $('languageSelect').value, advancedOpen: $('advancedCard').open });
+  });
   $('quickProvider').addEventListener('click', () => selectTunnelProvider('cloudflare'));
   $('namedProvider').addEventListener('click', () => selectTunnelProvider('cloudflare-named'));
   $('ngrokProvider').addEventListener('click', () => selectTunnelProvider('ngrok'));
@@ -1850,7 +1885,7 @@ private renderHtml(): string {
   const tabs = [$('tabConfig'), $('tabSession')];
   document.addEventListener('keydown', (event) => {
     const tag = document.activeElement ? document.activeElement.tagName : '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (event.key === 'ArrowRight' || event.key === 'End') {
       event.preventDefault();
       switchTab('session');

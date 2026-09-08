@@ -30,7 +30,7 @@
 - **托管 shell 支持矩阵** — Windows PowerShell 5.1 / PowerShell 7+（Windows）、bash（Linux）、zsh（macOS）通过每提示符协议钩子完整支持 `run_command`；cmd/sh/fish 会被直接拒绝并返回明确错误，而不是挂到超时。切换 shell 时 AI 看到的运行时语法提示自动更新。
 - **可识别像素的 `read_image_file`** — 返回 MCP `ImageContent` block（PNG / JPEG / GIF / WebP / BMP，上限 5 MiB），让自带 vision 的客户端（ChatGPT、Claude）直接看到图像内容。SVG 仍走 `read_files` 按文本读。
 - **外链打开方式三选一** — `agentbridge.bridge.openInternalBrowser`（`auto` / `all` / `external`）决定 ChatGPT / Arena 等外链在 VS Code 内置 Simple Browser 还是 OS 默认浏览器中打开。默认 `auto` 还原在编辑器内嵌的体验。
-- **Bridge 面板** — 活动栏视图 + 隧道供应商单选卡 + 状态 hero + 自动启动 toggle + 会话时间线（含 mini diff）+ 高级卡（Managed Shell / 打开方式 / 复制 MCP 提示词 / 重置 routeToken）。
+- **Bridge 面板** — 活动栏视图 + 隧道供应商单选卡 + 状态 hero + 自动启动 toggle + 会话时间线（含 mini diff）+ 高级卡（界面语言 / Managed Shell / 打开方式 / 复制 MCP 提示词 / 重置 routeToken）。
 - **自动启动** — `agentbridge.bridge.persistentMode` 设为 true，激活插件即起 Bridge。
 - **客户端兼容性** — 已实测 ChatGPT Connectors、Claude Desktop、Cursor、Cline、Continue。
 
@@ -110,10 +110,11 @@ Cloudflare Quick Tunnel 与 Cloudflare Named Tunnel 共用同一套 `cloudflared
 
 ## 配置项
 
-全部位于 `agentbridge.bridge.*` 命名空间下。
+界面语言覆盖项为 `agentbridge.language`；Bridge 与隧道设置位于 `agentbridge.bridge.*` 命名空间下。
 
 | 配置键 | 类型 | 默认 | 作用域 | 说明 |
 |---|---|---|---|---|
+| `agentbridge.language` | enum | `auto` | `application` | `auto` 跟随 VS Code 显示语言；`zh-CN` / `en` 仅覆盖 AgentBridge 自身面板与运行时提示 |
 | `tunnelProvider` | enum | `cloudflare` | `application` | `cloudflare` / `cloudflare-named` / `ngrok` |
 | `tunnelProtocol` | enum | `auto` | `application` | cloudflared 与 Cloudflare 边缘之间的传输协议（仅 Cloudflare 隧道）：`auto` / `quic`（UDP 7844）/ `http2`（TCP 7844）。在 QUIC 不稳定的网络（校园网/企业网常掐断持续 UDP 流）建议用 `http2`。下次隧道启动或自动重连时生效。 |
 | `cloudflareNamedDomain` | string | `""` | `application` | 固定主机名（如 `mcp.example.com`） |
@@ -124,7 +125,7 @@ Cloudflare Quick Tunnel 与 Cloudflare Named Tunnel 共用同一套 `cloudflared
 | `openInternalBrowser` | enum | `auto` | `machine-overridable` | `auto` / `all` / `external`；控制外链在 Simple Browser 或 OS 默认浏览器中打开 |
 | `persistentMode` | boolean | `false` | `application` | 插件激活时自动启动 Bridge |
 
-Managed Shell 与 打开方式 的运行时切换入口位于 Bridge 面板的 **高级卡**。
+界面语言、Managed Shell 与打开方式的切换入口位于 Bridge 面板的 **高级卡**。
 
 ### Cloudflare Named Tunnel 配置教程
 
