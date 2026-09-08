@@ -1003,6 +1003,7 @@ private renderHtml(advancedOpen = false): string {
   const canAutoInstallCloudflared = window.__AB_CAN_AUTO_INSTALL_CLOUDFLARED__ === true;
   let domainInputDirty = false;
   let namedTunnelInputDirty = false;
+  const currentLanguagePreference = $('languageSelect').value;
   let lastRevision = -1;
   let todoExpanded = false;
   let footerCollapsed = false;
@@ -1636,6 +1637,7 @@ private renderHtml(advancedOpen = false): string {
     $('tunnelProtocolAuto').disabled = !statusLoaded || busy;
     $('tunnelProtocolQuic').disabled = !statusLoaded || busy;
     $('tunnelProtocolHttp2').disabled = !statusLoaded || busy;
+    $('languageSelect').disabled = !statusLoaded || tunnelOperationBusy;
     updateSessionStartStopControl(lastStatus);
   }
 
@@ -1830,7 +1832,19 @@ private renderHtml(advancedOpen = false): string {
   $('tunnelProtocolQuic').addEventListener('click', () => setTunnelProtocol('quic'));
   $('tunnelProtocolHttp2').addEventListener('click', () => setTunnelProtocol('http2'));
   $('languageSelect').addEventListener('change', () => {
-    vscode.postMessage({ type: 'setLanguage', value: $('languageSelect').value, advancedOpen: $('advancedCard').open });
+    const select = $('languageSelect');
+    const nextLanguage = select.value;
+    if (namedTunnelInputDirty) {
+      select.value = currentLanguagePreference;
+      window.alert(t('saveNamedTunnelBeforeLanguageChange'));
+      return;
+    }
+    if (select.disabled || busy || installingCloudflared || (lastStatus && lastStatus.tunnelChecking === true)) {
+      select.value = currentLanguagePreference;
+      return;
+    }
+    select.disabled = true;
+    vscode.postMessage({ type: 'setLanguage', value: nextLanguage, advancedOpen: $('advancedCard').open });
   });
   $('quickProvider').addEventListener('click', () => selectTunnelProvider('cloudflare'));
   $('namedProvider').addEventListener('click', () => selectTunnelProvider('cloudflare-named'));
