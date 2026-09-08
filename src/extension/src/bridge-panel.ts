@@ -77,6 +77,8 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
   private keepAdvancedOpenOnLanguageChange = false;
+  private namedTunnelInputDirty = false;
+  private pendingLanguageRefresh = false;
   private quickTunnelCopyQueue: Promise<void> = Promise.resolve();
   private lastAttemptedQuickTunnelUrl = "";
   private lastCopiedQuickTunnelUrl = "";
@@ -88,6 +90,8 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
+    this.namedTunnelInputDirty = false;
+    this.pendingLanguageRefresh = false;
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [],
@@ -113,6 +117,11 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       if (!event.affectsConfiguration("agentbridge.language") || this.view !== webviewView) return;
       const advancedOpen = this.keepAdvancedOpenOnLanguageChange;
       this.keepAdvancedOpenOnLanguageChange = false;
+      if (this.namedTunnelInputDirty) {
+        this.pendingLanguageRefresh = true;
+        return;
+      }
+      this.pendingLanguageRefresh = false;
       webviewView.webview.html = this.renderHtml(advancedOpen);
     });
     if (webviewView.visible) this.startPolling();
@@ -125,6 +134,8 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       configurationSubscription.dispose();
       if (this.view !== webviewView) return;
       this.view = undefined;
+      this.namedTunnelInputDirty = false;
+      this.pendingLanguageRefresh = false;
       this.stopPolling();
     });
   }
@@ -184,6 +195,15 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     switch (message.type) {
       case "refresh":
         return;
+      case "namedTunnelDirtyChanged": {
+        if (typeof message.dirty !== "boolean") throw new Error("Named Tunnel dirty state must be a boolean.");
+        this.namedTunnelInputDirty = message.dirty;
+        if (!this.namedTunnelInputDirty && this.pendingLanguageRefresh && this.view?.webview === sourceWebview) {
+          this.pendingLanguageRefresh = false;
+          sourceWebview.html = this.renderHtml();
+        }
+        return;
+      }
       case "panelRenderError": {
         const detail = typeof message.detail === "string" ? message.detail : "Unknown webview render error.";
         console.error(`[AgentBridge panel] ${detail}`);
@@ -1015,6 +1035,12 @@ private renderHtml(advancedOpen = false): string {
   const sessionScroll = $('sessionSection').querySelector('.agentbridge-session-scroll');
   const timelineEl = $('timeline');
 
+  function setNamedTunnelInputDirty(dirty) {
+    if (namedTunnelInputDirty === dirty) return;
+    namedTunnelInputDirty = dirty;
+    vscode.postMessage({ type: 'namedTunnelDirtyChanged', dirty });
+  }
+
   function formatDuration(durationMs) {
     if (durationMs == null) return '';
     if (durationMs < 1000) return (Math.round(durationMs / 100) / 10) + 's';
@@ -1649,7 +1675,6 @@ private renderHtml(advancedOpen = false): string {
     if (!lastStatus || busy || lastStatus.tunnelChecking || lastStatus.cloudflaredInstalling || lastStatus.state === 'running' || lastStatus.state === 'starting' || lastStatus.tunnelProvider === provider) return;
     busy = true;
     domainInputDirty = false;
-    namedTunnelInputDirty = false;
     updateControls();
     vscode.postMessage({ type: 'setProvider', provider });
   }
@@ -1864,7 +1889,7 @@ private renderHtml(advancedOpen = false): string {
   });
   for (const input of [$('namedDomainInput'), $('namedTokenInput'), $('namedPortInput')]) {
     input.addEventListener('input', () => {
-      namedTunnelInputDirty = true;
+      setNamedTunnelInputDirty(true);
       updateNamedTunnelOriginPreview();
       updateControls();
     });
@@ -1933,7 +1958,10 @@ private renderHtml(advancedOpen = false): string {
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
     } else if (message && message.type === 'operationFinished') {
       if (message.operation === 'configureNamedTunnel' && message.succeeded === true) {
-        namedTunnelInputDirty = false;
+        setNamedTunnelInputDirty(false);
+      }
+      if (message.operation === 'setProvider' && message.succeeded === true) {
+        setNamedTunnelInputDirty(false);
       }
       if (message.operation === 'setLanguage') {
         languageChanging = false;
