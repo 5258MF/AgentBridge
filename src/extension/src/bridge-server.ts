@@ -1865,16 +1865,29 @@ export class BridgeManager implements vscode.Disposable {
         return text;
       }
 
+      let safeText = "";
+      let cursor = 0;
+      while (cursor + token.length <= text.length) {
+        if (text.startsWith(token, cursor)) {
+          safeText += "<redacted>";
+          cursor += token.length;
+          continue;
+        }
+        safeText += text[cursor];
+        cursor += 1;
+      }
+
+      const remainder = text.slice(cursor);
       let holdLength = 0;
-      for (let length = Math.min(token.length - 1, text.length); length > 0; length -= 1) {
-        if (token.startsWith(text.slice(-length))) {
+      for (let length = Math.min(token.length - 1, remainder.length); length > 0; length -= 1) {
+        if (token.startsWith(remainder.slice(-length))) {
           holdLength = length;
           break;
         }
       }
-      const ready = holdLength > 0 ? text.slice(0, -holdLength) : text;
-      pendingSecretPrefixes[stream] = holdLength > 0 ? text.slice(-holdLength) : "";
-      return this.redactRouteToken(ready);
+      safeText += holdLength > 0 ? remainder.slice(0, -holdLength) : remainder;
+      pendingSecretPrefixes[stream] = holdLength > 0 ? remainder.slice(-holdLength) : "";
+      return safeText;
     };
     const appendTunnelChunk = (stream: "stdout" | "stderr", chunk: unknown): void => {
       const safeText = redactTunnelChunk(stream, chunk);
@@ -2268,7 +2281,7 @@ export class BridgeManager implements vscode.Disposable {
     const deadline = Date.now() + PUBLIC_HEALTH_STARTUP_TIMEOUT_MS;
     const isCloudflare = this.tunnelProvider === "cloudflare" || this.tunnelProvider === "cloudflare-named";
     const logThrottle = isCloudflare ? this.createPublicHealthLogThrottle() : undefined;
-    const reportFailure = logThrottle?.report ?? ((message: string) => this.output.appendLine(`[bridge] ${message}`));
+    const reportFailure = logThrottle?.report ?? ((message: string) => this.output.appendLine(`[bridge] ${this.redactRouteToken(message)}`));
     const precheckAbort = new AbortController();
     let observedPrecheckError: Error | undefined;
     let precheckDetailTimer: ReturnType<typeof setTimeout> | undefined;
