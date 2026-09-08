@@ -70,6 +70,7 @@ const BUSY_PANEL_MESSAGE_TYPES = new Set([
   "clearNamedTunnelToken",
   "checkTunnel",
   "rotateEndpoint",
+  "setLanguage",
 ]);
 
 export class BridgePanelProvider implements vscode.WebviewViewProvider {
@@ -95,14 +96,16 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage((message: PanelMessage) => {
       void this.handleMessage(message, webviewView.webview).then(() => {
         if (message.type !== "installCloudflared" && this.view === webviewView) {
-          this.pushStatus(BUSY_PANEL_MESSAGE_TYPES.has(message.type) ? "operationFinished" : "status");
+          const operationFinished = BUSY_PANEL_MESSAGE_TYPES.has(message.type);
+          this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? true : undefined);
         }
       }, (error) => {
         if (!(error instanceof BridgeStartCancelledError)) {
           void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
         }
         if (message.type !== "installCloudflared" && this.view === webviewView) {
-          this.pushStatus(BUSY_PANEL_MESSAGE_TYPES.has(message.type) ? "operationFinished" : "status");
+          const operationFinished = BUSY_PANEL_MESSAGE_TYPES.has(message.type);
+          this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? false : undefined);
         }
       });
     });
@@ -147,7 +150,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       && this.lastAttemptedQuickTunnelUrl === url;
   }
 
-  private pushStatus(type: "status" | "operationFinished" = "status"): void {
+  private pushStatus(type: "status" | "operationFinished" = "status", operation?: string, succeeded?: boolean): void {
     if (!this.view) return;
     const status = this.bridge.getStatus();
     if (status.tunnelProvider === "cloudflare" && status.state === "running" && status.publicUrl && status.publicUrl !== this.lastAttemptedQuickTunnelUrl) {
@@ -174,7 +177,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     }
     const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
     const quickTunnelCopied = status.publicUrl !== undefined && status.publicUrl === this.lastCopiedQuickTunnelUrl;
-    void this.view.webview.postMessage({ type, status, persistentMode, quickTunnelCopied });
+    void this.view.webview.postMessage({ type, status, persistentMode, quickTunnelCopied, operation, succeeded });
   }
 
   private async handleMessage(message: PanelMessage, sourceWebview: vscode.Webview): Promise<void> {
@@ -1003,6 +1006,7 @@ private renderHtml(advancedOpen = false): string {
   const canAutoInstallCloudflared = window.__AB_CAN_AUTO_INSTALL_CLOUDFLARED__ === true;
   let domainInputDirty = false;
   let namedTunnelInputDirty = false;
+  let languageChanging = false;
   const currentLanguagePreference = $('languageSelect').value;
   let lastRevision = -1;
   let todoExpanded = false;
@@ -1637,7 +1641,7 @@ private renderHtml(advancedOpen = false): string {
     $('tunnelProtocolAuto').disabled = !statusLoaded || busy;
     $('tunnelProtocolQuic').disabled = !statusLoaded || busy;
     $('tunnelProtocolHttp2').disabled = !statusLoaded || busy;
-    $('languageSelect').disabled = !statusLoaded || tunnelOperationBusy;
+    $('languageSelect').disabled = !statusLoaded || tunnelOperationBusy || languageChanging;
     updateSessionStartStopControl(lastStatus);
   }
 
@@ -1695,7 +1699,6 @@ private renderHtml(advancedOpen = false): string {
       token: token || undefined,
       localPort,
     });
-    namedTunnelInputDirty = false;
   }
 
   function toggleBridge() {
@@ -1843,7 +1846,8 @@ private renderHtml(advancedOpen = false): string {
       select.value = currentLanguagePreference;
       return;
     }
-    select.disabled = true;
+    languageChanging = true;
+    updateControls();
     vscode.postMessage({ type: 'setLanguage', value: nextLanguage, advancedOpen: $('advancedCard').open });
   });
   $('quickProvider').addEventListener('click', () => selectTunnelProvider('cloudflare'));
@@ -1928,6 +1932,13 @@ private renderHtml(advancedOpen = false): string {
     if (message && message.type === 'status' && message.status) {
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
     } else if (message && message.type === 'operationFinished') {
+      if (message.operation === 'configureNamedTunnel' && message.succeeded === true) {
+        namedTunnelInputDirty = false;
+      }
+      if (message.operation === 'setLanguage') {
+        languageChanging = false;
+        if (message.succeeded !== true) $('languageSelect').value = currentLanguagePreference;
+      }
       try {
         if (message.status) refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
       } finally {
