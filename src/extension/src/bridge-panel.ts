@@ -1421,6 +1421,9 @@ private renderHtml(advancedOpen = false): string {
 
   function refreshStatus(status, persistentMode, quickTunnelCopied) {
     lastStatus = status;
+    if (namedTunnelInputDirty && status.tunnelProvider !== 'cloudflare-named') {
+      setNamedTunnelInputDirty(false);
+    }
     // Keep the primary action synchronized before rendering non-critical session/UI details.
     // If any later renderer fails, the visible label and click action must still agree.
     updateControls();
