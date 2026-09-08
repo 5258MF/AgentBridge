@@ -1856,17 +1856,51 @@ export class BridgeManager implements vscode.Disposable {
     if (diagnostics) this.cloudflaredProcessDiagnostics.set(child, diagnostics);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    const pendingSecretPrefixes: Record<"stdout" | "stderr", string> = { stdout: "", stderr: "" };
+    const redactTunnelChunk = (stream: "stdout" | "stderr", chunk: unknown): string => {
+      const text = `${pendingSecretPrefixes[stream]}${String(chunk)}`;
+      const token = this.routeToken;
+      if (!token) {
+        pendingSecretPrefixes[stream] = "";
+        return text;
+      }
+
+      let holdLength = 0;
+      for (let length = Math.min(token.length - 1, text.length); length > 0; length -= 1) {
+        if (token.startsWith(text.slice(-length))) {
+          holdLength = length;
+          break;
+        }
+      }
+      const ready = holdLength > 0 ? text.slice(0, -holdLength) : text;
+      pendingSecretPrefixes[stream] = holdLength > 0 ? text.slice(-holdLength) : "";
+      return this.redactRouteToken(ready);
+    };
+    const appendTunnelChunk = (stream: "stdout" | "stderr", chunk: unknown): void => {
+      const safeText = redactTunnelChunk(stream, chunk);
+      if (!safeText) return;
+      this.output.append(`[${commandLabel}] ${safeText}`);
+      if (diagnostics) appendCloudflaredDiagnosticOutput(diagnostics, stream, safeText);
+    };
+    const flushTunnelChunk = (stream: "stdout" | "stderr"): void => {
+      const pending = pendingSecretPrefixes[stream];
+      if (!pending) return;
+      pendingSecretPrefixes[stream] = "";
+      const safeText = this.routeToken.startsWith(pending) ? "<redacted>" : this.redactRouteToken(pending);
+      this.output.append(`[${commandLabel}] ${safeText}`);
+      if (diagnostics) appendCloudflaredDiagnosticOutput(diagnostics, stream, safeText);
+    };
     child.stdout.on("data", (chunk) => {
-      const text = String(chunk);
-      this.output.append(`[${commandLabel}] ${text}`);
-      if (diagnostics) appendCloudflaredDiagnosticOutput(diagnostics, "stdout", text);
+      appendTunnelChunk("stdout", chunk);
     });
     child.stderr.on("data", (chunk) => {
-      const text = String(chunk);
-      this.output.append(`[${commandLabel}] ${text}`);
-      if (diagnostics) appendCloudflaredDiagnosticOutput(diagnostics, "stderr", text);
+      appendTunnelChunk("stderr", chunk);
     });
-    child.once("close", () => this.cloudflaredProcessDiagnostics.delete(child));
+    child.once("close", () => {
+      flushTunnelChunk("stdout");
+      flushTunnelChunk("stderr");
+      this.cloudflaredProcessDiagnostics.delete(child);
+    });
     child.on("error", (error) => {
       this.output.appendLine(`[${commandLabel}] process error: ${error.message}`);
       this.lastError = error.message;
