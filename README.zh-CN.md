@@ -112,17 +112,17 @@ Cloudflare Quick Tunnel 与 Cloudflare Named Tunnel 共用同一套 `cloudflared
 
 全部位于 `agentbridge.bridge.*` 命名空间下。
 
-| 配置键 | 类型 | 默认 | 说明 |
-|---|---|---|---|
-| `tunnelProvider` | enum | `cloudflare` | `cloudflare` / `cloudflare-named` / `ngrok` |
-| `tunnelProtocol` | enum | `auto` | cloudflared 与 Cloudflare 边缘之间的传输协议（仅 Cloudflare 隧道）：`auto` / `quic`（UDP 7844）/ `http2`（TCP 7844）。在 QUIC 不稳定的网络（校园网/企业网常掐断持续 UDP 流）建议用 `http2`。下次隧道启动或自动重连时生效。 |
-| `cloudflareNamedDomain` | string | `""` | 固定主机名（如 `mcp.example.com`） |
-| `cloudflareNamedLocalPort` | integer | `48271` | Named Tunnel 路由到的本地端口 |
-| `ngrokDomain` | string | `""` | ngrok 保留域名（如 `you.ngrok-free.dev`） |
-| `managedShell.windows` | string | `""` | 绝对路径（如 `C:\Program Files\PowerShell\7\pwsh.exe`）；空 = Windows PowerShell 5.1 默认 |
-| `managedShell.unix` | string | `""` | 绝对路径或 PATH 可解析名（如 `/bin/zsh` 或 `bash`）；空 = `/bin/bash` 默认（无 bash 时回退 `/bin/sh`） |
-| `openInternalBrowser` | enum | `auto` | `auto` / `all` / `external`；控制外链在 Simple Browser 或 OS 默认浏览器中打开 |
-| `persistentMode` | boolean | `false` | 插件激活时自动启动 Bridge |
+| 配置键 | 类型 | 默认 | 作用域 | 说明 |
+|---|---|---|---|---|
+| `tunnelProvider` | enum | `cloudflare` | `application` | `cloudflare` / `cloudflare-named` / `ngrok` |
+| `tunnelProtocol` | enum | `auto` | `application` | cloudflared 与 Cloudflare 边缘之间的传输协议（仅 Cloudflare 隧道）：`auto` / `quic`（UDP 7844）/ `http2`（TCP 7844）。在 QUIC 不稳定的网络（校园网/企业网常掐断持续 UDP 流）建议用 `http2`。下次隧道启动或自动重连时生效。 |
+| `cloudflareNamedDomain` | string | `""` | `application` | 固定主机名（如 `mcp.example.com`） |
+| `cloudflareNamedLocalPort` | integer | `48271` | `machine` | Named Tunnel 路由到的本地端口；仅属于当前机器，不参与 Settings Sync，也不能被 Workspace 覆盖 |
+| `ngrokDomain` | string | `""` | `application` | ngrok 保留域名（如 `you.ngrok-free.dev`） |
+| `managedShell.windows` | string | `""` | `machine-overridable` | 绝对路径（如 `C:\Program Files\PowerShell\7\pwsh.exe`）；空 = Windows PowerShell 5.1 默认 |
+| `managedShell.unix` | string | `""` | `machine-overridable` | 绝对路径或 PATH 可解析名（如 `/bin/zsh` 或 `bash`）；空 = `/bin/bash` 默认（无 bash 时回退 `/bin/sh`） |
+| `openInternalBrowser` | enum | `auto` | `machine-overridable` | `auto` / `all` / `external`；控制外链在 Simple Browser 或 OS 默认浏览器中打开 |
+| `persistentMode` | boolean | `false` | `application` | 插件激活时自动启动 Bridge |
 
 Managed Shell 与 打开方式 的运行时切换入口位于 Bridge 面板的 **高级卡**。
 

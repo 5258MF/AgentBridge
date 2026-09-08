@@ -112,17 +112,17 @@ When a check cannot find `cloudflared`, AgentBridge also verifies whether Winget
 
 All settings live under the `agentbridge.bridge.*` namespace.
 
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `tunnelProvider` | enum | `cloudflare` | `cloudflare` / `cloudflare-named` / `ngrok` |
-| `tunnelProtocol` | enum | `auto` | cloudflared↔Cloudflare edge transport (Cloudflare tunnels only): `auto` / `quic` (UDP 7844) / `http2` (TCP 7844). Use `http2` on networks where QUIC is unstable (campus/corporate networks often drop sustained UDP flows). Applies on the next tunnel start or automatic reconnect. |
-| `cloudflareNamedDomain` | string | `""` | Fixed hostname (e.g. `mcp.example.com`) |
-| `cloudflareNamedLocalPort` | integer | `48271` | Local port the named tunnel routes to |
-| `ngrokDomain` | string | `""` | Reserved ngrok domain (e.g. `you.ngrok-free.dev`) |
-| `managedShell.windows` | string | `""` | Absolute path (e.g. `C:\Program Files\PowerShell\7\pwsh.exe`); empty = Windows PowerShell 5.1 default |
-| `managedShell.unix` | string | `""` | Absolute path or PATH-resolvable name (e.g. `/bin/zsh` or `bash`); empty = `/bin/bash` default (or `/bin/sh` when bash is unavailable) |
-| `openInternalBrowser` | enum | `auto` | `auto` / `all` / `external`; controls whether external links open in VS Code Simple Browser or OS default browser |
-| `persistentMode` | boolean | `false` | Start the Bridge automatically on extension activation |
+| Key | Type | Default | Scope | Notes |
+|---|---|---|---|---|
+| `tunnelProvider` | enum | `cloudflare` | `application` | `cloudflare` / `cloudflare-named` / `ngrok` |
+| `tunnelProtocol` | enum | `auto` | `application` | cloudflared↔Cloudflare edge transport (Cloudflare tunnels only): `auto` / `quic` (UDP 7844) / `http2` (TCP 7844). Use `http2` on networks where QUIC is unstable (campus/corporate networks often drop sustained UDP flows). Applies on the next tunnel start or automatic reconnect. |
+| `cloudflareNamedDomain` | string | `""` | `application` | Fixed hostname (e.g. `mcp.example.com`) |
+| `cloudflareNamedLocalPort` | integer | `48271` | `machine` | Local port the named tunnel routes to; machine-specific and not Settings Sync/workspace-overridable |
+| `ngrokDomain` | string | `""` | `application` | Reserved ngrok domain (e.g. `you.ngrok-free.dev`) |
+| `managedShell.windows` | string | `""` | `machine-overridable` | Absolute path (e.g. `C:\Program Files\PowerShell\7\pwsh.exe`); empty = Windows PowerShell 5.1 default |
+| `managedShell.unix` | string | `""` | `machine-overridable` | Absolute path or PATH-resolvable name (e.g. `/bin/zsh` or `bash`); empty = `/bin/bash` default (or `/bin/sh` when bash is unavailable) |
+| `openInternalBrowser` | enum | `auto` | `machine-overridable` | `auto` / `all` / `external`; controls whether external links open in VS Code Simple Browser or OS default browser |
+| `persistentMode` | boolean | `false` | `application` | Start the Bridge automatically on extension activation |
 
 Runtime toggles for managed shell and open-internally-browser live on the Bridge panel's **advanced** card.
 
