@@ -967,7 +967,7 @@ function writeJsonError(response: ServerResponse, statusCode: number, message: s
 
 export function normalizeTrustedBrowserOrigin(value: string): string | undefined {
   const candidate = value.trim();
-  if (!candidate || candidate === "*") return undefined;
+  if (!candidate || candidate.includes("*") || candidate.includes("?") || candidate.includes("#")) return undefined;
 
   try {
     const origin = new URL(candidate);
