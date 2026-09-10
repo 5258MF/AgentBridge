@@ -2480,6 +2480,8 @@ export class BridgeManager implements vscode.Disposable {
 
     const originValidation = validateMcpOrigin(request, ["127.0.0.1", "localhost", "[::1]", this.domain].filter(Boolean));
     if (!originValidation.allowed) {
+      const rejectedOrigin = this.redactRouteToken(String(request.headers.origin ?? "<missing>")).replace(/[\r\n]+/g, " ");
+      this.output.appendLine(`[security] rejected MCP Origin: ${rejectedOrigin}`);
       response.setHeader("Cache-Control", "no-store");
       writeJsonError(response, 403, "Forbidden Origin.");
       return;
