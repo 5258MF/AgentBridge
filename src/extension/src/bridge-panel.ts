@@ -1123,6 +1123,7 @@ private renderHtml(advancedOpen = false): string {
   let namedTunnelInputDirty = false;
   let trustedBrowserOriginsInputDirty = false;
   let trustedBrowserOriginsSavePending = false;
+  let pendingTrustedBrowserOriginsChange = null;
   let languageChanging = false;
   const currentLanguagePreference = $('languageSelect').value;
   let savedTrustedBrowserOriginsText = normalizeTrustedBrowserOriginsText($('trustedBrowserOriginsInput').value);
@@ -1154,6 +1155,43 @@ private renderHtml(advancedOpen = false): string {
     if (trustedBrowserOriginsInputDirty === dirty) return;
     trustedBrowserOriginsInputDirty = dirty;
     vscode.postMessage({ type: 'trustedBrowserOriginsDirtyChanged', dirty });
+    if (!dirty && !trustedBrowserOriginsSavePending) applyPendingTrustedBrowserOriginsChange();
+  }
+
+  function trustedBrowserOriginsSnapshot(origins, revision) {
+    return {
+      origins,
+      revision,
+      text: normalizeTrustedBrowserOriginsText(origins.join(String.fromCharCode(10))),
+    };
+  }
+
+  function rememberPendingTrustedBrowserOriginsChange(snapshot) {
+    if (!pendingTrustedBrowserOriginsChange || snapshot.revision >= pendingTrustedBrowserOriginsChange.revision) {
+      pendingTrustedBrowserOriginsChange = snapshot;
+    }
+  }
+
+  function applyTrustedBrowserOriginsSnapshot(snapshot, showSavedStatus) {
+    trustedBrowserOriginsRevision = snapshot.revision;
+    savedTrustedBrowserOriginsText = snapshot.text;
+    $('trustedBrowserOriginsInput').value = savedTrustedBrowserOriginsText;
+    setTrustedBrowserOriginsInputDirty(false);
+    if (showSavedStatus) {
+      $('trustedBrowserOriginsStatus').textContent = t('trustedBrowserOriginsSaved');
+      $('trustedBrowserOriginsStatus').style.display = 'block';
+    } else {
+      $('trustedBrowserOriginsStatus').style.display = 'none';
+    }
+  }
+
+  function applyPendingTrustedBrowserOriginsChange() {
+    if (trustedBrowserOriginsInputDirty || trustedBrowserOriginsSavePending || !pendingTrustedBrowserOriginsChange) return;
+    const pending = pendingTrustedBrowserOriginsChange;
+    pendingTrustedBrowserOriginsChange = null;
+    if (pending.revision >= trustedBrowserOriginsRevision) {
+      applyTrustedBrowserOriginsSnapshot(pending, false);
+    }
   }
 
   function formatDuration(durationMs) {
@@ -2102,22 +2140,25 @@ private renderHtml(advancedOpen = false): string {
     } else if (message && message.type === 'trustedBrowserOriginsSaved' && Array.isArray(message.origins)) {
       trustedBrowserOriginsSavePending = false;
       const revision = Number.isInteger(message.revision) ? message.revision : -1;
-      if (revision >= trustedBrowserOriginsRevision) {
-        trustedBrowserOriginsRevision = revision;
-        savedTrustedBrowserOriginsText = normalizeTrustedBrowserOriginsText(message.origins.join(String.fromCharCode(10)));
-        $('trustedBrowserOriginsInput').value = savedTrustedBrowserOriginsText;
-        setTrustedBrowserOriginsInputDirty(false);
-        $('trustedBrowserOriginsStatus').textContent = t('trustedBrowserOriginsSaved');
-        $('trustedBrowserOriginsStatus').style.display = 'block';
+      const savedSnapshot = trustedBrowserOriginsSnapshot(message.origins, revision);
+      const pending = pendingTrustedBrowserOriginsChange;
+      pendingTrustedBrowserOriginsChange = null;
+      if (pending && pending.revision > savedSnapshot.revision) {
+        applyTrustedBrowserOriginsSnapshot(pending, false);
+      } else if (savedSnapshot.revision >= trustedBrowserOriginsRevision) {
+        applyTrustedBrowserOriginsSnapshot(savedSnapshot, true);
+      } else {
+        applyPendingTrustedBrowserOriginsChange();
       }
     } else if (message && message.type === 'trustedBrowserOriginsChanged' && Array.isArray(message.origins)) {
       const revision = Number.isInteger(message.revision) ? message.revision : -1;
-      if (revision >= trustedBrowserOriginsRevision && (!trustedBrowserOriginsInputDirty || trustedBrowserOriginsSavePending)) {
-        trustedBrowserOriginsRevision = revision;
-        savedTrustedBrowserOriginsText = normalizeTrustedBrowserOriginsText(message.origins.join(String.fromCharCode(10)));
-        $('trustedBrowserOriginsInput').value = savedTrustedBrowserOriginsText;
-        setTrustedBrowserOriginsInputDirty(false);
-        $('trustedBrowserOriginsStatus').style.display = 'none';
+      if (revision >= trustedBrowserOriginsRevision) {
+        const snapshot = trustedBrowserOriginsSnapshot(message.origins, revision);
+        if (trustedBrowserOriginsInputDirty || trustedBrowserOriginsSavePending) {
+          rememberPendingTrustedBrowserOriginsChange(snapshot);
+        } else {
+          applyTrustedBrowserOriginsSnapshot(snapshot, false);
+        }
       }
     } else if (message && message.type === 'operationFinished') {
       if (message.operation === 'configureNamedTunnel' && message.succeeded === true) {
@@ -2132,6 +2173,12 @@ private renderHtml(advancedOpen = false): string {
       }
       if (message.operation === 'setTrustedBrowserOrigins') {
         trustedBrowserOriginsSavePending = false;
+        if (message.succeeded !== true) {
+          setTrustedBrowserOriginsInputDirty(
+            normalizeTrustedBrowserOriginsText($('trustedBrowserOriginsInput').value) !== savedTrustedBrowserOriginsText,
+          );
+        }
+        applyPendingTrustedBrowserOriginsChange();
       }
       try {
         if (message.status) refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
