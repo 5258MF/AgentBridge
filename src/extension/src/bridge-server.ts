@@ -976,11 +976,12 @@ export function normalizeTrustedBrowserOrigin(value: string): string | undefined
     if (!origin.hostname) return undefined;
 
     if (origin.protocol === "http:" || origin.protocol === "https:") {
-      return origin.origin;
+      return candidate === origin.origin ? origin.origin : undefined;
     }
     if (origin.protocol === "chrome-extension:" || origin.protocol === "moz-extension:") {
       if (origin.port) return undefined;
-      return `${origin.protocol}//${origin.hostname.toLowerCase()}`;
+      const normalized = `${origin.protocol}//${origin.hostname.toLowerCase()}`;
+      return candidate === normalized ? normalized : undefined;
     }
     return undefined;
   } catch {

@@ -94,6 +94,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private trustedBrowserOriginsInputDirty = false;
   private pendingLanguageRefresh = false;
   private pendingTrustedBrowserOriginsRefresh = false;
+  private trustedBrowserOriginsConfigRevision = 0;
   private quickTunnelCopyQueue: Promise<void> = Promise.resolve();
   private lastAttemptedQuickTunnelUrl = "";
   private lastCopiedQuickTunnelUrl = "";
@@ -133,6 +134,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     const configurationSubscription = vscode.workspace.onDidChangeConfiguration((event) => {
       if (this.view !== webviewView) return;
       if (event.affectsConfiguration("agentbridge.bridge.trustedBrowserOrigins")) {
+        const revision = ++this.trustedBrowserOriginsConfigRevision;
         if (this.trustedBrowserOriginsInputDirty) {
           this.pendingTrustedBrowserOriginsRefresh = true;
         } else {
@@ -140,6 +142,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
           void webviewView.webview.postMessage({
             type: "trustedBrowserOriginsChanged",
             origins: readConfiguredTrustedBrowserOrigins(),
+            revision,
           });
         }
       }
@@ -185,6 +188,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       void sourceWebview.postMessage({
         type: "trustedBrowserOriginsChanged",
         origins: readConfiguredTrustedBrowserOrigins(),
+        revision: this.trustedBrowserOriginsConfigRevision,
       });
     }
   }
@@ -460,10 +464,12 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
           normalizedOrigins,
           vscode.ConfigurationTarget.Global,
         );
+        const effectiveOrigins = readConfiguredTrustedBrowserOrigins();
+        const revision = this.trustedBrowserOriginsConfigRevision;
         this.trustedBrowserOriginsInputDirty = false;
         this.pendingTrustedBrowserOriginsRefresh = false;
         try {
-          await sourceWebview.postMessage({ type: "trustedBrowserOriginsSaved", origins: normalizedOrigins });
+          await sourceWebview.postMessage({ type: "trustedBrowserOriginsSaved", origins: effectiveOrigins, revision });
         } catch {
           // The originating Webview may have been disposed while the setting was saved.
         }
@@ -521,6 +527,7 @@ private renderHtml(advancedOpen = false): string {
  <script>
    window.__AB_I18N__ = ${JSON.stringify(dict).replace(/</g, "\\u003c")};
    window.__AB_CAN_AUTO_INSTALL_CLOUDFLARED__ = ${JSON.stringify(CAN_AUTO_INSTALL_CLOUDFLARED)};
+   window.__AB_TRUSTED_BROWSER_ORIGINS_REVISION__ = ${JSON.stringify(this.trustedBrowserOriginsConfigRevision)};
  </script>
  <style>
   html { height: 100%; margin: 0; padding: 0; }
@@ -1115,9 +1122,13 @@ private renderHtml(advancedOpen = false): string {
   let domainInputDirty = false;
   let namedTunnelInputDirty = false;
   let trustedBrowserOriginsInputDirty = false;
+  let trustedBrowserOriginsSavePending = false;
   let languageChanging = false;
   const currentLanguagePreference = $('languageSelect').value;
   let savedTrustedBrowserOriginsText = normalizeTrustedBrowserOriginsText($('trustedBrowserOriginsInput').value);
+  let trustedBrowserOriginsRevision = Number.isInteger(window.__AB_TRUSTED_BROWSER_ORIGINS_REVISION__)
+    ? window.__AB_TRUSTED_BROWSER_ORIGINS_REVISION__
+    : 0;
   let lastRevision = -1;
   let todoExpanded = false;
   let footerCollapsed = false;
@@ -1996,6 +2007,7 @@ private renderHtml(advancedOpen = false): string {
       .map((value) => value.trim())
       .filter(Boolean);
     $('trustedBrowserOriginsStatus').style.display = 'none';
+    trustedBrowserOriginsSavePending = true;
     busy = true;
     updateControls();
     vscode.postMessage({ type: 'setTrustedBrowserOrigins', origins });
@@ -2088,15 +2100,23 @@ private renderHtml(advancedOpen = false): string {
     if (message && message.type === 'status' && message.status) {
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
     } else if (message && message.type === 'trustedBrowserOriginsSaved' && Array.isArray(message.origins)) {
-      savedTrustedBrowserOriginsText = normalizeTrustedBrowserOriginsText(message.origins.join(String.fromCharCode(10)));
-      $('trustedBrowserOriginsInput').value = savedTrustedBrowserOriginsText;
-      setTrustedBrowserOriginsInputDirty(false);
-      $('trustedBrowserOriginsStatus').textContent = t('trustedBrowserOriginsSaved');
-      $('trustedBrowserOriginsStatus').style.display = 'block';
-    } else if (message && message.type === 'trustedBrowserOriginsChanged' && Array.isArray(message.origins)) {
-      if (!trustedBrowserOriginsInputDirty) {
+      trustedBrowserOriginsSavePending = false;
+      const revision = Number.isInteger(message.revision) ? message.revision : -1;
+      if (revision >= trustedBrowserOriginsRevision) {
+        trustedBrowserOriginsRevision = revision;
         savedTrustedBrowserOriginsText = normalizeTrustedBrowserOriginsText(message.origins.join(String.fromCharCode(10)));
         $('trustedBrowserOriginsInput').value = savedTrustedBrowserOriginsText;
+        setTrustedBrowserOriginsInputDirty(false);
+        $('trustedBrowserOriginsStatus').textContent = t('trustedBrowserOriginsSaved');
+        $('trustedBrowserOriginsStatus').style.display = 'block';
+      }
+    } else if (message && message.type === 'trustedBrowserOriginsChanged' && Array.isArray(message.origins)) {
+      const revision = Number.isInteger(message.revision) ? message.revision : -1;
+      if (revision >= trustedBrowserOriginsRevision && (!trustedBrowserOriginsInputDirty || trustedBrowserOriginsSavePending)) {
+        trustedBrowserOriginsRevision = revision;
+        savedTrustedBrowserOriginsText = normalizeTrustedBrowserOriginsText(message.origins.join(String.fromCharCode(10)));
+        $('trustedBrowserOriginsInput').value = savedTrustedBrowserOriginsText;
+        setTrustedBrowserOriginsInputDirty(false);
         $('trustedBrowserOriginsStatus').style.display = 'none';
       }
     } else if (message && message.type === 'operationFinished') {
@@ -2109,6 +2129,9 @@ private renderHtml(advancedOpen = false): string {
       if (message.operation === 'setLanguage') {
         languageChanging = false;
         if (message.succeeded !== true) $('languageSelect').value = currentLanguagePreference;
+      }
+      if (message.operation === 'setTrustedBrowserOrigins') {
+        trustedBrowserOriginsSavePending = false;
       }
       try {
         if (message.status) refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);

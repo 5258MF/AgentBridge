@@ -257,7 +257,7 @@
           "maxItems": 32,
           "default": [],
           "scope": "machine",
-          "description": "Exact browser origins allowed to access the MCP endpoint through CORS, for example chrome-extension://extension-id. Supports http, https, chrome-extension, and moz-extension origins only. Wildcards and URL paths are not allowed. Stored only on this machine and applied immediately."
+          "description": "Exact browser origins allowed to access the MCP endpoint through CORS, for example chrome-extension://extension-id. Supports http, https, chrome-extension, and moz-extension origins only. Wildcards and URL paths are not allowed. Stored only on this machine; changes apply immediately to subsequent requests."
         }
       }
     }

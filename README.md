@@ -115,7 +115,7 @@ The interface-language override is `agentbridge.language`; Bridge and tunnel set
 | Key | Type | Default | Scope | Notes |
 |---|---|---|---|---|
 | `agentbridge.language` | enum | `auto` | `application` | `auto` follows the VS Code display language; `zh-CN` / `en` override AgentBridge's own panel and runtime messages |
-| `trustedBrowserOrigins` | string[] | `[]` | `machine` | Exact CORS origins trusted to call MCP directly from a browser or browser extension. Supports `http://`, `https://`, `chrome-extension://`, and `moz-extension://`; no wildcards or URL paths. Editable in Advanced Settings and applied immediately. |
+| `trustedBrowserOrigins` | string[] | `[]` | `machine` | Exact CORS origins trusted to call MCP directly from a browser or browser extension. Supports `http://`, `https://`, `chrome-extension://`, and `moz-extension://`; no wildcards or URL paths. Editable in Advanced Settings; changes apply immediately to subsequent requests. |
 | `tunnelProvider` | enum | `cloudflare` | `application` | `cloudflare` / `cloudflare-named` / `ngrok` |
 | `tunnelProtocol` | enum | `auto` | `application` | cloudflared↔Cloudflare edge transport (Cloudflare tunnels only): `auto` / `quic` (UDP 7844) / `http2` (TCP 7844). Use `http2` on networks where QUIC is unstable (campus/corporate networks often drop sustained UDP flows). Applies on the next tunnel start or automatic reconnect. |
 | `cloudflareNamedDomain` | string | `""` | `application` | Fixed hostname (e.g. `mcp.example.com`) |
