@@ -40,6 +40,7 @@ const CLOUDFLARE_NAMED_TOKEN_SECRET = "agentbridge.bridge.cloudflareNamedTunnelT
 const CLOUDFLARE_NAMED_LOCAL_PORT_SETTING = "bridge.cloudflareNamedLocalPort";
 const TUNNEL_PROVIDER_SETTING = "bridge.tunnelProvider";
 const TUNNEL_PROTOCOL_SETTING = "bridge.tunnelProtocol";
+const TRUSTED_BROWSER_ORIGINS_SETTING = "bridge.trustedBrowserOrigins";
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_ACTIVITY = 60;
 const MAX_TODOS = 24;
@@ -964,19 +965,59 @@ function writeJsonError(response: ServerResponse, statusCode: number, message: s
   }));
 }
 
+export function normalizeTrustedBrowserOrigin(value: string): string | undefined {
+  const candidate = value.trim();
+  if (!candidate || candidate === "*") return undefined;
+
+  try {
+    const origin = new URL(candidate);
+    if (origin.username || origin.password || origin.search || origin.hash) return undefined;
+    if (origin.pathname && origin.pathname !== "/") return undefined;
+    if (!origin.hostname) return undefined;
+
+    if (origin.protocol === "http:" || origin.protocol === "https:") {
+      return origin.origin;
+    }
+    if (origin.protocol === "chrome-extension:" || origin.protocol === "moz-extension:") {
+      if (origin.port) return undefined;
+      return `${origin.protocol}//${origin.hostname.toLowerCase()}`;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readTrustedBrowserOrigins(): string[] {
+  const configured = vscode.workspace.getConfiguration("agentbridge").get<unknown>(TRUSTED_BROWSER_ORIGINS_SETTING, []);
+  if (!Array.isArray(configured)) return [];
+
+  const trustedOrigins: string[] = [];
+  for (const value of configured) {
+    if (typeof value !== "string") continue;
+    const normalized = normalizeTrustedBrowserOrigin(value);
+    if (normalized && !trustedOrigins.includes(normalized)) trustedOrigins.push(normalized);
+  }
+  return trustedOrigins;
+}
+
 function validateMcpOrigin(
   request: IncomingMessage,
   allowedHostnames: readonly string[],
+  trustedOrigins: readonly string[],
 ): { allowed: true; origin?: string } | { allowed: false } {
   const originHeader = request.headers.origin;
   if (!originHeader) return { allowed: true };
 
   try {
-    const origin = new URL(originHeader);
-    if (origin.protocol !== "http:" && origin.protocol !== "https:") return { allowed: false };
+    const normalizedOrigin = normalizeTrustedBrowserOrigin(originHeader);
+    if (!normalizedOrigin) return { allowed: false };
+    const origin = new URL(normalizedOrigin);
     const normalizedHostname = origin.hostname.toLowerCase();
-    if (!allowedHostnames.some((hostname) => hostname.toLowerCase() === normalizedHostname)) return { allowed: false };
-    return { allowed: true, origin: origin.origin };
+    const allowedBuiltInOrigin = (origin.protocol === "http:" || origin.protocol === "https:")
+      && allowedHostnames.some((hostname) => hostname.toLowerCase() === normalizedHostname);
+    if (!allowedBuiltInOrigin && !trustedOrigins.includes(normalizedOrigin)) return { allowed: false };
+    return { allowed: true, origin: normalizedOrigin };
   } catch {
     return { allowed: false };
   }
@@ -2478,7 +2519,11 @@ export class BridgeManager implements vscode.Disposable {
       return;
     }
 
-    const originValidation = validateMcpOrigin(request, ["127.0.0.1", "localhost", "[::1]", this.domain].filter(Boolean));
+    const originValidation = validateMcpOrigin(
+      request,
+      ["127.0.0.1", "localhost", "[::1]", this.domain].filter(Boolean),
+      readTrustedBrowserOrigins(),
+    );
     if (!originValidation.allowed) {
       const rejectedOrigin = this.redactRouteToken(String(request.headers.origin ?? "<missing>")).replace(/[\r\n]+/g, " ");
       this.output.appendLine(`[security] rejected MCP Origin: ${rejectedOrigin}`);

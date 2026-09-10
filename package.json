@@ -246,6 +246,18 @@
           "default": false,
           "scope": "application",
           "description": "Enable read-only mode. When active, tools that modify the local environment (apply_patch, run_command, send_command_input, terminate_command) are hidden from tools/list and hard-blocked at call time. Takes effect immediately; connected clients see the change after they refresh their tool list."
+        },
+        "agentbridge.bridge.trustedBrowserOrigins": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "maxItems": 32,
+          "default": [],
+          "scope": "machine",
+          "description": "Exact browser origins allowed to access the MCP endpoint through CORS, for example chrome-extension://extension-id. Supports http, https, chrome-extension, and moz-extension origins only. Wildcards and URL paths are not allowed. Stored only on this machine and applied immediately."
         }
       }
     }

@@ -115,6 +115,7 @@ Cloudflare Quick Tunnel 与 Cloudflare Named Tunnel 共用同一套 `cloudflared
 | 配置键 | 类型 | 默认 | 作用域 | 说明 |
 |---|---|---|---|---|
 | `agentbridge.language` | enum | `auto` | `application` | `auto` 跟随 VS Code 显示语言；`zh-CN` / `en` 仅覆盖 AgentBridge 自身面板与运行时提示 |
+| `trustedBrowserOrigins` | string[] | `[]` | `machine` | 允许浏览器或浏览器扩展直接通过 CORS 调用 MCP 的精确 Origin 白名单。支持 `http://`、`https://`、`chrome-extension://`、`moz-extension://`，不支持通配符或 URL 路径；可在高级设置中编辑并立即生效。 |
 | `tunnelProvider` | enum | `cloudflare` | `application` | `cloudflare` / `cloudflare-named` / `ngrok` |
 | `tunnelProtocol` | enum | `auto` | `application` | cloudflared 与 Cloudflare 边缘之间的传输协议（仅 Cloudflare 隧道）：`auto` / `quic`（UDP 7844）/ `http2`（TCP 7844）。在 QUIC 不稳定的网络（校园网/企业网常掐断持续 UDP 流）建议用 `http2`。下次隧道启动或自动重连时生效。 |
 | `cloudflareNamedDomain` | string | `""` | `application` | 固定主机名（如 `mcp.example.com`） |

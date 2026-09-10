@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { invalidateManagedShellCache, sanityCheckManagedShellPath } from "./ide-tool-broker.js";
-import { BridgeStartCancelledError, type BridgeManager, type BridgeStatus } from "./bridge-server.js";
+import { BridgeStartCancelledError, normalizeTrustedBrowserOrigin, type BridgeManager, type BridgeStatus } from "./bridge-server.js";
 import { createTranslator, detectLang, enMessages, readLanguagePreference, translate, zhMessages } from "./i18n.js";
 
 const POLL_INTERVAL_MS = 1500;
@@ -71,6 +71,7 @@ const BUSY_PANEL_MESSAGE_TYPES = new Set([
   "checkTunnel",
   "rotateEndpoint",
   "setLanguage",
+  "setTrustedBrowserOrigins",
 ]);
 
 export class BridgePanelProvider implements vscode.WebviewViewProvider {
@@ -392,6 +393,29 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
+      case "setTrustedBrowserOrigins": {
+        const origins = message.origins;
+        if (!Array.isArray(origins) || origins.length > 32 || origins.some((value) => typeof value !== "string" || value.length > 512)) {
+          throw new Error(t("trustedBrowserOriginsInvalid"));
+        }
+        const normalizedOrigins: string[] = [];
+        for (const value of origins) {
+          const normalized = normalizeTrustedBrowserOrigin(value);
+          if (!normalized) throw new Error(t("trustedBrowserOriginsInvalid"));
+          if (!normalizedOrigins.includes(normalized)) normalizedOrigins.push(normalized);
+        }
+        await vscode.workspace.getConfiguration("agentbridge.bridge").update(
+          "trustedBrowserOrigins",
+          normalizedOrigins,
+          vscode.ConfigurationTarget.Global,
+        );
+        try {
+          await sourceWebview.postMessage({ type: "trustedBrowserOriginsSaved", origins: normalizedOrigins });
+        } catch {
+          // The originating Webview may have been disposed while the setting was saved.
+        }
+        return;
+      }
       case "configureManagedShell": {
         const candidatePath = typeof message.path === "string" ? message.path.trim() : "";
         if (candidatePath !== "") {
@@ -432,6 +456,10 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 private renderHtml(advancedOpen = false): string {
     const lang = detectLang();
     const languagePreference = readLanguagePreference();
+    const configuredTrustedBrowserOrigins = vscode.workspace.getConfiguration("agentbridge.bridge").get<unknown>("trustedBrowserOrigins", []);
+    const trustedBrowserOrigins = Array.isArray(configuredTrustedBrowserOrigins)
+      ? configuredTrustedBrowserOrigins.filter((value): value is string => typeof value === "string")
+      : [];
     const t = createTranslator(lang);
     const dict = lang === "zh" ? zhMessages : enMessages;
     return /* html */ `<!DOCTYPE html>
@@ -928,6 +956,15 @@ private renderHtml(advancedOpen = false): string {
         <p class="agentbridge-help">${t("securityHelp")}</p>
         <div class="agentbridge-controls">
           <button class="secondary" id="rotateButton" disabled>${t("rotateEndpoint")}</button>
+        </div>
+        <div class="agentbridge-field" style="margin-top:12px;">
+          <label class="agentbridge-label" for="trustedBrowserOriginsInput">${t("trustedBrowserOrigins")}</label>
+          <textarea id="trustedBrowserOriginsInput" rows="3" placeholder="${escapeHtml(t("trustedBrowserOriginsPlaceholder"))}" style="width:100%; box-sizing:border-box; resize:vertical; padding:6px 8px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent)); border-radius:2px; font-family:var(--vscode-editor-font-family);" disabled>${escapeHtml(trustedBrowserOrigins.join("\n"))}</textarea>
+          <div class="agentbridge-help">${t("trustedBrowserOriginsHelp")}</div>
+          <div class="agentbridge-controls" style="margin-top:8px;">
+            <button class="secondary" id="trustedBrowserOriginsSaveButton" disabled>${t("saveTrustedBrowserOrigins")}</button>
+          </div>
+          <div class="agentbridge-help" id="trustedBrowserOriginsStatus" style="display:none; margin-top:6px;"></div>
         </div>
         <div class="agentbridge-persistent-row" style="margin-top:10px;">
           <div class="agentbridge-persistent-text">
@@ -1671,6 +1708,8 @@ private renderHtml(advancedOpen = false): string {
     $('tunnelProtocolQuic').disabled = !statusLoaded || busy;
     $('tunnelProtocolHttp2').disabled = !statusLoaded || busy;
     $('languageSelect').disabled = !statusLoaded || tunnelOperationBusy || languageChanging;
+    $('trustedBrowserOriginsInput').disabled = !statusLoaded || busy;
+    $('trustedBrowserOriginsSaveButton').disabled = !statusLoaded || busy;
     updateSessionStartStopControl(lastStatus);
   }
 
@@ -1878,6 +1917,20 @@ private renderHtml(advancedOpen = false): string {
     updateControls();
     vscode.postMessage({ type: 'setLanguage', value: nextLanguage, advancedOpen: $('advancedCard').open });
   });
+  $('trustedBrowserOriginsSaveButton').addEventListener('click', () => {
+    if (busy) return;
+    const origins = $('trustedBrowserOriginsInput').value
+      .split(String.fromCharCode(10))
+      .map((value) => value.trim())
+      .filter(Boolean);
+    $('trustedBrowserOriginsStatus').style.display = 'none';
+    busy = true;
+    updateControls();
+    vscode.postMessage({ type: 'setTrustedBrowserOrigins', origins });
+  });
+  $('trustedBrowserOriginsInput').addEventListener('input', () => {
+    $('trustedBrowserOriginsStatus').style.display = 'none';
+  });
   $('quickProvider').addEventListener('click', () => selectTunnelProvider('cloudflare'));
   $('namedProvider').addEventListener('click', () => selectTunnelProvider('cloudflare-named'));
   $('ngrokProvider').addEventListener('click', () => selectTunnelProvider('ngrok'));
@@ -1959,6 +2012,10 @@ private renderHtml(advancedOpen = false): string {
     const message = event.data;
     if (message && message.type === 'status' && message.status) {
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
+    } else if (message && message.type === 'trustedBrowserOriginsSaved' && Array.isArray(message.origins)) {
+      $('trustedBrowserOriginsInput').value = message.origins.join(String.fromCharCode(10));
+      $('trustedBrowserOriginsStatus').textContent = t('trustedBrowserOriginsSaved');
+      $('trustedBrowserOriginsStatus').style.display = 'block';
     } else if (message && message.type === 'operationFinished') {
       if (message.operation === 'configureNamedTunnel' && message.succeeded === true) {
         setNamedTunnelInputDirty(false);
