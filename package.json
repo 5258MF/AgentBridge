@@ -264,7 +264,8 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "build:watch": "node build.mjs --watch"
+    "build:watch": "node build.mjs --watch",
+    "test": "node tests/run-tests.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -273,6 +274,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "3.9.2",
     "esbuild": "^0.28.2",
     "typescript": "^5.5.0"
   }

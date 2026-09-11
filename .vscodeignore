@@ -3,6 +3,7 @@
 .vscode-test/**
 .vscode-test-web/**
 src/**
+tests/**
 node_modules/**
 build.mjs
 tsconfig.json
