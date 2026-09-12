@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.1.11 (2026-09-13)
+
+- **Managed terminal hard-stop stability** — fixed a Windows ConPTY lifecycle race where `terminate_command` could kill the same managed PTY twice through the explicit hard-stop path and terminal disposal, which could destabilize the Extension Host and make the Bridge temporarily unavailable. Hard-stop is now atomic and idempotent, stale delayed PTY exit callbacks are ignored, and the next command receives a fresh terminal slot normally.
+- **Session status and cleanup improvements** — session state now distinguishes processing requests from open SSE streams with mutually exclusive status priority, the Session view reports active request/stream counts consistently, and **Clear idle sessions** re-checks the live host session map before removing anything instead of trusting stale UI state. The panel immediately returns refreshed status after cleanup.
+- **Session panel layout cleanup** — removed the extra bottom gap beneath the Session view while preserving the intended internal padding.
+- **Regression and packaging safeguards** — added production-code regression coverage for session cleanup and managed-terminal lifecycle behavior, plus isolated Windows VSIX packaging validation that builds a temporary workspace copy with the pinned local `@vscode/vsce` and verifies the resulting ZIP contents without overwriting the formal package.
+
 ## 0.1.10 (2026-09-10)
 
 - **AgentBridge interface language override** — added `agentbridge.language` with `auto`, `zh-CN`, and `en`. `auto` follows the VS Code display language, while the explicit values override AgentBridge's own panel and runtime messages without changing VS Code-native contribution strings. Language changes are guarded so unsaved Cloudflare Named Tunnel and Trusted Browser Origins edits are not discarded by a Webview rebuild; external language changes are deferred until those drafts are safe to refresh.
