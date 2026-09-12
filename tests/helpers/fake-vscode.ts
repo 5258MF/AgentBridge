@@ -8,6 +8,8 @@ const errors: string[] = [];
 const warnings: string[] = [];
 const information: string[] = [];
 const registeredCommands = new Map<string, (...args: any[]) => any>();
+const terminalCloseListeners = new Set<(terminal: any) => void>();
+const terminals: Array<{ name: string; show(preserveFocus?: boolean): void; dispose(): void }> = [];
 
 function fullKey(section: string, key: string): string {
   return section ? `${section}.${key}` : key;
@@ -34,6 +36,8 @@ export const vscodeTest = {
     warnings.length = 0;
     information.length = 0;
     registeredCommands.clear();
+    terminalCloseListeners.clear();
+    terminals.length = 0;
     config.set("agentbridge.language", "en");
     config.set("agentbridge.bridge.tunnelProvider", "cloudflare");
     config.set("agentbridge.bridge.tunnelProtocol", "auto");
@@ -132,6 +136,9 @@ export const Uri = {
   joinPath(base: { fsPath: string }, ...parts: string[]) {
     return { fsPath: [base.fsPath, ...parts].join("/") };
   },
+  file(value: string) {
+    return { fsPath: value, toString: () => value };
+  },
 };
 
 export const workspace = {
@@ -181,9 +188,32 @@ export const env = {
 };
 
 export const window = {
-  terminals: [] as Array<{ name: string; dispose(): void }>,
-  onDidCloseTerminal() {
-    return { dispose() {} };
+  terminals,
+  createTerminal(options: { name: string; pty: any }) {
+    let opened = false;
+    let closed = false;
+    const terminal = {
+      name: options.name,
+      show(): void {
+        if (opened || closed) return;
+        opened = true;
+        options.pty.open?.(undefined);
+      },
+      dispose(): void {
+        if (closed) return;
+        closed = true;
+        options.pty.close?.();
+        const index = window.terminals.indexOf(terminal);
+        if (index >= 0) window.terminals.splice(index, 1);
+        for (const listener of [...terminalCloseListeners]) listener(terminal);
+      },
+    };
+    window.terminals.push(terminal);
+    return terminal;
+  },
+  onDidCloseTerminal(listener: (terminal: any) => void) {
+    terminalCloseListeners.add(listener);
+    return { dispose: () => terminalCloseListeners.delete(listener) };
   },
   async showErrorMessage(message: string): Promise<undefined> {
     errors.push(message);

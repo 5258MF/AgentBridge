@@ -454,7 +454,7 @@ function managedProcessEnvironment(): Record<string, string> {
   return env;
 }
 
-class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disposable {
+export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disposable {
   private readonly writeEmitter = new vscode.EventEmitter<string>();
   readonly onDidWrite = this.writeEmitter.event;
   private readonly closeEmitter = new vscode.EventEmitter<void | number>();
@@ -500,7 +500,10 @@ class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disp
   private disposed = false;
   private tempDir: string | undefined;
 
-  constructor(private readonly initialCwd: string) {
+  constructor(
+    private readonly initialCwd: string,
+    private readonly loadNodePty: () => NodePtyModule = getNodePty,
+  ) {
     this.currentCwdValue = initialCwd;
     this.openPromise = new Promise<void>((resolve) => { this.resolveOpen = resolve; });
   }
@@ -631,7 +634,7 @@ class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disp
     const shell = managedShellSpec(this.protocolToken);
     this.tempDir = shell.tempDir;
     const env = { ...managedProcessEnvironment(), ...shell.env };
-    const ptyProcess = getNodePty().spawn(shell.executable, shell.args, {
+    const ptyProcess = this.loadNodePty().spawn(shell.executable, shell.args, {
       name: process.platform === "win32" ? "cmd" : "xterm-256color",
       cwd: this.initialCwd,
       env,
@@ -645,7 +648,11 @@ class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disp
     });
     this.activePtyExitSubscription = ptyProcess.onExit((event) => {
       setTimeout(() => {
-        if (this.activePty === ptyProcess) this.activePty = undefined;
+        // terminateActiveProcess() atomically detaches a killed PTY before calling kill().
+        // A node-pty exit event may already be queued at that point; never let a stale event
+        // finish/clear the command state that now belongs to the explicit hard-stop path.
+        if (this.activePty !== ptyProcess) return;
+        this.activePty = undefined;
         const activeCommand = this.activeCommand;
         this.activeCommand = undefined;
         if (activeCommand?.finishTimer) {
@@ -935,6 +942,12 @@ class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disp
   terminateActiveProcess(): void {
     const activePty = this.activePty;
     if (!activePty) return;
+    // Detach first. terminal.dispose() synchronously closes this Pseudoterminal and calls
+    // dispose(), which reaches terminateActiveProcess() again. Clearing the reference before
+    // kill() makes that re-entrant path a no-op and, on Windows, avoids a second node-pty
+    // ConPTY kill racing the first one inside the Extension Host.
+    this.activePty = undefined;
+    this.disposeActivePtySubscriptions();
     try {
       activePty.kill();
     } catch {
@@ -1157,14 +1170,17 @@ function resultText(result: vscode.LanguageModelToolResult): string {
   }).filter(Boolean).join("\n");
 }
 
-class TerminalCommandManager implements vscode.Disposable {
+export class TerminalCommandManager implements vscode.Disposable {
   private readonly states = new Map<string, CommandState>();
   private readonly slots = new Map<string, TerminalSlot>();
   private nextCommandId = 1;
   private nextTerminalId = 1;
   private readonly disposables: vscode.Disposable[] = [];
 
-  constructor() {
+  constructor(
+    private readonly createManagedPty: (initialCwd: string) => ManagedCommandPseudoterminal =
+      (initialCwd) => new ManagedCommandPseudoterminal(initialCwd),
+  ) {
     // Older AgentBridge builds created persistent terminals. After an Extension Host restart
     // those terminals can be restored by VS Code even though the in-memory terminal pool is
     // gone, which makes every subsequent run create another duplicate. They are no longer
@@ -1306,7 +1322,7 @@ class TerminalCommandManager implements vscode.Disposable {
 
     const initialCwd = cwdInfo?.absolute ?? resolveWorkspacePath(".").absolute;
     const terminalNumber = this.nextTerminalId++;
-    const pty = new ManagedCommandPseudoterminal(initialCwd);
+    const pty = this.createManagedPty(initialCwd);
     const terminal = vscode.window.createTerminal({
       name: `AgentBridge · ${terminalNumber}`,
       pty,
