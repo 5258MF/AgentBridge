@@ -117,7 +117,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.renderHtml();
     webviewView.webview.onDidReceiveMessage((message: PanelMessage) => {
       void this.handleMessage(message, webviewView.webview).then(() => {
-        if (message.type !== "installCloudflared" && this.view === webviewView) {
+        if (message.type !== "installCloudflared" && message.type !== "clearIdleSessions" && this.view === webviewView) {
           const operationFinished = BUSY_PANEL_MESSAGE_TYPES.has(message.type);
           this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? true : undefined);
         }
@@ -421,6 +421,22 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         if (typeof sid !== "string" || !sid) throw new Error("sessionId must be a string.");
         await this.bridgeReady;
         this.bridge.destroySession(sid);
+        return;
+      }
+      case "clearIdleSessions": {
+        await this.bridgeReady;
+        const clearedCount = this.bridge.clearIdleSessions();
+        const status = this.bridge.getStatus();
+        const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
+        const quickTunnelCopied = status.publicUrl !== undefined && status.publicUrl === this.lastCopiedQuickTunnelUrl;
+        await sourceWebview.postMessage({
+          type: "idleSessionsCleared",
+          clearedCount,
+          status,
+          persistentMode,
+          quickTunnelCopied,
+        });
+        void vscode.window.showInformationMessage(t("idleSessionsCleared", clearedCount));
         return;
       }
       case "setOpenInternalBrowser": {
@@ -761,6 +777,11 @@ private renderHtml(advancedOpen = false): string {
   .agentbridge-session-hint { margin-top: 5px; }
   .agentbridge-session-list { margin-top: 8px; padding: 7px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; font-size: 11px; max-height: 120px; overflow-y: auto; }
   .agentbridge-session-list-header { font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 5px; }
+  .agentbridge-session-list-header-row { display: flex; align-items: flex-start; gap: 8px; }
+  .agentbridge-session-list-heading { display: flex; flex: 1 1 auto; min-width: 0; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .agentbridge-session-list-title { flex: 0 0 auto; font-weight: 600; }
+  .agentbridge-session-list-summary { flex: 1 1 150px; min-width: 0; font-size: 10px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-session-list-clear { flex: 0 0 auto; padding: 1px 7px; font-size: 10px; }
   .agentbridge-session-list-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
   .agentbridge-session-list-info { flex: 1 1 auto; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .agentbridge-session-list-disconnect { flex: 0 0 auto; padding: 1px 7px; font-size: 10px; }
@@ -1398,6 +1419,12 @@ private renderHtml(advancedOpen = false): string {
     return span;
   }
 
+  function sessionState(session) {
+    if (Number(session && session.activeRequests) > 0) return 'processing';
+    if (Number(session && session.activeStreams) > 0) return 'connected';
+    return 'idle';
+  }
+
   function renderSessionList(sessions) {
     const list = $('sessionList');
     list.textContent = '';
@@ -1406,13 +1433,34 @@ private renderHtml(advancedOpen = false): string {
       return;
     }
     list.style.display = '';
-    list.appendChild(el('div', 'agentbridge-session-list-header', t('activeSessions', sessions.length)));
+    const counts = { processing: 0, connected: 0, idle: 0 };
+    for (const session of sessions) counts[sessionState(session)] += 1;
+    const header = el('div', 'agentbridge-session-list-header');
+    const headerRow = el('div', 'agentbridge-session-list-header-row');
+    const heading = el('div', 'agentbridge-session-list-heading');
+    heading.appendChild(el('span', 'agentbridge-session-list-title', t('activeSessions', sessions.length)));
+    heading.appendChild(el('span', 'agentbridge-session-list-summary', t('sessionStateSummary', counts.processing, counts.connected, counts.idle)));
+    headerRow.appendChild(heading);
+    const clearIdleButton = el('button', 'secondary agentbridge-session-list-clear', t('clearIdleSessions'));
+    clearIdleButton.disabled = counts.idle === 0;
+    clearIdleButton.addEventListener('click', () => {
+      if (counts.idle === 0) return;
+      vscode.postMessage({ type: 'clearIdleSessions' });
+    });
+    headerRow.appendChild(clearIdleButton);
+    header.appendChild(headerRow);
+    list.appendChild(header);
     for (const session of sessions) {
       const row = el('div', 'agentbridge-session-list-row');
       const badge = sessionBadge(session.sessionId);
       if (badge) row.appendChild(badge);
       const info = el('span', 'agentbridge-session-list-info');
-      info.textContent = t('activeRequestsOf', session.activeRequests) + ' · ' + formatTime(session.lastActivity);
+      const state = sessionState(session);
+      const parts = [state === 'processing' ? t('sessionProcessing') : state === 'connected' ? t('sessionKeepingConnection') : t('sessionIdle')];
+      if (state === 'processing') parts.push(t('activeRequestsOf', session.activeRequests));
+      if (state === 'connected') parts.push(t('activeStreamsOf', session.activeStreams));
+      parts.push(t('lastActivityAt', formatTime(session.lastActivity)));
+      info.textContent = parts.join(' · ');
       row.appendChild(info);
       const btn = el('button', 'secondary agentbridge-session-list-disconnect', t('disconnect'));
       btn.addEventListener('click', () => vscode.postMessage({ type: 'disconnectSession', sessionId: session.sessionId }));
@@ -2136,6 +2184,8 @@ private renderHtml(advancedOpen = false): string {
   window.addEventListener('message', (event) => {
     const message = event.data;
     if (message && message.type === 'status' && message.status) {
+      refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
+    } else if (message && message.type === 'idleSessionsCleared' && message.status) {
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
     } else if (message && message.type === 'trustedBrowserOriginsSaved' && Array.isArray(message.origins)) {
       trustedBrowserOriginsSavePending = false;

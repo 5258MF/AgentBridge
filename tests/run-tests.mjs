@@ -45,7 +45,7 @@ try {
   console.log("[test] TypeScript checking test sources...");
   run(process.execPath, [path.join(root, "node_modules", "typescript", "bin", "tsc"), "-p", path.join("tests", "tsconfig.json"), "--noEmit"]);
 
-  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts"];
+  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts"];
   const entries = match ? allEntries.filter((name) => name.replace(/\.test\.ts$/, "") === match) : allEntries;
   if (!entries.length) throw new Error(`No test entry matched ${JSON.stringify(match)}.`);
   const fakeVscode = path.join(testsDir, "helpers", "fake-vscode.ts");

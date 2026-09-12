@@ -409,7 +409,12 @@ export interface BridgeStatus {
   readonly todos: BridgeTodo[];
   readonly activities: BridgeActivity[];
   readonly sessionCount: number;
-  readonly sessions: ReadonlyArray<{ readonly sessionId: string; readonly lastActivity: string; readonly activeRequests: number }>;
+  readonly sessions: ReadonlyArray<{
+    readonly sessionId: string;
+    readonly lastActivity: string;
+    readonly activeRequests: number;
+    readonly activeStreams: number;
+  }>;
   /**
    * The shell executable that the next set of AgentBridge managed terminals
    * will spawn. Reflects the effective choice after applying override config
@@ -1190,6 +1195,7 @@ export class BridgeManager implements vscode.Disposable {
         sessionId,
         lastActivity: new Date(session.lastActivity).toISOString(),
         activeRequests: session.activeRequests,
+        activeStreams: session.activeStreams,
       })),
       managedShellPath: managedShellExecutable(),
       managedShellOverrideWarning: managedShellOverrideWarning(),
@@ -2869,6 +2875,16 @@ export class BridgeManager implements vscode.Disposable {
     this.revision += 1;
     void session.server.close().catch(() => undefined);
     this.output.appendLine(`[bridge] session destroyed: ${sessionId}`);
+  }
+
+  public clearIdleSessions(): number {
+    let cleared = 0;
+    for (const [sessionId, session] of [...this.sessions.entries()]) {
+      if (this.isSessionActive(session)) continue;
+      this.destroySession(sessionId);
+      cleared += 1;
+    }
+    return cleared;
   }
 
   private handleReportProgress(value: unknown, sessionId?: string): { content: Array<{ type: "text"; text: string }> } {
