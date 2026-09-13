@@ -117,7 +117,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.renderHtml();
     webviewView.webview.onDidReceiveMessage((message: PanelMessage) => {
       void this.handleMessage(message, webviewView.webview).then(() => {
-        if (message.type !== "installCloudflared" && message.type !== "clearIdleSessions" && this.view === webviewView) {
+        if (message.type !== "installCloudflared" && message.type !== "clearIdleSessions" && message.type !== "clearActivityHistory" && this.view === webviewView) {
           const operationFinished = BUSY_PANEL_MESSAGE_TYPES.has(message.type);
           this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? true : undefined);
         }
@@ -439,6 +439,21 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         void vscode.window.showInformationMessage(t("idleSessionsCleared", clearedCount));
         return;
       }
+      case "clearActivityHistory": {
+        await this.bridgeReady;
+        const clearedCount = this.bridge.clearActivityHistory();
+        const status = this.bridge.getStatus();
+        const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
+        const quickTunnelCopied = status.publicUrl !== undefined && status.publicUrl === this.lastCopiedQuickTunnelUrl;
+        await sourceWebview.postMessage({
+          type: "activityHistoryCleared",
+          clearedCount,
+          status,
+          persistentMode,
+          quickTunnelCopied,
+        });
+        return;
+      }
       case "setOpenInternalBrowser": {
         const v = message.value;
         if (v !== "auto" && v !== "all" && v !== "external") throw new Error("Invalid openInternalBrowser value.");
@@ -663,6 +678,14 @@ private renderHtml(advancedOpen = false): string {
   .agentbridge-session-view { display: flex; flex-direction: column; min-height: 0; flex: 1 1 0; }
   #configSection { box-sizing: border-box; flex: 1; min-height: 0; padding-bottom: 24px; overflow: auto; }
   .agentbridge-session-todos-region { max-width: 950px; margin: 0 auto; width: 100%; padding: 14px 12px 0; box-sizing: border-box; }
+  .agentbridge-session-todos-region:empty { display: none; }
+  .agentbridge-session-history-toolbar { box-sizing: border-box; width: 100%; max-width: 950px; min-height: 31px; margin: 0 auto; padding: 4px 12px; display: flex; align-items: center; gap: 10px; }
+  .agentbridge-session-history-title { flex: 0 0 auto; font-size: 11px; font-weight: 600; color: var(--vscode-descriptionForeground); }
+  .agentbridge-session-history-divider { flex: 1 1 auto; min-width: 12px; height: 1px; background: color-mix(in srgb, var(--vscode-widget-border, var(--vscode-editorWidget-border)) 70%, transparent); }
+  .agentbridge-session-history-clear { flex: 0 0 auto; min-height: 22px; padding: 1px 7px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--vscode-descriptionForeground); font: inherit; font-size: 10px; cursor: pointer; }
+  .agentbridge-session-history-clear:hover:not(:disabled) { border-color: var(--vscode-button-secondaryBorder, transparent); background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
+  .agentbridge-session-history-clear:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+  .agentbridge-session-history-clear:disabled { opacity: .4; background: transparent; }
   .agentbridge-session-scroll { flex: 1; min-height: 0; overflow: auto; }
   .agentbridge-session-timeline { max-width: 950px; margin: 0 auto; display: flex; flex-direction: column; }
   .agentbridge-session-empty { display: flex; min-height: 180px; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--vscode-descriptionForeground); }
@@ -777,10 +800,10 @@ private renderHtml(advancedOpen = false): string {
   .agentbridge-session-hint { margin-top: 5px; }
   .agentbridge-session-list { margin-top: 8px; padding: 7px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; font-size: 11px; max-height: 120px; overflow-y: auto; }
   .agentbridge-session-list-header { font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 5px; }
-  .agentbridge-session-list-header-row { display: flex; align-items: flex-start; gap: 8px; }
-  .agentbridge-session-list-heading { display: flex; flex: 1 1 auto; min-width: 0; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .agentbridge-session-list-header-row { display: flex; align-items: center; gap: 8px; }
+  .agentbridge-session-list-heading { display: flex; flex: 1 1 auto; min-width: 0; align-items: baseline; gap: 8px; flex-wrap: nowrap; }
   .agentbridge-session-list-title { flex: 0 0 auto; font-weight: 600; }
-  .agentbridge-session-list-summary { flex: 1 1 150px; min-width: 0; font-size: 10px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-session-list-summary { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--vscode-descriptionForeground); }
   .agentbridge-session-list-clear { flex: 0 0 auto; padding: 1px 7px; font-size: 10px; }
   .agentbridge-session-list-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
   .agentbridge-session-list-info { flex: 1 1 auto; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1099,6 +1122,11 @@ private renderHtml(advancedOpen = false): string {
 
   <div class="agentbridge-session-view" id="sessionSection" style="display:none">
     <div class="agentbridge-session-todos-region" id="todosRegion"></div>
+    <div class="agentbridge-session-history-toolbar">
+      <span class="agentbridge-session-history-title">${t("activityHistory")}</span>
+      <span class="agentbridge-session-history-divider" aria-hidden="true"></span>
+      <button class="agentbridge-session-history-clear" id="clearHistoryButton" type="button" title="${t("clearHistoryTitle")}" disabled>${t("clearHistory")}</button>
+    </div>
     <div class="agentbridge-session-scroll">
       <div class="agentbridge-session-timeline" id="timeline"></div>
     </div>
@@ -1523,6 +1551,7 @@ private renderHtml(advancedOpen = false): string {
 
   function renderTimeline(activities) {
     timelineEl.textContent = '';
+    $('clearHistoryButton').disabled = !(activities || []).some((activity) => activity.status !== 'running');
     const liveActivityIds = new Set((activities || []).map((activity) => activity.id));
     for (const activityId of expandedToolActivities) {
       if (!liveActivityIds.has(activityId)) expandedToolActivities.delete(activityId);
@@ -2169,6 +2198,11 @@ private renderHtml(advancedOpen = false): string {
   $('sessionStartStopButton').addEventListener('click', () => {
     toggleBridge();
   });
+  $('clearHistoryButton').addEventListener('click', () => {
+    if (!lastStatus || !Array.isArray(lastStatus.activities) || !lastStatus.activities.some((activity) => activity.status !== 'running')) return;
+    $('clearHistoryButton').disabled = true;
+    vscode.postMessage({ type: 'clearActivityHistory' });
+  });
   $('sessionCollapseButton').addEventListener('click', () => {
     footerCollapsed = !footerCollapsed;
     $('sessionSection').classList.toggle('footer-collapsed', footerCollapsed);
@@ -2186,6 +2220,8 @@ private renderHtml(advancedOpen = false): string {
     if (message && message.type === 'status' && message.status) {
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
     } else if (message && message.type === 'idleSessionsCleared' && message.status) {
+      refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
+    } else if (message && message.type === 'activityHistoryCleared' && message.status) {
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
     } else if (message && message.type === 'trustedBrowserOriginsSaved' && Array.isArray(message.origins)) {
       trustedBrowserOriginsSavePending = false;

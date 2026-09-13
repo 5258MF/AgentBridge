@@ -2887,6 +2887,17 @@ export class BridgeManager implements vscode.Disposable {
     return cleared;
   }
 
+  public clearActivityHistory(): number {
+    let cleared = 0;
+    for (let index = this.activities.length - 1; index >= 0; index -= 1) {
+      if (this.activities[index].status === "running") continue;
+      this.activities.splice(index, 1);
+      cleared += 1;
+    }
+    if (cleared > 0) this.revision += 1;
+    return cleared;
+  }
+
   private handleReportProgress(value: unknown, sessionId?: string): { content: Array<{ type: "text"; text: string }> } {
     const input = asRecord(value);
     const message = typeof input.message === "string" ? input.message.trim() : "";
