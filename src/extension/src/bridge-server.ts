@@ -20,10 +20,12 @@ import {
   cloudflaredLogTail,
   cloudflaredPrecheckFailureKind,
   cloudflaredQuicDialFailures,
+  cloudflaredQuicFailedBeforeRegistration,
   cloudflaredQuicUnstable,
   cloudflaredSawRegistration,
   createCloudflaredProcessDiagnostics,
   createRepeatedMessageThrottle,
+  flushCloudflaredDiagnosticOutput,
   QUIC_UNSTABLE_DIAL_FAILURES,
   type CloudflaredPrecheckFailureKind,
   type CloudflaredProcessDiagnostics,
@@ -58,7 +60,7 @@ const PUBLIC_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
 const PUBLIC_HEALTH_LOG_THROTTLE_MS = 10_000;
 const HTTP_SERVER_SHUTDOWN_TIMEOUT_MS = 3_000;
 const CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS = 100;
-/** Grace after the first QUIC dial failure before the "QUIC unstable" early
+/** Grace after the first QUIC connection failure before the "QUIC unstable" early
  * abort fires. cloudflared's reconnect backoff (2s+4s) lands its third dial
  * attempt ~6s in, so the window deliberately outlives it: a transient network
  * recovers and registers inside the grace period — and any registration
@@ -133,7 +135,8 @@ export class BridgeStartCancelledError extends Error {
 }
 
 /** Thrown out of waitForPublicHealth when cloudflared shows the "QUIC
- * unstable" signature (repeated edge dial failures, zero registrations).
+ * unstable" signature (repeated live failures or a failed process exit,
+ * always with zero registrations).
  * startTunnelOnce catches it once per bridge session and retries the tunnel
  * with an explicit http2 transport instead of burning the whole health budget. */
 export class BridgeQuicUnstableError extends Error {
@@ -1047,9 +1050,9 @@ function cancellationFromAbortSignal(signal: AbortSignal | undefined): { token?:
 export class BridgeManager implements vscode.Disposable {
   private state: BridgeStatus["state"] = "stopped";
   private tunnelProvider: BridgeTunnelProvider = "cloudflare";
-  /** Sticky http2 fallback: once an "auto" tunnel is found QUIC-unstable, every
-   * spawn (including automatic reconnects) uses http2 until the next manual
-   * start resets it. Explicit protocol settings are never overridden. */
+  /** Sticky http2 fallback: while the setting remains "auto", a QUIC-unstable
+   * tunnel and its automatic reconnects use http2 until the next manual start.
+   * A newly selected explicit protocol always takes precedence. */
   private tunnelTransportFallback: BridgeTunnelProtocol | undefined;
   /** Children already handed to killTunnelProcess. The guard must be a
    * WeakSet rather than child.killed alone: taskkill terminates the process
@@ -1090,6 +1093,8 @@ export class BridgeManager implements vscode.Disposable {
   private lastTool: string | undefined;
   private lastToolAt: string | undefined;
   private startPromise: Promise<BridgeStatus> | undefined;
+  private startPromiseGeneration: number | undefined;
+  private stopPromise: Promise<void> | undefined;
   private tunnelCheckPromise: Promise<BridgeStatus> | undefined;
   private installCloudflaredPromise: Promise<BridgeStatus> | undefined;
   private sessionPruneTimer: ReturnType<typeof setInterval> | undefined;
@@ -1098,6 +1103,12 @@ export class BridgeManager implements vscode.Disposable {
   private tunnelGeneration = 0;
   private stoppingResources = false;
   private readonly cloudflaredProcessDiagnostics = new WeakMap<ChildProcessWithoutNullStreams, CloudflaredProcessDiagnostics>();
+  private readonly tunnelProcessLifecycles = new WeakMap<ChildProcessWithoutNullStreams, {
+    readonly closed: Promise<void>;
+    readonly exitSignal: AbortSignal;
+    readonly abort: () => void;
+    isClosed: boolean;
+  }>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -1706,9 +1717,14 @@ export class BridgeManager implements vscode.Disposable {
     if (this.installCloudflaredPromise) {
       throw new Error(t("cloudflaredInstallBusy"));
     }
-    if (this.state === "running") return this.getStatus();
-    if (this.startPromise) return this.startPromise;
+    // A Stop request keeps the externally visible state as running until its
+    // resources have actually closed. Wait for that transaction before using
+    // the state or generation, otherwise Start can report the stale running
+    // snapshot and then be silently undone by the finishing Stop.
+    if (this.stopPromise) await this.stopPromise;
     if (this.stoppingResources) throw new BridgeStartCancelledError();
+    if (this.state === "running") return this.getStatus();
+    if (this.startPromise && this.startPromiseGeneration === this.tunnelGeneration) return this.startPromise;
     const generation = this.tunnelGeneration;
     // Refresh stopped-state settings before enforcing the manual check gate so an
     // external settings.json change cannot reuse a check from the old provider/configuration.
@@ -1725,7 +1741,7 @@ export class BridgeManager implements vscode.Disposable {
       // shared check Promise.
       const current = this.getStatus();
       if (current.state === "running") return current;
-      if (this.startPromise) return this.startPromise;
+      if (this.startPromise && this.startPromiseGeneration === this.tunnelGeneration) return this.startPromise;
     } else if (isCloudflare) {
       if (this.tunnelCheckPromise) throw new Error(t("tunnelCheckBusy"));
       if (!this.tunnelChecked) throw new Error(t("checkCloudflareBeforeStart"));
@@ -1736,11 +1752,16 @@ export class BridgeManager implements vscode.Disposable {
     // During automatic tunnel recovery the local HTTP/MCP runtime is intentionally kept alive.
     // A manual Start click must not create a second listener/tunnel while that recovery owns it.
     if (this.state === "starting" && this.httpServer) return this.getStatus();
-    this.startPromise = this.startInternal(domain, generation);
+    const startOperation = this.startInternal(domain, generation);
+    this.startPromise = startOperation;
+    this.startPromiseGeneration = generation;
     try {
-      return await this.startPromise;
+      return await startOperation;
     } finally {
-      this.startPromise = undefined;
+      if (this.startPromise === startOperation) {
+        this.startPromise = undefined;
+        this.startPromiseGeneration = undefined;
+      }
     }
   }
 
@@ -1812,6 +1833,7 @@ export class BridgeManager implements vscode.Disposable {
       return this.getStatus();
     } catch (error) {
       if (error instanceof BridgeStartCancelledError || generation !== this.tunnelGeneration) {
+        await this.stopPromise?.catch(() => undefined);
         return this.getStatus();
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -1862,6 +1884,7 @@ export class BridgeManager implements vscode.Disposable {
    * (.cmd/.bat) do not leave orphaned grandchildren behind; taskkill failures
    * fall back to a direct kill. Other platforms kill directly. */
   private async killTunnelProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
+    this.tunnelProcessLifecycles.get(child)?.abort();
     if (child.killed || this.killRequested.has(child)) return;
     // Mark synchronously, before the first await, so a second fire-and-forget
     // caller can never slip past the guard while taskkill is in flight.
@@ -1875,6 +1898,40 @@ export class BridgeManager implements vscode.Disposable {
       }
     }
     child.kill();
+  }
+
+  private async terminateTunnelProcess(child: ChildProcessWithoutNullStreams, timeoutMs = 2_000): Promise<boolean> {
+    const lifecycle = this.tunnelProcessLifecycles.get(child);
+    if (lifecycle?.isClosed) return true;
+    lifecycle?.abort();
+    if (child.exitCode === null && child.signalCode === null) {
+      void this.killTunnelProcess(child).catch(() => undefined);
+    }
+    const closed = await this.waitForTunnelProcessClose(child, timeoutMs);
+    if (!closed) {
+      try {
+        child.kill();
+      } catch {
+        // Best effort after the bounded close wait.
+      }
+    }
+    return closed;
+  }
+
+  private async waitForTunnelProcessClose(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
+    const closed = this.tunnelProcessLifecycles.get(child)?.closed;
+    if (!closed) return false;
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (didClose: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(didClose);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      void closed.then(() => finish(true));
+    });
   }
 
   private startTunnelProcess(protocolOverride?: BridgeTunnelProtocol): ChildProcessWithoutNullStreams {
@@ -1900,7 +1957,17 @@ export class BridgeManager implements vscode.Disposable {
         : process.env,
     });
     this.tunnelProcess = child;
-    const diagnostics = isCloudflare ? createCloudflaredProcessDiagnostics() : undefined;
+    const exitAbort = new AbortController();
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
+    const lifecycle = {
+      closed,
+      exitSignal: exitAbort.signal,
+      abort: () => exitAbort.abort(),
+      isClosed: false,
+    };
+    this.tunnelProcessLifecycles.set(child, lifecycle);
+    const diagnostics = isCloudflare ? createCloudflaredProcessDiagnostics(protocol) : undefined;
     if (diagnostics) this.cloudflaredProcessDiagnostics.set(child, diagnostics);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -1957,25 +2024,39 @@ export class BridgeManager implements vscode.Disposable {
     child.stderr.on("data", (chunk) => {
       appendTunnelChunk("stderr", chunk);
     });
+    child.once("exit", () => exitAbort.abort());
     child.once("close", () => {
+      exitAbort.abort();
       flushTunnelChunk("stdout");
       flushTunnelChunk("stderr");
-      this.cloudflaredProcessDiagnostics.delete(child);
+      if (diagnostics) {
+        flushCloudflaredDiagnosticOutput(diagnostics, "stdout");
+        flushCloudflaredDiagnosticOutput(diagnostics, "stderr");
+      }
+      // Diagnostics live in a WeakMap and disappear with the child object.
+      // Keep them available after close so startup can classify an early exit.
+      lifecycle.isClosed = true;
+      resolveClosed();
     });
     child.on("error", (error) => {
       this.output.appendLine(`[${commandLabel}] process error: ${error.message}`);
+      if (this.tunnelProcess !== child) return;
       this.lastError = error.message;
-      if (this.tunnelProcess === child && !this.stoppingResources && this.httpServer && this.state === "running") {
-        this.tunnelProcess = undefined;
+      if (!this.stoppingResources && this.httpServer && this.state === "running") {
+        const generation = this.tunnelGeneration;
         if (this.tunnelProvider === "cloudflare") this.domain = "";
         this.state = "starting";
         this.revision += 1;
-        void this.killTunnelProcess(child);
-        this.beginTunnelRecovery();
+        void this.terminateTunnelProcess(child).then(() => {
+          if (this.tunnelProcess === child) this.tunnelProcess = undefined;
+          if (this.stoppingResources || !this.httpServer || generation !== this.tunnelGeneration || this.state !== "starting") return;
+          this.beginTunnelRecovery();
+        });
       }
     });
     child.on("exit", (code, signal) => {
-      if (this.tunnelProcess === child) this.tunnelProcess = undefined;
+      if (this.tunnelProcess !== child) return;
+      const generation = this.tunnelGeneration;
       if (!this.stoppingResources && this.httpServer && this.state === "running") {
         const message = `${commandLabel} exited unexpectedly (code=${String(code)}, signal=${String(signal)}); reconnecting without stopping the local MCP server.`;
         this.output.appendLine(`[bridge] ${message}`);
@@ -1983,7 +2064,11 @@ export class BridgeManager implements vscode.Disposable {
         if (this.tunnelProvider === "cloudflare") this.domain = "";
         this.state = "starting";
         this.revision += 1;
-        this.beginTunnelRecovery();
+        void this.waitForTunnelProcessClose(child, 2_000).then(() => {
+          if (this.tunnelProcess === child) this.tunnelProcess = undefined;
+          if (this.stoppingResources || !this.httpServer || generation !== this.tunnelGeneration || this.state !== "starting") return;
+          this.beginTunnelRecovery();
+        });
       }
     });
     return child;
@@ -1995,10 +2080,13 @@ export class BridgeManager implements vscode.Disposable {
       let output = "";
       let startupTimer: ReturnType<typeof setTimeout> | undefined;
       let precheckDetailTimer: ReturnType<typeof setTimeout> | undefined;
+      let exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
         if (startupTimer) clearTimeout(startupTimer);
         if (precheckDetailTimer) clearTimeout(precheckDetailTimer);
+        if (exitDrainTimer) clearTimeout(exitDrainTimer);
         child.off("exit", onExit);
+        child.off("close", onExit);
         child.off("error", onError);
         child.stdout.off("data", onData);
         child.stderr.off("data", onData);
@@ -2025,10 +2113,29 @@ export class BridgeManager implements vscode.Disposable {
         finish(failure.error);
         return true;
       };
-      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      const classifyExit = (code: number | null, signal: NodeJS.Signals | null) => {
         if (handlePrecheckFailure(false)) return;
+        if (this.tunnelProvider === "cloudflare" || this.tunnelProvider === "cloudflare-named") {
+          finish(this.cloudflaredExitBeforeHealthError(child));
+          return;
+        }
         const detail = output.trim().slice(-4_000);
         finish(new Error(`${this.tunnelProvider} tunnel exited during startup (code=${String(code)}, signal=${String(signal)}).${detail ? ` ${detail}` : ""}`));
+      };
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (exitDrainTimer) {
+          clearTimeout(exitDrainTimer);
+          exitDrainTimer = undefined;
+          classifyExit(code, signal);
+          return;
+        }
+        // Give stdout/stderr a short bounded window to drain. close normally
+        // arrives first and contains the final unterminated diagnostic line;
+        // the timer prevents inherited pipes from delaying startup failure.
+        exitDrainTimer = setTimeout(() => {
+          exitDrainTimer = undefined;
+          classifyExit(code, signal);
+        }, CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS);
       };
       const onError = (error: Error) => finish(this.cloudflaredPrecheckError(child) ?? error);
       const onData = (chunk: Buffer | string) => {
@@ -2050,7 +2157,12 @@ export class BridgeManager implements vscode.Disposable {
             finish(new Error(`Cloudflare Named Tunnel authentication failed. Rotate or recopy the Tunnel Token. ${output.trim().slice(-4_000)}`));
             return;
           }
-          if (lower.includes("registered tunnel connection") || lower.includes("connection registered") || lower.includes("initial protocol")) {
+          if (
+            lower.includes("registered tunnel connection")
+            || lower.includes("connection registered")
+            || /\bconnection\s+\S+\s+registered\b/i.test(output)
+            || lower.includes("initial protocol")
+          ) {
             finish();
           }
           return;
@@ -2064,6 +2176,7 @@ export class BridgeManager implements vscode.Disposable {
         }
       };
       child.once("exit", onExit);
+      child.once("close", onExit);
       child.once("error", onError);
       child.stdout.on("data", onData);
       child.stderr.on("data", onData);
@@ -2105,6 +2218,23 @@ export class BridgeManager implements vscode.Disposable {
     if (kind === "dns") return { kind, error: new Error(t("cloudflarePrecheckDnsFailed")) };
     if (kind === "generic") return { kind, error: new Error(t("cloudflarePrecheckFailed")) };
     return undefined;
+  }
+
+  private cloudflaredExitBeforeHealthError(child: ChildProcessWithoutNullStreams): Error {
+    const precheckError = this.cloudflaredPrecheckError(child);
+    if (precheckError) return precheckError;
+    const diagnostics = this.cloudflaredProcessDiagnostics.get(child);
+    const configuredProtocol = this.readTunnelProtocol();
+    const allowQuicFallback = !this.stoppingResources
+      && !this.tunnelTransportFallback
+      // An auto-started QUIC process may fail after another window changes the
+      // setting to explicit HTTP/2. Preserve explicit QUIC, but let the HTTP/2
+      // choice enter the same replacement path as the automatic fallback.
+      && configuredProtocol !== "quic";
+    if (allowQuicFallback && cloudflaredQuicFailedBeforeRegistration(diagnostics)) {
+      return new BridgeQuicUnstableError();
+    }
+    return new Error(t("cloudflareTunnelExitedBeforeHealth", cloudflaredLogTail(diagnostics, 200) || t("unknown")));
   }
 
   private cloudflaredPrecheckError(child: ChildProcessWithoutNullStreams): Error | undefined {
@@ -2331,6 +2461,10 @@ export class BridgeManager implements vscode.Disposable {
     const logThrottle = isCloudflare ? this.createPublicHealthLogThrottle() : undefined;
     const reportFailure = logThrottle?.report ?? ((message: string) => this.output.appendLine(`[bridge] ${this.redactRouteToken(message)}`));
     const precheckAbort = new AbortController();
+    const processExitSignal = this.tunnelProcessLifecycles.get(child)?.exitSignal;
+    const abortForProcessExit = () => precheckAbort.abort();
+    if (processExitSignal?.aborted) abortForProcessExit();
+    else processExitSignal?.addEventListener("abort", abortForProcessExit, { once: true });
     let observedPrecheckError: Error | undefined;
     let precheckDetailTimer: ReturnType<typeof setTimeout> | undefined;
     const abortWithPrecheckFailure = (error: Error) => {
@@ -2360,13 +2494,24 @@ export class BridgeManager implements vscode.Disposable {
       onCloudflaredData();
     }
     try {
+      const assertTunnelAvailable = async (): Promise<void> => {
+        const processLifecycle = this.tunnelProcessLifecycles.get(child);
+        if (child.exitCode !== null || child.signalCode !== null || processLifecycle?.isClosed) {
+          // exit precedes close; briefly allow both output streams and a final
+          // unterminated diagnostic line to drain before classifying the exit.
+          await this.waitForTunnelProcessClose(child, CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS);
+          if (isCloudflare) throw observedPrecheckError ?? this.cloudflaredExitBeforeHealthError(child);
+          throw new Error(`${this.tunnelProvider} tunnel exited before the public Bridge health endpoint became reachable.`);
+        }
+        if (this.tunnelProcess !== child) {
+          throw new Error(`${this.tunnelProvider} tunnel changed before the public Bridge health endpoint became reachable.`);
+        }
+      };
       // Only "auto" (cloudflared's own QUIC-first choice) is eligible for the
       // early abort + http2 fallback; an explicit quic/http2 choice is honored.
       const allowQuicFallback = isCloudflare && !this.tunnelTransportFallback && this.readTunnelProtocol() === "auto";
       while (Date.now() < deadline) {
-        if (child.exitCode !== null || child.signalCode !== null || this.tunnelProcess !== child) {
-          throw new Error(`${this.tunnelProvider} tunnel exited before the public Bridge health endpoint became reachable.`);
-        }
+        await assertTunnelAvailable();
         const precheckError = observedPrecheckError;
         if (precheckError) throw precheckError;
         if (allowQuicFallback) {
@@ -2376,7 +2521,8 @@ export class BridgeManager implements vscode.Disposable {
             throw new BridgeQuicUnstableError();
           }
         }
-        const healthy = await this.requestPublicHealth(reportFailure, isCloudflare ? precheckAbort.signal : undefined);
+        const healthy = await this.requestPublicHealth(reportFailure, precheckAbort.signal);
+        await assertTunnelAvailable();
         const postRequestPrecheckError = observedPrecheckError;
         if (postRequestPrecheckError) throw postRequestPrecheckError;
         if (healthy) {
@@ -2388,13 +2534,13 @@ export class BridgeManager implements vscode.Disposable {
           if (completedFailure) throw completedFailure;
           return;
         }
-        await this.waitForPublicHealthRetry(isCloudflare ? precheckAbort.signal : undefined);
+        await this.waitForPublicHealthRetry(precheckAbort.signal);
       }
       const precheckError = observedPrecheckError ?? this.cloudflaredPrecheckError(child);
       if (precheckError) throw precheckError;
       const diagnostics = this.cloudflaredProcessDiagnostics.get(child);
       if (this.tunnelProvider === "cloudflare-named" && cloudflaredSawRegistration(diagnostics)) {
-        throw new Error(`Cloudflare Named Tunnel connected, but ${this.publicHealthLogUrl()} could not reach Bridge. In Cloudflare Tunnels, set the published application hostname to ${this.configuredNamedDomain} and its Service URL to http://127.0.0.1:${this.namedTunnelLocalPort}.`);
+        throw new Error(t("namedTunnelIngressHealthFailed", this.publicHealthLogUrl(), this.configuredNamedDomain, this.namedTunnelLocalPort));
       }
       if (!cloudflaredSawRegistration(diagnostics) && cloudflaredQuicDialFailures(diagnostics) >= QUIC_UNSTABLE_DIAL_FAILURES) {
         throw new Error(t("tunnelNeverRegisteredQuicError", cloudflaredQuicDialFailures(diagnostics), cloudflaredLogTail(diagnostics, 200)));
@@ -2402,27 +2548,30 @@ export class BridgeManager implements vscode.Disposable {
       if (this.tunnelProvider === "cloudflare-named") {
         throw new Error(t("tunnelNeverRegisteredError", cloudflaredLogTail(diagnostics, 200)));
       }
-      throw new Error(`Public Bridge health check timed out after ${Math.round(PUBLIC_HEALTH_STARTUP_TIMEOUT_MS / 1000)} seconds: ${this.publicHealthLogUrl()}`);
+      throw new Error(t("publicHealthTimeout", Math.round(PUBLIC_HEALTH_STARTUP_TIMEOUT_MS / 1000), this.publicHealthLogUrl()));
     } finally {
       if (isCloudflare) {
         child.stdout.off("data", onCloudflaredData);
         child.stderr.off("data", onCloudflaredData);
       }
+      processExitSignal?.removeEventListener("abort", abortForProcessExit);
       if (precheckDetailTimer) clearTimeout(precheckDetailTimer);
       logThrottle?.flush();
     }
   }
 
   private async startTunnelOnce(expectedGeneration?: number): Promise<void> {
-    await this.startTunnelOnceWithProtocol(expectedGeneration, this.tunnelTransportFallback);
+    const configuredProtocol = this.readTunnelProtocol();
+    const protocolOverride = configuredProtocol === "auto" ? this.tunnelTransportFallback : configuredProtocol;
+    await this.startTunnelOnceWithProtocol(expectedGeneration, protocolOverride);
   }
 
   private async startTunnelOnceWithProtocol(expectedGeneration: number | undefined, protocolOverride: BridgeTunnelProtocol | undefined): Promise<void> {
     if (expectedGeneration !== undefined) this.assertStartGeneration(expectedGeneration);
     const child = this.startTunnelProcess(protocolOverride);
     try {
-      await this.waitForTunnelStartup(child);
       try {
+        await this.waitForTunnelStartup(child);
         await this.waitForPublicHealth(child);
       } catch (error) {
         // One self-heal attempt per bridge session: when "auto" QUIC proves
@@ -2430,29 +2579,26 @@ export class BridgeManager implements vscode.Disposable {
         // the tunnel with an explicit http2 transport instead of failing.
         // Precheck failures and ordinary timeouts propagate unchanged.
         if (!(error instanceof BridgeQuicUnstableError) || this.tunnelTransportFallback) throw error;
+        const currentProtocol = this.readTunnelProtocol();
+        if (currentProtocol === "quic") throw error;
         if (expectedGeneration !== undefined) this.assertStartGeneration(expectedGeneration);
-        this.tunnelTransportFallback = "http2";
-        this.output.appendLine("[bridge] QUIC transport unstable; restarting tunnel with --protocol http2.");
-        void vscode.window.showInformationMessage(t("quicFallbackNotice")).then(undefined, () => undefined);
-        // Fire-and-forget would leave the old connector registered at the edge
-        // for a few seconds; with Named Tunnels the startup health check could
-        // then be routed to the dying QUIC connector and see a 530 even though
-        // the replacement registered fine. Bound the wait (taskkill usually
-        // completes in tens of milliseconds) instead of letting the race be
-        // decided by scheduler luck. killTunnelProcess cannot currently reject,
-        // but the catch keeps a future rejection from skipping the http2 retry,
-        // and the finally clears the timer once kill wins the race.
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 2_000);
-          timer.unref?.();
-          void this.killTunnelProcess(child)
-            .catch(() => undefined)
-            .finally(() => {
-              clearTimeout(timer);
-              resolve();
-            });
-        });
+        // Do not spawn the replacement merely because kill() returned: on POSIX
+        // that only means a signal was sent, and Node may not have observed
+        // exit/close yet. Prefer the real close event, bounded to two seconds.
+        await this.terminateTunnelProcess(child);
         this.tunnelProcess = undefined;
+        // Closing the old connector can take long enough for the user or another
+        // window to change the setting. Re-read it immediately before spawning so
+        // an automatic fallback never overrides a newer explicit QUIC choice.
+        const replacementProtocol = this.readTunnelProtocol();
+        if (replacementProtocol === "quic") throw error;
+        if (replacementProtocol === "auto") {
+          this.tunnelTransportFallback = "http2";
+          this.output.appendLine("[bridge] QUIC transport unstable; restarting tunnel with --protocol http2.");
+          void vscode.window.showInformationMessage(t("quicFallbackNotice")).then(undefined, () => undefined);
+        } else {
+          this.output.appendLine(`[bridge] ${t("tunnelProtocolChangedToHttp2")}`);
+        }
         await this.startTunnelOnceWithProtocol(expectedGeneration, "http2");
         return;
       }
@@ -2461,7 +2607,7 @@ export class BridgeManager implements vscode.Disposable {
       this.output.appendLine(`[bridge] public health verified: ${this.publicHealthLogUrl()}`);
     } catch (error) {
       if (this.tunnelProcess === child) this.tunnelProcess = undefined;
-      void this.killTunnelProcess(child);
+      await this.terminateTunnelProcess(child);
       throw error;
     }
   }
@@ -3019,7 +3165,17 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   async stop(): Promise<BridgeStatus> {
-    await this.stopResources(true);
+    if (this.stopPromise) {
+      await this.stopPromise;
+      return this.getStatus();
+    }
+    const stopOperation = this.stopResources(true);
+    this.stopPromise = stopOperation;
+    try {
+      await stopOperation;
+    } finally {
+      if (this.stopPromise === stopOperation) this.stopPromise = undefined;
+    }
     return this.getStatus();
   }
 
@@ -3037,7 +3193,7 @@ export class BridgeManager implements vscode.Disposable {
     const tunnel = this.tunnelProcess;
     this.tunnelProcess = undefined;
     if (tunnel) {
-      await this.killTunnelProcess(tunnel);
+      await this.terminateTunnelProcess(tunnel);
     }
 
     this.activeRequests = 0;

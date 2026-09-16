@@ -1,8 +1,12 @@
 export type CloudflaredPrecheckStatus = "unknown" | "pass" | "fail";
 export type CloudflaredPrecheckFailureKind = "both-transports" | "dns" | "generic";
 export type CloudflaredDiagnosticStream = "stdout" | "stderr";
+export type CloudflaredRequestedProtocol = "auto" | "quic" | "http2";
 
 export interface CloudflaredProcessDiagnostics {
+  /** Protocol requested when this exact child was spawned. Unlike the setting,
+   * this cannot change while the child is running. */
+  readonly requestedProtocol: CloudflaredRequestedProtocol;
   runId?: string;
   readonly retiredRunIds: Set<string>;
   dns: CloudflaredPrecheckStatus;
@@ -23,8 +27,14 @@ export interface CloudflaredProcessDiagnostics {
   quicDialFailures: number;
   /** Count of "Registered tunnel connection" log lines for this process. */
   registrationCount: number;
-  /** Date.now() of the first observed QUIC dial failure, for fallback grace. */
+  /** Date.now() of the first observed QUIC connection failure, for fallback grace. */
   firstQuicFailureAt?: number;
+  /** Transport selected by cloudflared for this process. */
+  initialProtocol?: "quic" | "http2";
+  /** Control-stream evidence retained until the selected protocol is known. */
+  controlStreamFailureObserved: boolean;
+  /** A QUIC control stream reached the edge but timed out before registration. */
+  quicControlStreamFailure: boolean;
 }
 
 export interface RepeatedMessageEmission {
@@ -42,8 +52,11 @@ const MAX_LOG_TAIL_CHARS = 2_000;
 /** QUIC dial failures tolerated before the transport is declared unstable. */
 export const QUIC_UNSTABLE_DIAL_FAILURES = 2;
 
-export function createCloudflaredProcessDiagnostics(): CloudflaredProcessDiagnostics {
+export function createCloudflaredProcessDiagnostics(
+  requestedProtocol: CloudflaredRequestedProtocol,
+): CloudflaredProcessDiagnostics {
   return {
+    requestedProtocol,
     retiredRunIds: new Set(),
     dns: "unknown",
     udp: "unknown",
@@ -58,6 +71,8 @@ export function createCloudflaredProcessDiagnostics(): CloudflaredProcessDiagnos
     logTail: "",
     quicDialFailures: 0,
     registrationCount: 0,
+    controlStreamFailureObserved: false,
+    quicControlStreamFailure: false,
   };
 }
 
@@ -117,17 +132,36 @@ function parseCloudflaredDiagnosticLine(diagnostics: CloudflaredProcessDiagnosti
 }
 
 /** Track transport-level lifecycle evidence from plain cloudflared log lines
- * (no run_id prefix): QUIC dial failures and successful tunnel registrations.
+ * (no run_id prefix): selected protocol, QUIC failures, and registrations.
  * These counters span the whole process lifetime — unlike the precheck state,
  * which is reset per run_id — because the "QUIC unstable" verdict compares
  * failures that predate a registration attempt. */
 function parseCloudflaredLifecycleLine(diagnostics: CloudflaredProcessDiagnostics, line: string): void {
-  if (/\bRegistered tunnel connection\b/i.test(line)) {
+  const protocol = line.match(/\bInitial protocol (quic|http2)\b/i)?.[1]?.toLowerCase();
+  if (protocol === "quic" || protocol === "http2") {
+    diagnostics.initialProtocol = protocol;
+    if (protocol === "quic" && diagnostics.controlStreamFailureObserved) {
+      diagnostics.quicControlStreamFailure = true;
+      diagnostics.firstQuicFailureAt ??= Date.now();
+    }
+  }
+
+  if (/\b(?:Registered tunnel connection|connection registered|Connection\s+\S+\s+registered)\b/i.test(line)) {
     diagnostics.registrationCount += 1;
     return;
   }
-  if (/\bfailed to dial\b[^\n]*\bquic connection\b/i.test(line)) {
+  if (/\b(?:failed to dial\b[^\n]*\bquic connection|failed to create new quic connection)\b/i.test(line)) {
     diagnostics.quicDialFailures += 1;
+    diagnostics.firstQuicFailureAt ??= Date.now();
+  }
+  const controlStreamFailure = /\bcontrol stream error\b/i.test(line)
+    || (/\bRegister tunnel error\b/i.test(line) && /\bcontext deadline exceeded\b/i.test(line));
+  if (controlStreamFailure) diagnostics.controlStreamFailureObserved = true;
+  if (
+    diagnostics.initialProtocol === "quic"
+    && diagnostics.controlStreamFailureObserved
+  ) {
+    diagnostics.quicControlStreamFailure = true;
     diagnostics.firstQuicFailureAt ??= Date.now();
   }
 }
@@ -140,12 +174,25 @@ export function appendCloudflaredDiagnosticOutput(
   const bufferKey = stream === "stdout" ? "stdoutBuffer" : "stderrBuffer";
   const lines = `${diagnostics[bufferKey]}${chunk}`.split(/\r?\n/);
   diagnostics[bufferKey] = (lines.pop() ?? "").slice(-MAX_PENDING_LINE_LENGTH);
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    diagnostics.logTail = `${diagnostics.logTail}${line}\n`.slice(-MAX_LOG_TAIL_CHARS);
-    parseCloudflaredLifecycleLine(diagnostics, line);
-    parseCloudflaredDiagnosticLine(diagnostics, line);
-  }
+  for (const line of lines) consumeCloudflaredDiagnosticLine(diagnostics, line);
+}
+
+function consumeCloudflaredDiagnosticLine(diagnostics: CloudflaredProcessDiagnostics, line: string): void {
+  if (!line.trim()) return;
+  diagnostics.logTail = `${diagnostics.logTail}${line}\n`.slice(-MAX_LOG_TAIL_CHARS);
+  parseCloudflaredLifecycleLine(diagnostics, line);
+  parseCloudflaredDiagnosticLine(diagnostics, line);
+}
+
+/** Parse the final unterminated line after the process streams close. */
+export function flushCloudflaredDiagnosticOutput(
+  diagnostics: CloudflaredProcessDiagnostics,
+  stream: CloudflaredDiagnosticStream,
+): void {
+  const bufferKey = stream === "stdout" ? "stdoutBuffer" : "stderrBuffer";
+  const line = diagnostics[bufferKey];
+  diagnostics[bufferKey] = "";
+  consumeCloudflaredDiagnosticLine(diagnostics, line);
 }
 
 export function cloudflaredSawRegistration(diagnostics: CloudflaredProcessDiagnostics | undefined): boolean {
@@ -164,7 +211,26 @@ export function cloudflaredFirstQuicFailureAt(diagnostics: CloudflaredProcessDia
  * successful registrations. Once any connection registers, the verdict stays
  * false so a running tunnel is never declared unstable mid-flight. */
 export function cloudflaredQuicUnstable(diagnostics: CloudflaredProcessDiagnostics | undefined): boolean {
-  return cloudflaredQuicDialFailures(diagnostics) >= QUIC_UNSTABLE_DIAL_FAILURES && !cloudflaredSawRegistration(diagnostics);
+  return !cloudflaredSawRegistration(diagnostics)
+    && (cloudflaredQuicDialFailures(diagnostics) >= QUIC_UNSTABLE_DIAL_FAILURES || diagnostics?.quicControlStreamFailure === true);
+}
+
+/** A dead process cannot recover its current connection attempt, so one
+ * explicit QUIC failure is enough to justify the single HTTP/2 retry. The
+ * running-process path remains more conservative and waits for the normal
+ * unstable verdict plus its grace period. */
+export function cloudflaredQuicFailedBeforeRegistration(diagnostics: CloudflaredProcessDiagnostics | undefined): boolean {
+  return diagnostics?.requestedProtocol !== "http2"
+    && diagnostics?.initialProtocol !== "http2"
+    && !cloudflaredSawRegistration(diagnostics)
+    && (
+      cloudflaredQuicDialFailures(diagnostics) > 0
+      || diagnostics?.quicControlStreamFailure === true
+      // This helper is used only for an auto-protocol process that has already
+      // died. If cloudflared exits before printing Initial protocol, one clear
+      // control-stream timeout is sufficient for the single HTTP/2 attempt.
+      || diagnostics?.controlStreamFailureObserved === true
+    );
 }
 
 /** Rolling cloudflared output tail. The full 2000-char tail streams live to

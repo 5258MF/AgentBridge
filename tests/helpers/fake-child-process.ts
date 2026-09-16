@@ -12,6 +12,7 @@ export class FakeChildProcess extends EventEmitter {
   readonly stdin = new FakeStream();
   readonly pid: number;
   killed = false;
+  autoExitOnKill = true;
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
 
@@ -22,6 +23,9 @@ export class FakeChildProcess extends EventEmitter {
 
   kill(): boolean {
     this.killed = true;
+    if (this.autoExitOnKill && this.exitCode === null && this.signalCode === null) {
+      queueMicrotask(() => this.emitExit(null, "SIGTERM"));
+    }
     return true;
   }
 
@@ -34,9 +38,17 @@ export class FakeChildProcess extends EventEmitter {
   }
 
   emitExit(code: number | null = 1, signal: NodeJS.Signals | null = null): void {
+    this.emitExitOnly(code, signal);
+    this.emitClose(code, signal);
+  }
+
+  emitExitOnly(code: number | null = 1, signal: NodeJS.Signals | null = null): void {
     this.exitCode = code;
     this.signalCode = signal;
     this.emit("exit", code, signal);
+  }
+
+  emitClose(code: number | null = this.exitCode, signal: NodeJS.Signals | null = this.signalCode): void {
     this.emit("close", code, signal);
   }
 
@@ -89,7 +101,12 @@ function defaultExec(command: string, args: readonly string[]): { stdout?: strin
     const pidIndex = args.findIndex((value) => value.toUpperCase() === "/PID");
     const pid = pidIndex >= 0 ? Number(args[pidIndex + 1]) : Number.NaN;
     const child = spawned.find((candidate) => candidate.pid === pid);
-    if (child) child.killed = true;
+    if (child) {
+      child.killed = true;
+      if (child.autoExitOnKill && child.exitCode === null && child.signalCode === null) {
+        queueMicrotask(() => child.emitExit(null, "SIGTERM"));
+      }
+    }
     return { stdout: "SUCCESS\n" };
   }
   return { stdout: "ok\n" };
