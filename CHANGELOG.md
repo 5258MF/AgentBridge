@@ -1,5 +1,14 @@
 # Change Log
 
+## 0.1.12 (2026-09-16)
+
+- **Cloudflared startup diagnostics and faster failure guidance** — Cloudflare Quick and Named Tunnel startup now consumes per-process connectivity prechecks and transport lifecycle logs, distinguishes DNS and dual UDP/TCP 7844 failures, and stops waiting for the full public-health timeout when cloudflared has already reported a hard connectivity failure. Repeated public-health failures are throttled, route tokens remain redacted, and the resulting guidance is localized.
+- **Safer QUIC-to-HTTP/2 recovery** — an auto-selected QUIC connector that fails before registration receives one bounded HTTP/2 replacement attempt. Replacement waits for the old child to close, records the protocol requested for each exact process, honors explicit protocol changes made during startup, and never mistakes an explicit HTTP/2 failure for QUIC instability or enters a recursive fallback loop.
+- **Tunnel lifecycle races closed** — health checks are aborted when their child exits, stale health success and old-child callbacks cannot overwrite a newer tunnel, Stop waits for real child closure under the existing bound, and a Start requested while Stop is still releasing resources now waits and performs a genuine restart instead of returning a stale running snapshot.
+- **Session activity cleanup** — the Session view adds a compact **Clear history** action that removes finished tool-call and progress history while preserving running tools, Todo state, MCP sessions, and cumulative statistics. Session headings stay on one line with ellipsis under narrow widths, and cleanup immediately returns refreshed status.
+- **Client-neutral temporary-address guidance** — the copied temporary MCP address notice now asks users to update the address in their MCP client instead of naming a specific web client.
+- **Expanded lifecycle regression coverage** — deterministic tests now cover Cloudflare Quick, Cloudflare Named, and ngrok startup/recovery; exit/close ordering; stale health responses; Stop/Start concurrency; protocol changes during fallback; explicit HTTP/2 failures without protocol logs; and isolated production VSIX packaging.
+
 ## 0.1.11 (2026-09-13)
 
 - **Managed terminal hard-stop stability** — fixed a Windows ConPTY lifecycle race where `terminate_command` could kill the same managed PTY twice through the explicit hard-stop path and terminal disposal, which could destabilize the Extension Host and make the Bridge temporarily unavailable. Hard-stop is now atomic and idempotent, stale delayed PTY exit callbacks are ignored, and the next command receives a fresh terminal slot normally.
