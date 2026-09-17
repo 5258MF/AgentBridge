@@ -30,7 +30,7 @@ Published to the [Visual Studio Marketplace](https://marketplace.visualstudio.co
 - **Managed shell support matrix** — PowerShell 5.1 / PowerShell 7+ (Windows), bash (Linux) and zsh (macOS) fully support `run_command` via per-prompt protocol hooks; cmd, sh and fish are rejected up front with a clear error instead of timing out. The syntax hint shown to the AI updates automatically when you switch shells.
 - **Vision-capable `read_image_file`** — returns MCP `ImageContent` blocks (PNG / JPEG / GIF / WebP / BMP) up to 5 MiB so vision-capable clients see pixels natively. SVG stays text via `read_files`.
 - **External link routing** — `agentbridge.bridge.openInternalBrowser` (`auto` / `all` / `external`) controls whether ChatGPT / Arena open inside VS Code's Simple Browser or in the OS default browser. Default `auto` matches the original in-editor experience.
-- **Bridge panel** — Activity Bar view with tunnel provider radio, status hero, persistent toggle, sessions timeline with mini diffs, and an advanced card covering interface language, managed shell, link routing, copy-MCP-prompt, and reset routeToken.
+- **Bridge panel** — Activity Bar view with tunnel provider radio, status hero, continuous public-endpoint health, persistent toggle, sessions timeline with mini diffs, and an advanced card covering interface language, managed shell, link routing, copy-MCP-prompt, and reset routeToken.
 - **Auto-start** — flip `agentbridge.bridge.persistentMode` to bring the Bridge up on extension activation.
 - **Client compatibility** — verified against ChatGPT Connectors, Claude Desktop, Cursor, Cline, Continue.
 
@@ -107,6 +107,8 @@ Cloudflare Quick Tunnel and Cloudflare Named Tunnel share the same `cloudflared`
 | Linux | Manual instructions only in this release | PATH, `/usr/bin`, `/usr/local/bin` |
 
 When a check cannot find `cloudflared`, AgentBridge also verifies whether Winget or Homebrew can actually run. The one-click install button appears only when that installer is available. A successful installation is checked automatically; Start Bridge unlocks only after the selected Cloudflare provider and its configuration pass verification. If Winget is missing on Windows, Homebrew is missing on macOS, or cloudflared is absent on Linux, open the official Cloudflare downloads instructions from the panel, install it manually, and click **Check Tunnel** again. This release does not run APT or modify Linux package sources.
+
+After a successful start, AgentBridge checks the public health endpoint every 10 seconds for Cloudflare Quick and Named Tunnels. One failure is shown as a network fluctuation; two consecutive failures mark the public endpoint unavailable while keeping the local Bridge running. Each monitoring pass has an 8-second total network budget. To avoid consuming ngrok's HTTP/S request quota while idle, ngrok is verified at startup and through **Check now**, without background polling. The Session footer shows a compact indicator, and Connection Settings shows timestamps and failure details. A later successful check clears the warning automatically. Monitoring reports status only and does not restart a live tunnel solely because of a transient health failure.
 
 ## Configuration
 

@@ -117,7 +117,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.renderHtml();
     webviewView.webview.onDidReceiveMessage((message: PanelMessage) => {
       void this.handleMessage(message, webviewView.webview).then(() => {
-        if (message.type !== "installCloudflared" && message.type !== "clearIdleSessions" && message.type !== "clearActivityHistory" && this.view === webviewView) {
+        if (message.type !== "installCloudflared" && message.type !== "checkPublicHealth" && message.type !== "clearIdleSessions" && message.type !== "clearActivityHistory" && this.view === webviewView) {
           const operationFinished = BUSY_PANEL_MESSAGE_TYPES.has(message.type);
           this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? true : undefined);
         }
@@ -125,7 +125,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         if (!(error instanceof BridgeStartCancelledError)) {
           void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
         }
-        if (message.type !== "installCloudflared" && this.view === webviewView) {
+        if (message.type !== "installCloudflared" && message.type !== "checkPublicHealth" && this.view === webviewView) {
           const operationFinished = BUSY_PANEL_MESSAGE_TYPES.has(message.type);
           this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? false : undefined);
         }
@@ -312,6 +312,27 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       case "checkTunnel":
         await this.bridgeReady;
         await this.bridge.checkTunnel();
+        return;
+      case "checkPublicHealth":
+        if (typeof message.requestId !== "string" || !message.requestId) throw new Error("Public health request ID must be a non-empty string.");
+        try {
+          await this.bridgeReady;
+          await this.bridge.checkPublicHealth();
+        } finally {
+          try {
+            const status = this.bridge.getStatus();
+            const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
+            await sourceWebview.postMessage({
+              type: "publicHealthChecked",
+              requestId: message.requestId,
+              status,
+              persistentMode,
+              quickTunnelCopied: status.publicUrl !== undefined && status.publicUrl === this.lastCopiedQuickTunnelUrl,
+            });
+          } catch {
+            // The originating Webview may have been disposed while the network check was running.
+          }
+        }
         return;
       case "installCloudflared":
         try {
@@ -625,6 +646,17 @@ private renderHtml(advancedOpen = false): string {
   .agentbridge-tunnel-status-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
   .agentbridge-tunnel-status-text { min-width: 0; flex: 1 1 auto; }
   .agentbridge-tunnel-actions { flex: 0 0 auto; margin-top: 0; }
+  .agentbridge-public-health-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-public-health-info { min-width: 0; }
+  .agentbridge-public-health-details, .agentbridge-public-health-meta { overflow: hidden; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+  .agentbridge-public-health-meta { margin-top: 2px; font-size: 10px; }
+  .agentbridge-public-health-badge { display: inline-flex; box-sizing: border-box; flex: 0 0 auto; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid transparent; border-radius: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 11px; font-weight: 600; line-height: 1; white-space: nowrap; }
+  .agentbridge-public-health-badge::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; content: ''; }
+  .agentbridge-public-health-badge.state-healthy { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
+  .agentbridge-public-health-badge.state-unstable { color: var(--vscode-editorWarning-foreground); }
+  .agentbridge-public-health-badge.state-unhealthy { color: var(--vscode-errorForeground); }
+  .agentbridge-public-health-badge.state-checking { color: var(--vscode-progressBar-background); }
+  .agentbridge-public-health-check { flex: 0 0 auto; padding-left: 9px; padding-right: 9px; font-size: 11px; }
   .agentbridge-url-section { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
   .agentbridge-address-notice { margin-top: 7px; padding: 7px 9px; border-left: 3px solid var(--vscode-editorWarning-foreground); background: var(--vscode-inputValidation-warningBackground, var(--vscode-editor-background)); }
   .agentbridge-url-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 8px; margin: 6px 0; min-width: 0; width: 100%; }
@@ -786,7 +818,9 @@ private renderHtml(advancedOpen = false): string {
   .agentbridge-session-connection-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .agentbridge-session-connection-actions { display: flex; flex: none; align-items: center; gap: 5px; }
   .agentbridge-session-connection-info { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
-  .agentbridge-session-connection-heading { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+  .agentbridge-session-connection-heading { display: flex; min-width: 0; align-items: center; gap: 7px; font-size: 12px; }
+  .agentbridge-session-connection-heading > strong { flex: 0 0 auto; }
+  .agentbridge-session-connection-heading .agentbridge-public-health-badge { flex: 0 1 auto; min-width: 0; max-width: min(145px, 38vw); overflow: hidden; text-overflow: ellipsis; }
   .agentbridge-session-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--vscode-descriptionForeground); }
   .agentbridge-session-dot.state-connected, .agentbridge-session-dot.state-running { background: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
   .agentbridge-session-dot.state-starting { background: var(--vscode-progressBar-background); }
@@ -815,6 +849,9 @@ private renderHtml(advancedOpen = false): string {
   .agentbridge-session-view.footer-collapsed .agentbridge-session-connection-description { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   @media (max-width: 340px) {
     .agentbridge-session-connection-description { display: none; }
+    .agentbridge-public-health-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .agentbridge-public-health-row .agentbridge-public-health-badge { grid-column: 1; grid-row: 2; justify-self: start; }
+    .agentbridge-public-health-check { grid-column: 2; grid-row: 1 / 3; }
     .agentbridge-session-stats { grid-template-columns: 1fr; }
   }
   .agentbridge-spin { display: inline-block; animation: agentbridge-spin 1s linear infinite; }
@@ -875,6 +912,15 @@ private renderHtml(advancedOpen = false): string {
       <span class="agentbridge-state state-stopped" id="connectionBadge">${t("checking")}</span>
     </summary>
     <div class="agentbridge-connection-body">
+      <div class="agentbridge-public-health-row" id="publicHealthPanel" style="display:none">
+        <div class="agentbridge-public-health-info">
+          <div class="agentbridge-label">${t("publicHealthLabel")}</div>
+          <div class="agentbridge-public-health-details" id="publicHealthDetails">${t("publicHealthInactiveDetails")}</div>
+          <div class="agentbridge-public-health-meta" id="publicHealthMeta"></div>
+        </div>
+        <span class="agentbridge-public-health-badge state-inactive" id="configPublicHealthBadge">${t("publicHealthInactive")}</span>
+        <button class="secondary agentbridge-public-health-check" id="checkPublicHealthButton" type="button" disabled>${t("checkPublicHealthNow")}</button>
+      </div>
       <div class="agentbridge-field">
         <label class="agentbridge-label">${t("tunnelMode")}</label>
         <div class="agentbridge-provider-choices" role="radiogroup">
@@ -1136,6 +1182,7 @@ private renderHtml(advancedOpen = false): string {
           <div class="agentbridge-session-connection-heading">
             <span class="agentbridge-session-dot" id="connectionDot"></span>
             <strong id="connectionTitle">AgentBridge</strong>
+            <span class="agentbridge-public-health-badge state-inactive" id="sessionPublicHealthBadge" role="status" aria-live="polite" aria-atomic="true" style="display:none">${t("publicHealthInactive")}</span>
           </div>
           <span class="agentbridge-session-connection-description" id="connectionDescription">${t("startToMonitor")}</span>
         </div>
@@ -1167,6 +1214,8 @@ private renderHtml(advancedOpen = false): string {
   let lastStatus = null;
   let busy = false;
   let installingCloudflared = false;
+  let publicHealthCheckPending = false;
+  let publicHealthCheckRequestId = null;
   const canAutoInstallCloudflared = window.__AB_CAN_AUTO_INSTALL_CLOUDFLARED__ === true;
   let domainInputDirty = false;
   let namedTunnelInputDirty = false;
@@ -1583,6 +1632,52 @@ private renderHtml(advancedOpen = false): string {
     startStop.textContent = state === 'running' ? t('stop') : state === 'starting' ? t('starting') : t('connect');
   }
 
+  function publicHealthView(status) {
+    const runningOrStarting = status.state === 'running' || status.state === 'starting';
+    const allowed = new Set(['inactive', 'checking', 'healthy', 'unstable', 'unhealthy']);
+    const state = allowed.has(status.publicHealthState)
+      ? status.publicHealthState
+      : runningOrStarting ? 'checking' : 'inactive';
+    const labels = {
+      inactive: t('publicHealthInactive'),
+      checking: t('publicHealthChecking'),
+      healthy: t('publicHealthHealthy'),
+      unstable: t('publicHealthUnstable'),
+      unhealthy: t('publicHealthUnhealthy'),
+    };
+    const details = {
+      inactive: t('publicHealthInactiveDetails'),
+      checking: t('publicHealthCheckingDetails'),
+      healthy: t('publicHealthHealthyDetails'),
+      unstable: t('publicHealthUnstableDetails'),
+      unhealthy: t('publicHealthUnhealthyDetails'),
+    };
+    return { state, label: labels[state], details: details[state] };
+  }
+
+  function renderPublicHealth(status) {
+    const health = publicHealthView(status);
+    const meta = [];
+    if (status.publicHealthAvailable === true && status.publicHealthAutomatic === false) meta.push(t('publicHealthManualOnly'));
+    if (status.publicHealthLastCheckedAt) meta.push(t('publicHealthLastChecked', formatTime(status.publicHealthLastCheckedAt)));
+    if (health.state === 'unhealthy' && status.publicHealthLastSuccessAt) meta.push(t('publicHealthLastSuccess', formatTime(status.publicHealthLastSuccessAt)));
+    if (Number(status.publicHealthFailureCount) > 0) meta.push(t('publicHealthFailures', status.publicHealthFailureCount));
+    const metaText = meta.join(' · ');
+    const tooltip = [health.details, metaText, status.publicHealthError].filter(Boolean).join('\\n');
+    for (const badge of [$('configPublicHealthBadge'), $('sessionPublicHealthBadge')]) {
+      badge.className = 'agentbridge-public-health-badge state-' + health.state;
+      badge.textContent = health.label;
+      badge.title = tooltip;
+    }
+    $('sessionPublicHealthBadge').style.display = status.state === 'starting' || status.publicHealthAvailable === true ? '' : 'none';
+    $('publicHealthDetails').textContent = health.details;
+    $('publicHealthDetails').title = status.publicHealthError || health.details;
+    $('publicHealthMeta').textContent = metaText;
+    $('publicHealthPanel').style.display = status.state === 'starting' || status.publicHealthAvailable === true ? '' : 'none';
+    $('checkPublicHealthButton').textContent = status.publicHealthChecking || publicHealthCheckPending ? t('checking') : t('checkPublicHealthNow');
+    return { ...health, metaText, tooltip };
+  }
+
   function renderSessionStatus(status) {
     const connected = status.connected;
     const state = status.state;
@@ -1599,7 +1694,10 @@ private renderHtml(advancedOpen = false): string {
       desc.textContent = parts.join(' · ');
       $('footerDetails').style.display = 'none';
     } else {
-      desc.textContent = connected ? t('clientConnected')
+      const health = publicHealthView(status);
+      desc.textContent = health.state === 'unhealthy' ? t('publicHealthUnhealthyDetails')
+        : health.state === 'unstable' ? t('publicHealthUnstableDetails')
+        : connected ? t('clientConnected')
         : state === 'running' ? t('waitingClient')
         : state === 'error' ? (status.lastError || t('bridgeFailed'))
         : t('startToMonitor');
@@ -1693,6 +1791,7 @@ private renderHtml(advancedOpen = false): string {
   }
 
   function renderStatus(status, persistentMode, quickTunnelCopied) {
+    const publicHealth = renderPublicHealth(status);
     renderSession(status);
     const isNgrok = status.tunnelProvider === 'ngrok';
     const isNamed = status.tunnelProvider === 'cloudflare-named';
@@ -1701,7 +1800,9 @@ private renderHtml(advancedOpen = false): string {
     renderStateBadge($('stateBadge'), status.state);
     $('openFolderGroup').style.display = 'none';
     if (status.state === 'running') {
-      $('stateDetails').textContent = t('remoteEndpointReady', status.activeRequests);
+      $('stateDetails').textContent = publicHealth.state === 'unhealthy' ? t('publicHealthUnhealthyDetails')
+        : publicHealth.state === 'unstable' ? t('publicHealthUnstableDetails')
+        : t('remoteEndpointReady', status.activeRequests);
     } else if (status.state === 'starting') {
       $('stateDetails').textContent = isQuick ? t('generatingQuickUrl') : isNamed ? t('connectingNamedHost') : t('openingSecureEndpoint');
     } else if (status.state === 'error') {
@@ -1717,13 +1818,33 @@ private renderHtml(advancedOpen = false): string {
 
     const providerDomainMissing = isNgrok ? !status.configuredDomain : isNamed ? !status.configuredNamedDomain : false;
     const cloudflareNotChecked = (isQuick || isNamed) && status.tunnelChecked !== true;
-    const connectionNeedsAttention = status.state === 'error' || cloudflareNotChecked || status.tunnelInstalled !== true || status.tunnelConfigValid !== true || providerDomainMissing;
-    if (connectionNeedsAttention) $('connectionCard').open = true;
-    const connectionState = status.state === 'error' ? 'error' : connectionNeedsAttention ? 'stopped' : 'running';
-    renderStateBadge($('connectionBadge'), connectionState);
+    const publicHealthNeedsAttention = status.publicHealthAvailable === true && publicHealth.state === 'unhealthy';
+    const configurationNeedsAttention = status.state === 'error' || cloudflareNotChecked || status.tunnelInstalled !== true || status.tunnelConfigValid !== true || providerDomainMissing;
+    const connectionNeedsAttention = configurationNeedsAttention || publicHealthNeedsAttention;
+    if (configurationNeedsAttention) $('connectionCard').open = true;
+    const connectionState = status.state === 'error' || publicHealthNeedsAttention ? 'error'
+      : status.state === 'starting' ? 'starting'
+        : connectionNeedsAttention ? 'stopped' : 'running';
+    const showingPublicHealth = status.publicHealthAvailable === true;
+    if (showingPublicHealth) {
+      $('connectionBadge').className = 'agentbridge-public-health-badge state-' + publicHealth.state;
+      $('connectionBadge').textContent = publicHealth.label;
+      $('connectionBadge').title = publicHealth.tooltip;
+    } else {
+      renderStateBadge($('connectionBadge'), connectionState);
+      $('connectionBadge').title = '';
+    }
     if (status.state === 'error') {
       $('connectionBadge').textContent = t('needsAttention');
       $('connectionDetails').textContent = t('bridgeConnectionNeedsAttention');
+    } else if (status.state === 'starting') {
+      $('connectionDetails').textContent = isQuick ? t('generatingQuickUrl') : isNamed ? t('connectingNamedHost') : t('openingSecureEndpoint');
+    } else if (publicHealthNeedsAttention) {
+      $('connectionDetails').textContent = t('publicHealthUnhealthyDetails');
+    } else if (showingPublicHealth && publicHealth.state === 'unstable') {
+      $('connectionDetails').textContent = t('publicHealthUnstableDetails');
+    } else if (showingPublicHealth && publicHealth.state === 'checking') {
+      $('connectionDetails').textContent = t('publicHealthCheckingDetails');
     } else if (status.tunnelChecking) {
       $('connectionBadge').textContent = t('checking');
       $('connectionDetails').textContent = t('checkingTunnel');
@@ -1743,10 +1864,13 @@ private renderHtml(advancedOpen = false): string {
       $('connectionBadge').textContent = t('needsConfig');
       $('connectionDetails').textContent = isNamed ? t('hostnameNotSet') : t('reservedDomainNotSet');
     } else {
-      $('connectionBadge').textContent = t('ready');
+      if (!showingPublicHealth) $('connectionBadge').textContent = t('ready');
       $('connectionDetails').textContent = isQuick ? t('quickReady')
         : isNamed ? t('namedReady', status.configuredNamedDomain)
         : t('ngrokReady', status.configuredDomain);
+    }
+    if (showingPublicHealth && publicHealth.metaText) {
+      $('connectionDetails').textContent += ' · ' + publicHealth.metaText;
     }
 
     if (status.tunnelChecking) {
@@ -1884,6 +2008,7 @@ private renderHtml(advancedOpen = false): string {
     $('saveNamedTunnelButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed || !$('namedDomainInput').value.trim() || !Number.isInteger(Number($('namedPortInput').value));
     $('clearNamedTunnelTokenButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed || lastStatus.namedTunnelTokenConfigured !== true;
     $('checkButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
+    $('checkPublicHealthButton').disabled = !statusLoaded || busy || !running || lastStatus.publicHealthAvailable !== true || publicHealthCheckPending || lastStatus.publicHealthChecking === true;
     $('installCloudflaredButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !canAutoInstallCloudflared || !(isQuick || isNamed) || lastStatus.tunnelInstalled !== false || lastStatus.cloudflaredInstallerAvailability !== 'available';
     $('installCloudflaredButton').textContent = cloudflaredInstallInProgress ? t('installing') : t('installCloudflared');
     $('rotateButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
@@ -2031,6 +2156,14 @@ private renderHtml(advancedOpen = false): string {
     busy = true;
     updateControls();
     vscode.postMessage({ type: 'checkTunnel' });
+  });
+  $('checkPublicHealthButton').addEventListener('click', () => {
+    if (!lastStatus || busy || lastStatus.state !== 'running' || lastStatus.publicHealthAvailable !== true || publicHealthCheckPending || lastStatus.publicHealthChecking === true) return;
+    publicHealthCheckPending = true;
+    publicHealthCheckRequestId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    updateControls();
+    $('checkPublicHealthButton').textContent = t('checking');
+    vscode.postMessage({ type: 'checkPublicHealth', requestId: publicHealthCheckRequestId });
   });
   $('installCloudflaredButton').addEventListener('click', () => {
     if (!lastStatus || busy || lastStatus.tunnelChecking || lastStatus.cloudflaredInstalling === true || lastStatus.cloudflaredInstallerAvailability !== 'available') return;
@@ -2222,6 +2355,11 @@ private renderHtml(advancedOpen = false): string {
     } else if (message && message.type === 'idleSessionsCleared' && message.status) {
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
     } else if (message && message.type === 'activityHistoryCleared' && message.status) {
+      refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
+    } else if (message && message.type === 'publicHealthChecked' && message.status) {
+      if (message.requestId !== publicHealthCheckRequestId) return;
+      publicHealthCheckPending = false;
+      publicHealthCheckRequestId = null;
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
     } else if (message && message.type === 'trustedBrowserOriginsSaved' && Array.isArray(message.origins)) {
       trustedBrowserOriginsSavePending = false;

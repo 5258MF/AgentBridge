@@ -30,7 +30,7 @@
 - **托管 shell 支持矩阵** — Windows PowerShell 5.1 / PowerShell 7+（Windows）、bash（Linux）、zsh（macOS）通过每提示符协议钩子完整支持 `run_command`；cmd/sh/fish 会被直接拒绝并返回明确错误，而不是挂到超时。切换 shell 时 AI 看到的运行时语法提示自动更新。
 - **可识别像素的 `read_image_file`** — 返回 MCP `ImageContent` block（PNG / JPEG / GIF / WebP / BMP，上限 5 MiB），让自带 vision 的客户端（ChatGPT、Claude）直接看到图像内容。SVG 仍走 `read_files` 按文本读。
 - **外链打开方式三选一** — `agentbridge.bridge.openInternalBrowser`（`auto` / `all` / `external`）决定 ChatGPT / Arena 等外链在 VS Code 内置 Simple Browser 还是 OS 默认浏览器中打开。默认 `auto` 还原在编辑器内嵌的体验。
-- **Bridge 面板** — 活动栏视图 + 隧道供应商单选卡 + 状态 hero + 自动启动 toggle + 会话时间线（含 mini diff）+ 高级卡（界面语言 / Managed Shell / 打开方式 / 复制 MCP 提示词 / 重置 routeToken）。
+- **Bridge 面板** — 活动栏视图 + 隧道供应商单选卡 + 状态 hero + 公网入口持续健康监测 + 自动启动 toggle + 会话时间线（含 mini diff）+ 高级卡（界面语言 / Managed Shell / 打开方式 / 复制 MCP 提示词 / 重置 routeToken）。
 - **自动启动** — `agentbridge.bridge.persistentMode` 设为 true，激活插件即起 Bridge。
 - **客户端兼容性** — 已实测 ChatGPT Connectors、Claude Desktop、Cursor、Cline、Continue。
 
@@ -107,6 +107,8 @@ Cloudflare Quick Tunnel 与 Cloudflare Named Tunnel 共用同一套 `cloudflared
 | Linux | 本版本仅提供手动安装说明 | PATH、`/usr/bin`、`/usr/local/bin` |
 
 检查未找到 `cloudflared` 时，AgentBridge 还会实际验证 Winget 或 Homebrew 能否运行；只有安装器可用时才显示一键安装按钮。安装成功后会自动复检；只有所选 Cloudflare 供应商及其配置通过验证，才会解锁“启动 Bridge”。Windows 没有 Winget、macOS 没有 Homebrew，或 Linux 尚未安装时，请从面板打开 Cloudflare 官方下载说明，手动安装后重新点击“检查隧道”。本版本不会在 Linux 上运行 APT 或修改软件源。
+
+Bridge 成功启动后，AgentBridge 会对 Cloudflare Quick 和 Named Tunnel 的公网健康地址每 10 秒检查一次。一次失败显示为“网络波动”；连续两次失败标记为“公网异常”，但本地 Bridge 继续运行；每轮监测共享 8 秒总网络预算。为避免在空闲时消耗 ngrok 的 HTTP/S 请求额度，ngrok 只在启动和点击“立即检查”时验证，不进行后台轮询。会话页底部显示紧凑状态，连接设置显示检查时间和失败详情；后续检查成功后警告自动恢复。本轮监测只报告状态，不会因为一次短暂健康失败就自动重启仍在运行的隧道。
 
 ## 配置项
 

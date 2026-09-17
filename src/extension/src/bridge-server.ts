@@ -2,6 +2,7 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child
 import { randomUUID } from "node:crypto";
 import { randomBytes } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
+import { isIPv4 } from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
@@ -33,6 +34,22 @@ import {
 
 const execFileAsync = promisify(execFile);
 const t = translate;
+
+function isPublicIpv4Address(value: string): boolean {
+  if (!isIPv4(value)) return false;
+  const [a, b, c] = value.split(".").map(Number);
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
+  if (a === 192 && b === 88 && c === 99) return false;
+  if (a === 192 && b === 168) return false;
+  if (a === 198 && (b === 18 || b === 19)) return false;
+  if (a === 198 && b === 51 && c === 100) return false;
+  if (a === 203 && b === 0 && c === 113) return false;
+  return true;
+}
 const ROUTE_TOKEN_SECRET = "agentbridge.bridge.routeToken";
 const NGROK_DOMAIN_SETTING = "bridge.ngrokDomain";
 const NGROK_DOMAIN_STATE_KEY = "agentbridge.bridge.ngrokDomain";
@@ -58,6 +75,9 @@ const SESSION_EVENT_STORE_MAX_BYTES = 8 * 1024 * 1024;
 const PUBLIC_HEALTH_STARTUP_TIMEOUT_MS = 60_000;
 const PUBLIC_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
 const PUBLIC_HEALTH_LOG_THROTTLE_MS = 10_000;
+const PUBLIC_HEALTH_MONITOR_INTERVAL_MS = 10_000;
+const PUBLIC_HEALTH_MONITOR_BUDGET_MS = 8_000;
+const PUBLIC_HEALTH_UNHEALTHY_FAILURES = 2;
 const HTTP_SERVER_SHUTDOWN_TIMEOUT_MS = 3_000;
 const CLOUDFLARED_PRECHECK_DETAIL_GRACE_MS = 100;
 /** Grace after the first QUIC connection failure before the "QUIC unstable" early
@@ -92,6 +112,7 @@ const CLOUDFLARED_WINGET_PACKAGE = "Cloudflare.cloudflared";
 const DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT = 48271;
 
 export type BridgeTunnelProvider = "cloudflare" | "cloudflare-named" | "ngrok";
+export type BridgePublicHealthState = "inactive" | "checking" | "healthy" | "unstable" | "unhealthy";
 
 /** cloudflared transport protocol between the local daemon and Cloudflare's edge.
  * "auto" keeps cloudflared's own QUIC-first behavior; "quic"/"http2" pin the
@@ -395,6 +416,14 @@ export interface BridgeStatus {
   readonly tunnelVersion?: string;
   readonly tunnelConfigValid?: boolean;
   readonly lastError?: string;
+  readonly publicHealthState: BridgePublicHealthState;
+  readonly publicHealthAvailable: boolean;
+  readonly publicHealthAutomatic: boolean;
+  readonly publicHealthChecking: boolean;
+  readonly publicHealthFailureCount: number;
+  readonly publicHealthLastCheckedAt?: string;
+  readonly publicHealthLastSuccessAt?: string;
+  readonly publicHealthError?: string;
   readonly toolNames: string[];
   readonly toolCount: number;
   readonly activeRequests: number;
@@ -1095,13 +1124,29 @@ export class BridgeManager implements vscode.Disposable {
   private startPromise: Promise<BridgeStatus> | undefined;
   private startPromiseGeneration: number | undefined;
   private stopPromise: Promise<void> | undefined;
+  private stopMarkStoppedRequested = false;
   private tunnelCheckPromise: Promise<BridgeStatus> | undefined;
+  private tunnelCheckPromiseGeneration: number | undefined;
+  private tunnelCheckAbort: AbortController | undefined;
   private installCloudflaredPromise: Promise<BridgeStatus> | undefined;
   private sessionPruneTimer: ReturnType<typeof setInterval> | undefined;
   private tunnelRecoveryPromise: Promise<void> | undefined;
   private tunnelRecoveryGeneration: number | undefined;
+  private tunnelRecoveryAbort: AbortController | undefined;
+  private publicHealthState: BridgePublicHealthState = "inactive";
+  private publicHealthChecking = false;
+  private publicHealthFailureCount = 0;
+  private publicHealthLastCheckedAt: number | undefined;
+  private publicHealthLastSuccessAt: number | undefined;
+  private publicHealthError: string | undefined;
+  private publicHealthMonitorTimer: ReturnType<typeof setTimeout> | undefined;
+  private publicHealthMonitorTimerGeneration: number | undefined;
+  private publicHealthMonitorPromise: Promise<void> | undefined;
+  private publicHealthMonitorPromiseGeneration: number | undefined;
+  private publicHealthMonitorAbort: AbortController | undefined;
   private tunnelGeneration = 0;
   private stoppingResources = false;
+  private disposed = false;
   private readonly cloudflaredProcessDiagnostics = new WeakMap<ChildProcessWithoutNullStreams, CloudflaredProcessDiagnostics>();
   private readonly tunnelProcessLifecycles = new WeakMap<ChildProcessWithoutNullStreams, {
     readonly closed: Promise<void>;
@@ -1109,12 +1154,21 @@ export class BridgeManager implements vscode.Disposable {
     readonly abort: () => void;
     isClosed: boolean;
   }>();
+  private readonly httpServerClosePromises = new WeakMap<HttpServer, Promise<void>>();
+  private readonly httpServersThatListened = new WeakSet<HttpServer>();
+  private readonly httpServersThatFailedToListen = new WeakSet<HttpServer>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly output: vscode.OutputChannel,
     private readonly ideToolBroker: IdeToolBroker,
   ) {}
+
+  private isTunnelProcessAlive(): boolean {
+    const child = this.tunnelProcess;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return false;
+    return this.tunnelProcessLifecycles.get(child)?.isClosed !== true;
+  }
 
   async initialize(): Promise<void> {
     this.routeToken = await this.context.secrets.get(ROUTE_TOKEN_SECRET) ?? "";
@@ -1185,6 +1239,14 @@ export class BridgeManager implements vscode.Disposable {
       tunnelVersion: this.tunnelVersion,
       tunnelConfigValid: this.tunnelConfigValid,
       lastError: this.lastError,
+      publicHealthState: this.publicHealthState,
+      publicHealthAvailable: !this.disposed && !this.stoppingResources && this.state === "running" && this.isTunnelProcessAlive() && Boolean(this.domain),
+      publicHealthAutomatic: !this.disposed && !this.stoppingResources && this.state === "running" && this.tunnelProvider !== "ngrok" && this.isTunnelProcessAlive() && Boolean(this.domain),
+      publicHealthChecking: this.publicHealthChecking,
+      publicHealthFailureCount: this.publicHealthFailureCount,
+      publicHealthLastCheckedAt: this.publicHealthLastCheckedAt !== undefined ? new Date(this.publicHealthLastCheckedAt).toISOString() : undefined,
+      publicHealthLastSuccessAt: this.publicHealthLastSuccessAt !== undefined ? new Date(this.publicHealthLastSuccessAt).toISOString() : undefined,
+      publicHealthError: this.publicHealthError,
       toolNames: visibleToolNames,
       toolCount: visibleToolNames.length,
       activeRequests: this.activeRequests,
@@ -1432,15 +1494,22 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   async checkTunnel(): Promise<BridgeStatus> {
+    if (this.disposed) throw new BridgeStartCancelledError();
     return this.checkTunnelInternal(false);
   }
 
   private async checkTunnelInternal(allowDuringStart: boolean): Promise<BridgeStatus> {
+    if (this.disposed) throw new BridgeStartCancelledError();
     if (this.state === "running" || (this.state === "starting" && !allowDuringStart)) {
       throw new Error(t("stopBeforeTunnelCheck"));
     }
     if (this.installCloudflaredPromise) throw new Error(t("cloudflaredInstallBusy"));
-    if (this.tunnelCheckPromise) return this.tunnelCheckPromise;
+    const generation = this.tunnelGeneration;
+    if (this.tunnelCheckPromise) {
+      if (this.tunnelCheckPromiseGeneration === generation) return this.tunnelCheckPromise;
+      await this.tunnelCheckPromise.catch(() => undefined);
+      if (generation !== this.tunnelGeneration || this.stoppingResources) throw new BridgeStartCancelledError();
+    }
     if (!allowDuringStart) {
       this.tunnelProvider = this.readTunnelProvider();
       this.getStatus();
@@ -1449,24 +1518,35 @@ export class BridgeManager implements vscode.Disposable {
     const checkedNamedDomain = this.configuredNamedDomain;
     const checkedNamedLocalPort = this.namedTunnelLocalPort;
     this.tunnelChecked = false;
+    const checkAbort = new AbortController();
+    this.tunnelCheckAbort = checkAbort;
     const check = this.tunnelProvider === "ngrok"
-      ? this.checkNgrokInternal()
+      ? this.checkNgrokInternal(checkAbort.signal)
       : this.tunnelProvider === "cloudflare-named"
-        ? this.checkNamedTunnel(!allowDuringStart)
-        : this.checkCloudflared();
-    this.tunnelCheckPromise = (async () => {
+        ? this.checkNamedTunnel(!allowDuringStart, checkAbort.signal)
+        : this.checkCloudflared(checkAbort.signal);
+    let trackedCheck!: Promise<BridgeStatus>;
+    trackedCheck = (async () => {
       try {
         await check;
-        if (this.state !== "running" && this.state !== "starting") this.getStatus();
-        this.tunnelChecked = this.tunnelProvider === checkedProvider
-          && (checkedProvider !== "cloudflare-named"
-            || (this.configuredNamedDomain === checkedNamedDomain && this.namedTunnelLocalPort === checkedNamedLocalPort));
+        if (generation === this.tunnelGeneration && !this.stoppingResources) {
+          if (this.state !== "running" && this.state !== "starting") this.getStatus();
+          this.tunnelChecked = this.tunnelProvider === checkedProvider
+            && (checkedProvider !== "cloudflare-named"
+              || (this.configuredNamedDomain === checkedNamedDomain && this.namedTunnelLocalPort === checkedNamedLocalPort));
+        }
       } finally {
-        this.tunnelCheckPromise = undefined;
+        if (this.tunnelCheckPromise === trackedCheck) {
+          this.tunnelCheckPromise = undefined;
+          this.tunnelCheckPromiseGeneration = undefined;
+        }
+        if (this.tunnelCheckAbort === checkAbort) this.tunnelCheckAbort = undefined;
       }
       return this.getStatus();
     })();
-    return this.tunnelCheckPromise;
+    this.tunnelCheckPromise = trackedCheck;
+    this.tunnelCheckPromiseGeneration = generation;
+    return trackedCheck;
   }
 
   async checkNgrok(): Promise<BridgeStatus> {
@@ -1474,12 +1554,14 @@ export class BridgeManager implements vscode.Disposable {
     return this.checkTunnel();
   }
 
-  private async checkNgrokInternal(): Promise<BridgeStatus> {
+  private async checkNgrokInternal(signal?: AbortSignal): Promise<BridgeStatus> {
+    if (signal?.aborted) throw new BridgeStartCancelledError();
     try {
-      const version = await execFileAsync("ngrok", ["version"], { windowsHide: true, timeout: 10_000 });
+      const version = await execFileAsync("ngrok", ["version"], { windowsHide: true, timeout: 10_000, signal });
       this.tunnelInstalled = true;
       this.tunnelVersion = String(version.stdout || version.stderr).trim().split(/\r?\n/)[0] || "ngrok";
     } catch (error) {
+      if (signal?.aborted) throw new BridgeStartCancelledError();
       this.tunnelInstalled = false;
       this.tunnelConfigValid = false;
       this.tunnelVersion = undefined;
@@ -1488,25 +1570,28 @@ export class BridgeManager implements vscode.Disposable {
     }
 
     try {
-      await execFileAsync("ngrok", ["config", "check"], { windowsHide: true, timeout: 10_000 });
+      await execFileAsync("ngrok", ["config", "check"], { windowsHide: true, timeout: 10_000, signal });
       this.tunnelConfigValid = true;
       this.lastError = undefined;
     } catch (error) {
+      if (signal?.aborted) throw new BridgeStartCancelledError();
       this.tunnelConfigValid = false;
       this.lastError = `ngrok config check failed: ${error instanceof Error ? error.message : String(error)}`;
     }
     return this.getStatus();
   }
 
-  private async refreshCloudflaredInstallerAvailability(): Promise<void> {
+  private async refreshCloudflaredInstallerAvailability(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new BridgeStartCancelledError();
     this.cloudflaredInstaller = platformCloudflaredInstaller();
     this.cloudflaredInstallerExecutable = undefined;
     if (process.platform === "win32") {
       try {
-        await execFileAsync("winget", ["--version"], { windowsHide: true, timeout: 10_000 });
+        await execFileAsync("winget", ["--version"], { windowsHide: true, timeout: 10_000, signal });
         this.cloudflaredInstallerAvailability = "available";
         this.cloudflaredInstallerExecutable = "winget";
       } catch {
+        if (signal?.aborted) throw new BridgeStartCancelledError();
         this.cloudflaredInstallerAvailability = "unavailable";
       }
       return;
@@ -1514,11 +1599,12 @@ export class BridgeManager implements vscode.Disposable {
     if (process.platform === "darwin") {
       for (const candidate of ["brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew"]) {
         try {
-          await execFileAsync(candidate, ["--version"], { timeout: 10_000 });
+          await execFileAsync(candidate, ["--version"], { timeout: 10_000, signal });
           this.cloudflaredInstallerAvailability = "available";
           this.cloudflaredInstallerExecutable = candidate;
           return;
         } catch {
+          if (signal?.aborted) throw new BridgeStartCancelledError();
           // Try the next standard Homebrew location.
         }
       }
@@ -1528,11 +1614,12 @@ export class BridgeManager implements vscode.Disposable {
     this.cloudflaredInstallerAvailability = "manual-only";
   }
 
-  private async checkCloudflared(): Promise<BridgeStatus> {
+  private async checkCloudflared(signal?: AbortSignal): Promise<BridgeStatus> {
+    if (signal?.aborted) throw new BridgeStartCancelledError();
     let lastError: unknown;
     for (const executable of this.cloudflaredExecutableCandidates()) {
       try {
-        const version = await execFileAsync(executable, ["--version"], { windowsHide: true, timeout: 10_000 });
+        const version = await execFileAsync(executable, ["--version"], { windowsHide: true, timeout: 10_000, signal });
         this.cloudflaredExecutable = executable;
         this.tunnelInstalled = true;
         this.tunnelVersion = String(version.stdout || version.stderr).trim().split(/\r?\n/)[0] || "cloudflared";
@@ -1540,23 +1627,26 @@ export class BridgeManager implements vscode.Disposable {
         this.lastError = undefined;
         return this.getStatus();
       } catch (error) {
+        if (signal?.aborted) throw new BridgeStartCancelledError();
         lastError = error;
       }
     }
     this.tunnelInstalled = false;
     this.tunnelConfigValid = false;
     this.tunnelVersion = undefined;
-    await this.refreshCloudflaredInstallerAvailability();
+    await this.refreshCloudflaredInstallerAvailability(signal);
     this.lastError = `cloudflared was not found: ${lastError instanceof Error ? lastError.message : String(lastError ?? "not installed")}`;
     return this.getStatus();
   }
 
-  private async checkNamedTunnel(refreshConfiguration = true): Promise<BridgeStatus> {
-    await this.checkCloudflared();
+  private async checkNamedTunnel(refreshConfiguration = true, signal?: AbortSignal): Promise<BridgeStatus> {
+    await this.checkCloudflared(signal);
+    if (signal?.aborted) throw new BridgeStartCancelledError();
     if (!this.tunnelInstalled) return this.getStatus();
 
     if (refreshConfiguration) {
       this.namedTunnelToken = await this.context.secrets.get(CLOUDFLARE_NAMED_TOKEN_SECRET) ?? "";
+      if (signal?.aborted) throw new BridgeStartCancelledError();
       this.restoreConfiguredNamedDomain();
       this.namedTunnelLocalPort = this.readNamedTunnelLocalPort();
       this.domain = this.configuredNamedDomain;
@@ -1611,6 +1701,7 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   async installCloudflared(): Promise<BridgeStatus> {
+    if (this.disposed) throw new BridgeStartCancelledError();
     if (this.installCloudflaredPromise) return this.installCloudflaredPromise;
     const installation = this.installCloudflaredInternal();
     this.installCloudflaredPromise = (async () => {
@@ -1714,6 +1805,7 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   async start(domain?: string, options: BridgeStartOptions = {}): Promise<BridgeStatus> {
+    if (this.disposed) throw new BridgeStartCancelledError();
     if (this.installCloudflaredPromise) {
       throw new Error(t("cloudflaredInstallBusy"));
     }
@@ -1722,6 +1814,7 @@ export class BridgeManager implements vscode.Disposable {
     // the state or generation, otherwise Start can report the stale running
     // snapshot and then be silently undone by the finishing Stop.
     if (this.stopPromise) await this.stopPromise;
+    if (this.disposed) throw new BridgeStartCancelledError();
     if (this.stoppingResources) throw new BridgeStartCancelledError();
     if (this.state === "running") return this.getStatus();
     if (this.startPromise && this.startPromiseGeneration === this.tunnelGeneration) return this.startPromise;
@@ -1731,7 +1824,15 @@ export class BridgeManager implements vscode.Disposable {
     this.getStatus();
     const isCloudflare = this.tunnelProvider === "cloudflare" || this.tunnelProvider === "cloudflare-named";
     if (options.automaticCheck) {
-      const tunnel = await this.checkTunnel();
+      let tunnel: BridgeStatus;
+      try {
+        tunnel = await this.checkTunnel();
+      } catch (error) {
+        if (error instanceof BridgeStartCancelledError || generation !== this.tunnelGeneration || this.stoppingResources || this.disposed) {
+          return this.getStatus();
+        }
+        throw error;
+      }
       if (generation !== this.tunnelGeneration || this.stoppingResources) return this.getStatus();
       if (tunnel.tunnelInstalled !== true || tunnel.tunnelConfigValid !== true) {
         this.state = "stopped";
@@ -1770,17 +1871,43 @@ export class BridgeManager implements vscode.Disposable {
     if (this.context.extensionMode !== vscode.ExtensionMode.Development || process.env.AGENTBRIDGE_BRIDGE_SMOKE_LOCAL !== "1") {
       throw new Error("Local Bridge smoke mode is available only in an Extension Development Host with AGENTBRIDGE_BRIDGE_SMOKE_LOCAL=1.");
     }
+    if (this.disposed) throw new BridgeStartCancelledError();
+    if (this.stopPromise) await this.stopPromise;
+    if (this.disposed || this.stoppingResources) throw new BridgeStartCancelledError();
     if (this.state === "running") return this.getStatus();
-    if (!this.routeToken) await this.initialize();
-    if (!vscode.workspace.workspaceFolders?.length) throw new Error("Open a workspace folder before starting the Bridge smoke server.");
+    if (this.startPromise && this.startPromiseGeneration === this.tunnelGeneration) return this.startPromise;
+    if (this.state === "starting" || this.tunnelCheckPromise) throw new BridgeStartCancelledError();
+    const generation = this.tunnelGeneration;
+    const startOperation = this.startLocalSmokeInternal(generation);
+    this.startPromise = startOperation;
+    this.startPromiseGeneration = generation;
+    try {
+      return await startOperation;
+    } finally {
+      if (this.startPromise === startOperation) {
+        this.startPromise = undefined;
+        this.startPromiseGeneration = undefined;
+      }
+    }
+  }
+
+  private async startLocalSmokeInternal(generation: number): Promise<BridgeStatus> {
     this.state = "starting";
     this.lastError = undefined;
     try {
+      if (!this.routeToken) await this.initialize();
+      this.assertStartGeneration(generation);
+      if (!vscode.workspace.workspaceFolders?.length) throw new Error("Open a workspace folder before starting the Bridge smoke server.");
       await this.startHttpServer();
+      this.assertStartGeneration(generation);
       this.state = "running";
       this.output.appendLine(`[bridge-smoke] local Streamable HTTP server running on 127.0.0.1:${this.localPort}`);
       return this.getStatus();
     } catch (error) {
+      if (error instanceof BridgeStartCancelledError || generation !== this.tunnelGeneration || this.disposed) {
+        await this.stopPromise?.catch(() => undefined);
+        return this.getStatus();
+      }
       this.lastError = error instanceof Error ? error.message : String(error);
       this.state = "error";
       await this.stopResources(false);
@@ -1792,6 +1919,7 @@ export class BridgeManager implements vscode.Disposable {
     this.assertStartGeneration(generation);
     this.state = "starting";
     this.lastError = undefined;
+    this.markPublicHealthChecking();
     // A manual start re-opens the QUIC door: the sticky http2 fallback only
     // applies within a single start-to-stop lifecycle.
     this.tunnelTransportFallback = undefined;
@@ -1827,8 +1955,10 @@ export class BridgeManager implements vscode.Disposable {
       this.assertStartGeneration(generation);
       await this.startTunnelOnce(generation);
       this.assertStartGeneration(generation);
+      if (!this.isTunnelProcessAlive()) throw new Error(`${this.tunnelProvider} tunnel closed before startup completed.`);
 
       this.state = "running";
+      this.schedulePublicHealthMonitor(generation);
       this.output.appendLine(`[bridge] running ${this.publicEndpointLogUrl()} -> 127.0.0.1:${this.localPort}`);
       return this.getStatus();
     } catch (error) {
@@ -1847,8 +1977,9 @@ export class BridgeManager implements vscode.Disposable {
   private async startHttpServer(): Promise<void> {
     const endpointPath = `/mcp/${this.routeToken}`;
     const healthPath = `/healthz/${this.routeToken}`;
+    const ownerGeneration = this.tunnelGeneration;
     const server = createHttpServer((request, response) => {
-      void this.handleHttpRequest(endpointPath, healthPath, request, response).catch((error) => {
+      void this.handleHttpRequest(server, ownerGeneration, endpointPath, healthPath, request, response).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         this.output.appendLine(`[bridge] HTTP error: ${message}`);
         writeJsonError(response, 500, message);
@@ -1857,6 +1988,7 @@ export class BridgeManager implements vscode.Disposable {
     this.httpServer = server;
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error & { code?: string }) => {
+        this.httpServersThatFailedToListen.add(server);
         server.off("listening", onListening);
         if (this.tunnelProvider === "cloudflare-named" && error.code === "EADDRINUSE") {
           reject(new Error(`Cloudflare Named Tunnel local port ${this.namedTunnelLocalPort} is already in use. Choose another port and update the Cloudflare published application Service URL.`));
@@ -1865,6 +1997,7 @@ export class BridgeManager implements vscode.Disposable {
         reject(error);
       };
       const onListening = () => {
+        this.httpServersThatListened.add(server);
         server.off("error", onError);
         resolve();
       };
@@ -1872,11 +2005,79 @@ export class BridgeManager implements vscode.Disposable {
       server.once("listening", onListening);
       server.listen(this.tunnelProvider === "cloudflare-named" ? this.namedTunnelLocalPort : 0, "127.0.0.1");
     });
+    if (this.httpServer !== server) {
+      await this.closeHttpServer(server);
+      throw new BridgeStartCancelledError();
+    }
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Bridge local HTTP server did not expose a TCP port.");
     this.localPort = address.port;
     this.sessionPruneTimer = setInterval(() => this.pruneSessions(), SESSION_PRUNE_INTERVAL_MS);
     this.sessionPruneTimer.unref?.();
+  }
+
+  private closeHttpServer(server: HttpServer): Promise<void> {
+    const existing = this.httpServerClosePromises.get(server);
+    if (existing) return existing;
+    const closing = new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        server.off("listening", onListening);
+        server.off("error", onError);
+      };
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        cleanup();
+        resolve();
+      };
+      const closeNow = () => {
+        cleanup();
+        try {
+          server.close(finish);
+        } catch {
+          finish();
+        }
+      };
+      const onListening = () => closeNow();
+      const onError = () => finish();
+      timer = setTimeout(() => {
+        try {
+          server.closeAllConnections();
+        } catch {
+          // Best effort before the bounded shutdown finishes.
+        }
+        if (server.listening) {
+          try {
+            server.close(() => undefined);
+          } catch {
+            // Already closed.
+          }
+        } else {
+          cleanup();
+          server.once("listening", () => {
+            try {
+              server.closeAllConnections();
+              server.close(() => undefined);
+            } catch {
+              // A late listen may already have been closed by its owner.
+            }
+          });
+        }
+        finish();
+      }, HTTP_SERVER_SHUTDOWN_TIMEOUT_MS);
+      timer.unref?.();
+      if (server.listening) closeNow();
+      else if (this.httpServersThatListened.has(server) || this.httpServersThatFailedToListen.has(server)) finish();
+      else {
+        server.once("listening", onListening);
+        server.once("error", onError);
+      }
+    });
+    this.httpServerClosePromises.set(server, closing);
+    return closing;
   }
 
   /** Terminate a cloudflared/ngrok tunnel child. Windows routes through
@@ -1895,9 +2096,10 @@ export class BridgeManager implements vscode.Disposable {
         return;
       } catch {
         // Process already gone or taskkill unavailable — fall through.
+        if (child.killed || child.exitCode !== null || child.signalCode !== null) return;
       }
     }
-    child.kill();
+    if (!child.killed && child.exitCode === null && child.signalCode === null) child.kill();
   }
 
   private async terminateTunnelProcess(child: ChildProcessWithoutNullStreams, timeoutMs = 2_000): Promise<boolean> {
@@ -1910,7 +2112,7 @@ export class BridgeManager implements vscode.Disposable {
     const closed = await this.waitForTunnelProcessClose(child, timeoutMs);
     if (!closed) {
       try {
-        child.kill();
+        child.kill(process.platform === "win32" ? undefined : "SIGKILL");
       } catch {
         // Best effort after the bounded close wait.
       }
@@ -2037,14 +2239,27 @@ export class BridgeManager implements vscode.Disposable {
       // Keep them available after close so startup can classify an early exit.
       lifecycle.isClosed = true;
       resolveClosed();
+      if (this.tunnelProcess === child && !this.stoppingResources && this.httpServer && this.state === "running") {
+        const message = `${commandLabel} closed unexpectedly without an exit event; reconnecting without stopping the local MCP server.`;
+        this.output.appendLine(`[bridge] ${message}`);
+        this.lastError = message;
+        if (this.tunnelProvider === "cloudflare") this.domain = "";
+        this.markPublicHealthChecking();
+        this.state = "starting";
+        this.revision += 1;
+        this.tunnelProcess = undefined;
+        this.beginTunnelRecovery();
+      }
     });
     child.on("error", (error) => {
+      lifecycle.abort();
       this.output.appendLine(`[${commandLabel}] process error: ${error.message}`);
       if (this.tunnelProcess !== child) return;
       this.lastError = error.message;
       if (!this.stoppingResources && this.httpServer && this.state === "running") {
         const generation = this.tunnelGeneration;
         if (this.tunnelProvider === "cloudflare") this.domain = "";
+        this.markPublicHealthChecking();
         this.state = "starting";
         this.revision += 1;
         void this.terminateTunnelProcess(child).then(() => {
@@ -2062,6 +2277,7 @@ export class BridgeManager implements vscode.Disposable {
         this.output.appendLine(`[bridge] ${message}`);
         this.lastError = message;
         if (this.tunnelProvider === "cloudflare") this.domain = "";
+        this.markPublicHealthChecking();
         this.state = "starting";
         this.revision += 1;
         void this.waitForTunnelProcessClose(child, 2_000).then(() => {
@@ -2074,7 +2290,7 @@ export class BridgeManager implements vscode.Disposable {
     return child;
   }
 
-  private async waitForTunnelStartup(child: ChildProcessWithoutNullStreams): Promise<void> {
+  private async waitForTunnelStartup(child: ChildProcessWithoutNullStreams, expectedGeneration?: number): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       let output = "";
@@ -2146,6 +2362,10 @@ export class BridgeManager implements vscode.Disposable {
           const matches = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/ig);
           const tunnelUrl = matches?.find((candidate) => new URL(candidate).hostname.toLowerCase() !== "api.trycloudflare.com");
           if (tunnelUrl) {
+            if (this.tunnelProcess !== child || this.stoppingResources || (expectedGeneration !== undefined && expectedGeneration !== this.tunnelGeneration)) {
+              finish(new BridgeStartCancelledError());
+              return;
+            }
             this.domain = new URL(tunnelUrl).hostname.toLowerCase();
             this.revision += 1;
             finish();
@@ -2210,6 +2430,148 @@ export class BridgeManager implements vscode.Disposable {
     return this.redactRouteToken(this.publicHealthUrl());
   }
 
+  private cancelPublicHealthMonitor(): void {
+    if (this.publicHealthMonitorTimer) {
+      clearTimeout(this.publicHealthMonitorTimer);
+      this.publicHealthMonitorTimer = undefined;
+      this.publicHealthMonitorTimerGeneration = undefined;
+    }
+    this.publicHealthMonitorAbort?.abort();
+    this.publicHealthMonitorAbort = undefined;
+    // Detach an aborted operation immediately. Its identity-guarded finally may
+    // still run later, but it must not block or clear a newer Bridge generation.
+    this.publicHealthMonitorPromise = undefined;
+    this.publicHealthMonitorPromiseGeneration = undefined;
+    this.publicHealthChecking = false;
+  }
+
+  private markPublicHealthChecking(): void {
+    this.cancelPublicHealthMonitor();
+    this.publicHealthState = "checking";
+    this.publicHealthChecking = false;
+    this.publicHealthFailureCount = 0;
+    this.publicHealthError = undefined;
+  }
+
+  private resetPublicHealthMonitor(): void {
+    this.cancelPublicHealthMonitor();
+    this.publicHealthState = "inactive";
+    this.publicHealthChecking = false;
+    this.publicHealthFailureCount = 0;
+    this.publicHealthLastCheckedAt = undefined;
+    this.publicHealthLastSuccessAt = undefined;
+    this.publicHealthError = undefined;
+  }
+
+  private recordPublicHealthSuccess(): void {
+    const recovered = this.publicHealthState === "unstable" || this.publicHealthState === "unhealthy";
+    const now = Date.now();
+    this.publicHealthState = "healthy";
+    this.publicHealthFailureCount = 0;
+    this.publicHealthLastCheckedAt = now;
+    this.publicHealthLastSuccessAt = now;
+    this.publicHealthError = undefined;
+    if (recovered) this.output.appendLine(`[bridge] ${t("publicHealthMonitorRecovered")}`);
+  }
+
+  private recordPublicHealthFailure(message: string): void {
+    const previousState = this.publicHealthState;
+    this.publicHealthFailureCount += 1;
+    this.publicHealthLastCheckedAt = Date.now();
+    this.publicHealthError = this.redactRouteToken(message);
+    this.publicHealthState = this.publicHealthFailureCount >= PUBLIC_HEALTH_UNHEALTHY_FAILURES ? "unhealthy" : "unstable";
+    if (this.publicHealthState !== previousState) {
+      this.output.appendLine(`[bridge] ${this.publicHealthState === "unhealthy"
+        ? t("publicHealthMonitorUnhealthy", this.publicHealthError)
+        : t("publicHealthMonitorUnstable", this.publicHealthError)}`);
+    }
+  }
+
+  private schedulePublicHealthMonitor(generation: number): void {
+    // Reject stale generations before touching the shared timer: an old check
+    // may settle after Stop -> Start and must not cancel the new Bridge timer.
+    if (this.stoppingResources || this.state !== "running" || !this.httpServer || !this.isTunnelProcessAlive() || generation !== this.tunnelGeneration) return;
+    // ngrok counts every public health request against its HTTP/S request quota.
+    // Keep its verified startup result and manual Check now action, but do not
+    // consume the user's quota with an idle background poll.
+    if (this.tunnelProvider === "ngrok") return;
+    if (this.publicHealthMonitorTimer) clearTimeout(this.publicHealthMonitorTimer);
+    const timer = setTimeout(() => {
+      if (this.publicHealthMonitorTimer !== timer || this.publicHealthMonitorTimerGeneration !== generation) return;
+      this.publicHealthMonitorTimer = undefined;
+      this.publicHealthMonitorTimerGeneration = undefined;
+      void this.runPublicHealthMonitorCheck(generation).catch((error) => {
+        if (!this.stoppingResources && this.state === "running" && generation === this.tunnelGeneration) {
+          this.recordPublicHealthFailure(error instanceof Error ? error.message : String(error));
+        }
+      }).finally(() => {
+        this.schedulePublicHealthMonitor(generation);
+      });
+    }, PUBLIC_HEALTH_MONITOR_INTERVAL_MS);
+    this.publicHealthMonitorTimer = timer;
+    this.publicHealthMonitorTimerGeneration = generation;
+    timer.unref?.();
+  }
+
+  private async runPublicHealthMonitorCheck(generation: number): Promise<void> {
+    if (this.publicHealthMonitorPromise && this.publicHealthMonitorPromiseGeneration === generation) return this.publicHealthMonitorPromise;
+    if (this.stoppingResources || this.state !== "running" || !this.httpServer || !this.isTunnelProcessAlive() || !this.domain || generation !== this.tunnelGeneration) return;
+    const abort = new AbortController();
+    this.publicHealthMonitorAbort = abort;
+    this.publicHealthChecking = true;
+    const operation = (async () => {
+      let failureMessage = t("publicHealthMonitorUnknownFailure");
+      type HealthOutcome = { kind: "result"; healthy: boolean } | { kind: "error"; error: unknown } | { kind: "timeout" };
+      let resolveBudget!: (outcome: HealthOutcome) => void;
+      let budgetDidExpire = false;
+      const budgetDeadline = Date.now() + PUBLIC_HEALTH_MONITOR_BUDGET_MS;
+      const budgetExpired = new Promise<HealthOutcome>((resolve) => { resolveBudget = resolve; });
+      const budgetTimer = setTimeout(() => {
+        budgetDidExpire = true;
+        abort.abort();
+        resolveBudget({ kind: "timeout" });
+      }, PUBLIC_HEALTH_MONITOR_BUDGET_MS);
+      budgetTimer.unref?.();
+      const requestOutcome = this.requestPublicHealth((message) => {
+        if (failureMessage === t("publicHealthMonitorUnknownFailure")) failureMessage = message;
+      }, abort.signal).then<HealthOutcome, HealthOutcome>(
+        (healthy) => ({ kind: "result", healthy }),
+        (error) => ({ kind: "error", error }),
+      );
+      let outcome = await Promise.race([requestOutcome, budgetExpired]);
+      clearTimeout(budgetTimer);
+      if (budgetDidExpire || Date.now() >= budgetDeadline) outcome = { kind: "timeout" };
+      if (outcome.kind === "timeout") {
+        failureMessage = t("publicHealthMonitorBudgetExceeded", Math.round(PUBLIC_HEALTH_MONITOR_BUDGET_MS / 1_000));
+      } else if (outcome.kind === "error") {
+        failureMessage = this.redactRouteToken(outcome.error instanceof Error ? outcome.error.message : String(outcome.error));
+      }
+      if ((abort.signal.aborted && outcome.kind !== "timeout") || this.stoppingResources || this.state !== "running" || !this.httpServer || generation !== this.tunnelGeneration) return;
+      if (outcome.kind === "result" && outcome.healthy) this.recordPublicHealthSuccess();
+      else this.recordPublicHealthFailure(failureMessage);
+    })();
+    this.publicHealthMonitorPromise = operation;
+    this.publicHealthMonitorPromiseGeneration = generation;
+    try {
+      await operation;
+    } finally {
+      if (this.publicHealthMonitorPromise === operation) {
+        this.publicHealthMonitorPromise = undefined;
+        this.publicHealthMonitorPromiseGeneration = undefined;
+        this.publicHealthChecking = false;
+      }
+      if (this.publicHealthMonitorAbort === abort) this.publicHealthMonitorAbort = undefined;
+    }
+  }
+
+  async checkPublicHealth(): Promise<BridgeStatus> {
+    if (this.state !== "running" || !this.httpServer || !this.isTunnelProcessAlive() || !this.domain) {
+      throw new Error(t("publicHealthCheckRequiresRunning"));
+    }
+    await this.runPublicHealthMonitorCheck(this.tunnelGeneration);
+    return this.getStatus();
+  }
+
   private cloudflaredPrecheckFailure(
     child: ChildProcessWithoutNullStreams,
   ): { kind: CloudflaredPrecheckFailureKind; error: Error } | undefined {
@@ -2259,7 +2621,7 @@ export class BridgeManager implements vscode.Disposable {
     return { report, flush };
   }
 
-  private createPublicHealthAbortController(externalSignal?: AbortSignal): { signal: AbortSignal; dispose: () => void } {
+  private createPublicHealthAbortController(externalSignal?: AbortSignal): { signal: AbortSignal; abort: () => void; dispose: () => void } {
     const controller = new AbortController();
     const abortFromExternal = () => controller.abort();
     if (externalSignal?.aborted) abortFromExternal();
@@ -2267,11 +2629,39 @@ export class BridgeManager implements vscode.Disposable {
     const timer = setTimeout(() => controller.abort(), PUBLIC_HEALTH_REQUEST_TIMEOUT_MS);
     return {
       signal: controller.signal,
+      abort: () => controller.abort(),
       dispose: () => {
         clearTimeout(timer);
         externalSignal?.removeEventListener("abort", abortFromExternal);
       },
     };
+  }
+
+  private async runWithHardAbort<T>(operation: () => PromiseLike<T>, signal: AbortSignal): Promise<T> {
+    if (signal.aborted) throw new Error("Public health request was aborted.");
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () => finish(() => reject(new Error("Public health request was aborted.")));
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        void Promise.resolve(operation()).then(
+          (value) => finish(() => resolve(value)),
+          (error) => finish(() => reject(error)),
+        );
+      } catch (error) {
+        finish(() => reject(error));
+      }
+    });
+  }
+
+  private async fetchWithHardAbort(input: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+    return this.runWithHardAbort(() => fetch(input, { ...init, signal }), signal);
   }
 
   private async waitForPublicHealthRetry(signal?: AbortSignal): Promise<void> {
@@ -2291,18 +2681,21 @@ export class BridgeManager implements vscode.Disposable {
   private async requestPublicHealth(reportFailure: (message: string) => void, signal?: AbortSignal): Promise<boolean> {
     const requestAbort = this.createPublicHealthAbortController(signal);
     try {
-      const response = await fetch(this.publicHealthUrl(), {
+      const response = await this.fetchWithHardAbort(this.publicHealthUrl(), {
         method: "GET",
         cache: "no-store",
+        redirect: "manual",
         headers: this.tunnelProvider === "ngrok" ? { "ngrok-skip-browser-warning": "true" } : undefined,
-        signal: requestAbort.signal,
-      });
+      }, requestAbort.signal);
       if (!response.ok) {
         reportFailure(t("publicHealthSystemHttpFailure", response.status));
-        await response.body?.cancel().catch(() => undefined);
+        // Releasing an error body is best-effort. Awaiting a misbehaving stream
+        // here would defeat the monitor's overall time budget.
+        requestAbort.abort();
+        void response.body?.cancel().catch(() => undefined);
         return false;
       }
-      const payload = await response.json().catch(() => undefined) as { ok?: unknown } | undefined;
+      const payload = await this.runWithHardAbort(() => response.json(), requestAbort.signal).catch(() => undefined) as { ok?: unknown } | undefined;
       if (payload?.ok !== true) {
         reportFailure(t("publicHealthSystemPayloadFailure", JSON.stringify(payload)));
       }
@@ -2321,7 +2714,7 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   private assertStartGeneration(generation: number): void {
-    if (generation !== this.tunnelGeneration || this.stoppingResources) {
+    if (generation !== this.tunnelGeneration || this.stoppingResources || this.disposed) {
       throw new BridgeStartCancelledError();
     }
   }
@@ -2341,7 +2734,17 @@ export class BridgeManager implements vscode.Disposable {
     if (signal?.aborted) return false;
     if (ip) {
       reportFailure(`DoH fallback: ${hostname} -> ${ip}, sending direct health request...`);
-      return this.sendPublicHealthRequest(hostname, ip, reportFailure, signal);
+      if (await this.sendPublicHealthRequest(hostname, ip, reportFailure, signal)) return true;
+      if (signal?.aborted) return false;
+      if (this.dohCache.hostname === hostname && this.dohCache.ip === ip) {
+        this.dohCache = { hostname: "", ip: "", at: 0, generation: -1 };
+      }
+      const refreshedIp = await this.resolveHostViaDoh(hostname, signal, true);
+      if (refreshedIp && refreshedIp !== ip) {
+        reportFailure(`DoH fallback: refreshed ${hostname} -> ${refreshedIp}, retrying direct health request...`);
+        return this.sendPublicHealthRequest(hostname, refreshedIp, reportFailure, signal);
+      }
+      return false;
     }
     if (this.tunnelProvider !== "cloudflare" || !hostname.endsWith(".trycloudflare.com")) {
       reportFailure(`DoH fallback: could not resolve ${hostname} via any DoH endpoint`);
@@ -2368,60 +2771,104 @@ export class BridgeManager implements vscode.Disposable {
     return await new Promise<boolean>((resolve) => {
       const requestAbort = this.createPublicHealthAbortController(signal);
       let settled = false;
+      const onAbort = () => finish(false);
       const finish = (healthy: boolean) => {
         if (settled) return;
         settled = true;
+        requestAbort.signal.removeEventListener("abort", onAbort);
         requestAbort.dispose();
         resolve(healthy);
       };
-      const req = request(
-        {
-          hostname: ip,
-          port: 443,
-          servername: hostname,
-          path: `/healthz/${this.routeToken}`,
-          method: "GET",
-          headers: {
-            Host: hostname,
-            ...(this.tunnelProvider === "ngrok" ? { "ngrok-skip-browser-warning": "true" } : {}),
+      if (requestAbort.signal.aborted) {
+        finish(false);
+        return;
+      }
+      requestAbort.signal.addEventListener("abort", onAbort, { once: true });
+      let responseReceived = false;
+      let req: ReturnType<typeof request>;
+      try {
+        req = request(
+          {
+            hostname: ip,
+            port: 443,
+            servername: hostname,
+            path: `/healthz/${this.routeToken}`,
+            method: "GET",
+            headers: {
+              Host: hostname,
+              ...(this.tunnelProvider === "ngrok" ? { "ngrok-skip-browser-warning": "true" } : {}),
+            },
+            signal: requestAbort.signal,
           },
-          signal: requestAbort.signal,
-        },
-        (response) => {
-          if (!response.statusCode || response.statusCode >= 400) {
-            reportFailure(`DoH fallback: direct request got HTTP ${response.statusCode ?? "none"}`);
-            response.resume();
-            finish(false);
-            return;
-          }
-          let body = "";
-          response.setEncoding("utf8");
-          response.on("data", (chunk: string) => (body += chunk));
-          response.on("end", () => {
-            try {
-              const payload = JSON.parse(body) as { ok?: unknown } | undefined;
-              finish(payload?.ok === true);
-            } catch {
+          (response) => {
+            responseReceived = true;
+            let body = "";
+            const failResponse = (reason: string) => {
+              if (settled) return;
+              if (!signal?.aborted) reportFailure(`DoH fallback: direct response ${reason}`);
               finish(false);
+            };
+            response.once("aborted", () => failResponse("aborted"));
+            response.once("error", (error) => failResponse(`error: ${error instanceof Error ? error.message : String(error)}`));
+            response.once("close", () => {
+              if (!response.complete) failResponse("closed before completion");
+            });
+            if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+              reportFailure(`DoH fallback: direct request got HTTP ${response.statusCode ?? "none"}`);
+              requestAbort.abort();
+              req.destroy();
+              response.resume();
+              finish(false);
+              return;
             }
-          });
-        },
-      );
+            response.setEncoding("utf8");
+            response.on("data", (chunk: string) => (body += chunk));
+            response.on("end", () => {
+              try {
+                const payload = JSON.parse(body) as { ok?: unknown } | undefined;
+                finish(payload?.ok === true);
+              } catch {
+                finish(false);
+              }
+            });
+          },
+        );
+      } catch (error) {
+        if (!signal?.aborted) {
+          reportFailure(`DoH fallback: direct request error: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        finish(false);
+        return;
+      }
       req.on("error", (error) => {
+        if (settled) return;
         if (!signal?.aborted) {
           reportFailure(`DoH fallback: direct request error: ${error instanceof Error ? error.message : String(error)}`);
         }
         finish(false);
       });
-      req.on("close", requestAbort.dispose);
-      req.end();
+      req.once("close", () => {
+        if (!settled && !responseReceived) {
+          if (!signal?.aborted) reportFailure("DoH fallback: direct request closed before receiving a response");
+          finish(false);
+        }
+      });
+      try {
+        req.end();
+      } catch (error) {
+        if (!signal?.aborted) {
+          reportFailure(`DoH fallback: direct request error: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        finish(false);
+      }
     });
   }
 
   /** Ask a DoH endpoint for an A record of the given hostname. Caches the
    * result briefly to avoid hammering the DoH server during startup retries. */
-  private async resolveHostViaDoh(hostname: string, signal?: AbortSignal): Promise<string | null> {
-    if (this.dohCache.hostname === hostname && Date.now() - this.dohCache.at < PUBLIC_HEALTH_DOH_CACHE_TTL_MS) {
+  private async resolveHostViaDoh(hostname: string, signal?: AbortSignal, bypassCache = false): Promise<string | null> {
+    const lookupGeneration = this.tunnelGeneration;
+    if (!bypassCache && this.dohCache.hostname === hostname && this.dohCache.generation === lookupGeneration && Date.now() - this.dohCache.at < PUBLIC_HEALTH_DOH_CACHE_TTL_MS) {
       return this.dohCache.ip;
     }
     for (const endpoint of PUBLIC_HEALTH_DOH_ENDPOINTS) {
@@ -2429,19 +2876,21 @@ export class BridgeManager implements vscode.Disposable {
       const requestAbort = this.createPublicHealthAbortController(signal);
       try {
         const url = `${endpoint}?name=${encodeURIComponent(hostname)}&type=A&rand=${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const response = await fetch(url, {
+        const response = await this.fetchWithHardAbort(url, {
           cache: "no-store",
+          redirect: "manual",
           headers: endpoint.includes("dns-query") ? { accept: "application/dns-json" } : undefined,
-          signal: requestAbort.signal,
-        });
+        }, requestAbort.signal);
         if (!response.ok) {
-          await response.body?.cancel().catch(() => undefined);
+          requestAbort.abort();
+          void response.body?.cancel().catch(() => undefined);
           continue;
         }
-        const payload = await response.json() as { Answer?: Array<{ type: number; data: string }> };
-        const record = payload.Answer?.find((answer) => answer.type === 1);
+        const payload = await this.runWithHardAbort(() => response.json(), requestAbort.signal) as { Answer?: Array<{ type: number; data: string }> };
+        const record = payload.Answer?.find((answer) => answer.type === 1 && isPublicIpv4Address(answer.data));
         if (record?.data) {
-          this.dohCache = { hostname, ip: record.data, at: Date.now() };
+          if (signal?.aborted || lookupGeneration !== this.tunnelGeneration) return null;
+          this.dohCache = { hostname, ip: record.data, at: Date.now(), generation: lookupGeneration };
           return record.data;
         }
       } catch {
@@ -2453,7 +2902,7 @@ export class BridgeManager implements vscode.Disposable {
     return null;
   }
 
-  private dohCache: { hostname: string; ip: string; at: number } = { hostname: "", ip: "", at: 0 };
+  private dohCache: { hostname: string; ip: string; at: number; generation: number } = { hostname: "", ip: "", at: 0, generation: -1 };
 
   private async waitForPublicHealth(child: ChildProcessWithoutNullStreams): Promise<void> {
     const deadline = Date.now() + PUBLIC_HEALTH_STARTUP_TIMEOUT_MS;
@@ -2496,6 +2945,9 @@ export class BridgeManager implements vscode.Disposable {
     try {
       const assertTunnelAvailable = async (): Promise<void> => {
         const processLifecycle = this.tunnelProcessLifecycles.get(child);
+        if (processLifecycle?.exitSignal.aborted && child.exitCode === null && child.signalCode === null && !processLifecycle.isClosed) {
+          throw new Error(this.lastError ?? `${this.tunnelProvider} tunnel process became unavailable during startup.`);
+        }
         if (child.exitCode !== null || child.signalCode !== null || processLifecycle?.isClosed) {
           // exit precedes close; briefly allow both output streams and a final
           // unterminated diagnostic line to drain before classifying the exit.
@@ -2571,7 +3023,7 @@ export class BridgeManager implements vscode.Disposable {
     const child = this.startTunnelProcess(protocolOverride);
     try {
       try {
-        await this.waitForTunnelStartup(child);
+        await this.waitForTunnelStartup(child, expectedGeneration);
         await this.waitForPublicHealth(child);
       } catch (error) {
         // One self-heal attempt per bridge session: when "auto" QUIC proves
@@ -2604,6 +3056,7 @@ export class BridgeManager implements vscode.Disposable {
       }
       if (expectedGeneration !== undefined) this.assertStartGeneration(expectedGeneration);
       if (this.tunnelProcess !== child) throw new Error(`${this.tunnelProvider} tunnel changed before health verification completed.`);
+      this.recordPublicHealthSuccess();
       this.output.appendLine(`[bridge] public health verified: ${this.publicHealthLogUrl()}`);
     } catch (error) {
       if (this.tunnelProcess === child) this.tunnelProcess = undefined;
@@ -2616,12 +3069,25 @@ export class BridgeManager implements vscode.Disposable {
     if (this.stoppingResources || !this.httpServer) return;
     if (this.tunnelRecoveryPromise && this.tunnelRecoveryGeneration === this.tunnelGeneration) return;
     const generation = this.tunnelGeneration;
+    this.tunnelRecoveryAbort?.abort();
+    const recoveryAbort = new AbortController();
+    this.tunnelRecoveryAbort = recoveryAbort;
     const recovery = (async () => {
       let attempt = 0;
-      while (!this.stoppingResources && this.httpServer && generation === this.tunnelGeneration) {
+      while (!recoveryAbort.signal.aborted && !this.stoppingResources && this.httpServer && generation === this.tunnelGeneration) {
         const delayMs = TUNNEL_RESTART_BACKOFF_MS[Math.min(attempt, TUNNEL_RESTART_BACKOFF_MS.length - 1)];
-        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
-        if (this.stoppingResources || !this.httpServer || generation !== this.tunnelGeneration) return;
+        await new Promise<void>((resolve) => {
+          const finish = () => {
+            clearTimeout(timer);
+            recoveryAbort.signal.removeEventListener("abort", finish);
+            resolve();
+          };
+          const timer = setTimeout(finish, delayMs);
+          timer.unref?.();
+          recoveryAbort.signal.addEventListener("abort", finish, { once: true });
+          if (recoveryAbort.signal.aborted) finish();
+        });
+        if (recoveryAbort.signal.aborted || this.stoppingResources || !this.httpServer || generation !== this.tunnelGeneration) return;
         try {
           this.output.appendLine(`[bridge] ${this.tunnelProvider} reconnect attempt ${attempt + 1}...`);
           await this.startTunnelOnce(generation);
@@ -2629,6 +3095,7 @@ export class BridgeManager implements vscode.Disposable {
           this.state = "running";
           this.lastError = undefined;
           this.revision += 1;
+          this.schedulePublicHealthMonitor(generation);
           this.output.appendLine(`[bridge] ${this.tunnelProvider} tunnel recovered: ${this.publicEndpointLogUrl()}`);
           return;
         } catch (error) {
@@ -2645,13 +3112,19 @@ export class BridgeManager implements vscode.Disposable {
         this.tunnelRecoveryPromise = undefined;
         this.tunnelRecoveryGeneration = undefined;
       }
+      if (this.tunnelRecoveryAbort === recoveryAbort) this.tunnelRecoveryAbort = undefined;
     });
     this.tunnelRecoveryGeneration = generation;
     this.tunnelRecoveryPromise = trackedRecovery;
   }
 
-  private async handleHttpRequest(endpointPath: string, healthPath: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  private async handleHttpRequest(ownerServer: HttpServer, ownerGeneration: number, endpointPath: string, healthPath: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (this.stoppingResources || this.disposed || this.httpServer !== ownerServer || this.tunnelGeneration !== ownerGeneration) {
+      response.setHeader("Cache-Control", "no-store");
+      writeJsonError(response, 503, "Bridge is stopping.");
+      return;
+    }
     if (url.pathname === healthPath) {
       if (request.method !== "GET" && request.method !== "HEAD") {
         writeJsonError(response, 405, "Method not allowed.");
@@ -2702,7 +3175,7 @@ export class BridgeManager implements vscode.Disposable {
 
     if (request.method === "POST") {
       const body = await readJsonBody(request);
-      await this.handlePost(request, response, body, sessionId);
+      await this.handlePost(ownerServer, ownerGeneration, request, response, body, sessionId);
       return;
     }
 
@@ -2719,7 +3192,14 @@ export class BridgeManager implements vscode.Disposable {
     writeJsonError(response, 405, "Method not allowed.");
   }
 
-  private async handlePost(request: IncomingMessage, response: ServerResponse, body: unknown, sessionId: string | undefined): Promise<void> {
+  private async handlePost(ownerServer: HttpServer, ownerGeneration: number, request: IncomingMessage, response: ServerResponse, body: unknown, sessionId: string | undefined): Promise<void> {
+    // Reading the request body above is asynchronous. Stop followed by Start may
+    // replace the listener while an old POST is still being parsed, so recheck
+    // ownership before it can touch current sessions or admission counters.
+    if (this.stoppingResources || this.disposed || this.httpServer !== ownerServer || this.tunnelGeneration !== ownerGeneration) {
+      writeJsonError(response, 503, "Bridge is stopping.");
+      return;
+    }
     // If sessionId is provided, route to existing session
     if (sessionId) {
       const session = this.sessions.get(sessionId);
@@ -2756,12 +3236,14 @@ export class BridgeManager implements vscode.Disposable {
     const releaseInitializationReservation = () => {
       if (!reservationActive) return;
       reservationActive = false;
-      this.pendingInitializations = Math.max(0, this.pendingInitializations - 1);
+      if (this.httpServer === ownerServer && this.tunnelGeneration === ownerGeneration) {
+        this.pendingInitializations = Math.max(0, this.pendingInitializations - 1);
+      }
     };
     this.activeRequests += 1;
     let transport: StreamableHTTPServerTransport | undefined;
     try {
-      const created = this.createSession(releaseInitializationReservation);
+      const created = this.createSession(ownerServer, ownerGeneration, releaseInitializationReservation);
       transport = created.transport;
       const server = created.server;
       await server.connect(transport);
@@ -2824,7 +3306,7 @@ export class BridgeManager implements vscode.Disposable {
     this.destroySession(sessionId);
   }
 
-  private createSession(onSessionInitialized?: () => void): { transport: StreamableHTTPServerTransport; server: McpServer } {
+  private createSession(ownerServer: HttpServer, ownerGeneration: number, onSessionInitialized?: () => void): { transport: StreamableHTTPServerTransport; server: McpServer } {
     const instructions = this.readOnlyMode
       ? `${BRIDGE_SERVER_INSTRUCTIONS}\n\nRead-only mode is ACTIVE: apply_patch, run_command, send_command_input, and terminate_command are disabled. Do not attempt file modifications or command execution; report findings and proposed changes to the user instead.`
       : BRIDGE_SERVER_INSTRUCTIONS;
@@ -2840,8 +3322,12 @@ export class BridgeManager implements vscode.Disposable {
       eventStore: new BoundedInMemoryEventStore(),
       keepAliveMs: SESSION_KEEPALIVE_INTERVAL_MS,
       retryInterval: SESSION_RETRY_INTERVAL_MS,
-      onsessioninitialized: (sid) => {
+      onsessioninitialized: async (sid) => {
         onSessionInitialized?.();
+        if (this.stoppingResources || this.disposed || this.httpServer !== ownerServer || this.tunnelGeneration !== ownerGeneration) {
+          await Promise.allSettled([transport.close(), server.close()]);
+          return;
+        }
         this.sessions.set(sid, {
           transport,
           server,
@@ -3165,23 +3651,49 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   async stop(): Promise<BridgeStatus> {
-    if (this.stopPromise) {
-      await this.stopPromise;
-      return this.getStatus();
-    }
-    const stopOperation = this.stopResources(true);
-    this.stopPromise = stopOperation;
-    try {
-      await stopOperation;
-    } finally {
-      if (this.stopPromise === stopOperation) this.stopPromise = undefined;
-    }
+    await this.stopResources(true);
     return this.getStatus();
   }
 
   private async stopResources(markStopped: boolean): Promise<void> {
+    if (markStopped) this.stopMarkStoppedRequested = true;
+    if (this.stopPromise) {
+      await this.stopPromise;
+      return;
+    }
+    let stopOperation!: Promise<void>;
+    stopOperation = (async () => {
+      try {
+        await this.performStopResources();
+        if (this.stopMarkStoppedRequested) {
+          this.state = "stopped";
+          this.lastError = undefined;
+          this.output.appendLine("[bridge] stopped");
+        }
+      } finally {
+        this.stoppingResources = false;
+      }
+    })();
+    this.stopPromise = stopOperation;
+    try {
+      await stopOperation;
+    } finally {
+      if (this.stopPromise === stopOperation) {
+        this.stopPromise = undefined;
+        this.stopMarkStoppedRequested = false;
+      }
+    }
+  }
+
+  private async performStopResources(): Promise<void> {
     this.stoppingResources = true;
     this.tunnelGeneration += 1;
+    this.resetPublicHealthMonitor();
+    this.tunnelRecoveryAbort?.abort();
+    this.tunnelRecoveryAbort = undefined;
+    const tunnelCheck = this.tunnelCheckPromise;
+    this.tunnelCheckAbort?.abort();
+    if (tunnelCheck) await tunnelCheck.catch(() => undefined);
     if (this.sessionPruneTimer) {
       clearInterval(this.sessionPruneTimer);
       this.sessionPruneTimer = undefined;
@@ -3200,52 +3712,24 @@ export class BridgeManager implements vscode.Disposable {
 
     const server = this.httpServer;
     this.httpServer = undefined;
-    if (server) {
-      await new Promise<void>((resolve) => {
-        let settled = false;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          if (timer) clearTimeout(timer);
-          resolve();
-        };
-
-        if (!server.listening) {
-          finish();
-          return;
-        }
-
-        timer = setTimeout(() => {
-          try {
-            server.closeAllConnections();
-          } finally {
-            finish();
-          }
-        }, HTTP_SERVER_SHUTDOWN_TIMEOUT_MS);
-
-        try {
-          server.close(() => finish());
-        } catch {
-          finish();
-        }
-      });
-    }
+    if (server) await this.closeHttpServer(server);
+    // An initialization that was already inside the MCP SDK may settle while
+    // the tunnel/server are closing. Sweep again after the listener is closed;
+    // onsessioninitialized also rejects late arrivals below.
+    for (const sid of [...this.sessions.keys()]) this.destroySession(sid);
+    this.pendingInitializations = 0;
+    this.activeRequests = 0;
     this.localPort = undefined;
     if (this.tunnelProvider === "cloudflare") this.domain = "";
-    if (markStopped) {
-      this.state = "stopped";
-      this.lastError = undefined;
-      this.output.appendLine("[bridge] stopped");
-    }
-    this.stoppingResources = false;
   }
 
   async disposeAsync(): Promise<void> {
+    this.disposed = true;
     await this.stopResources(true);
   }
 
   dispose(): void {
+    this.disposed = true;
     void this.stopResources(true);
   }
 }

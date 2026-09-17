@@ -49,3 +49,25 @@ test("start command treats cancellation as a normal status return and propagates
     for (const disposable of context.__subscriptions.reverse()) disposable.dispose();
   }
 });
+
+test("deactivation cancels persistent auto-start before it can revive the disposed Bridge", async () => {
+  vscodeTest.reset();
+  vscodeTest.setConfig("agentbridge.bridge.persistentMode", true);
+  const context = makeContext();
+  const originalStart = BridgeManager.prototype.start;
+  let starts = 0;
+  BridgeManager.prototype.start = async function () {
+    starts += 1;
+    return this.getStatus();
+  };
+
+  try {
+    activate(context);
+    await deactivate();
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+    assert.equal(starts, 0, "the delayed persistent callback must not start a disposed Bridge");
+  } finally {
+    BridgeManager.prototype.start = originalStart;
+    for (const disposable of context.__subscriptions.reverse()) disposable.dispose();
+  }
+});

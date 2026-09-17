@@ -12,6 +12,7 @@ export class FakeChildProcess extends EventEmitter {
   readonly stdin = new FakeStream();
   readonly pid: number;
   killed = false;
+  killCalls = 0;
   autoExitOnKill = true;
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
@@ -21,10 +22,12 @@ export class FakeChildProcess extends EventEmitter {
     this.pid = pid;
   }
 
-  kill(): boolean {
+  kill(signal: NodeJS.Signals | number = "SIGTERM"): boolean {
+    this.killCalls += 1;
     this.killed = true;
     if (this.autoExitOnKill && this.exitCode === null && this.signalCode === null) {
-      queueMicrotask(() => this.emitExit(null, "SIGTERM"));
+      const normalizedSignal = typeof signal === "string" ? signal : "SIGTERM";
+      queueMicrotask(() => this.emitExit(null, normalizedSignal));
     }
     return true;
   }
@@ -59,7 +62,8 @@ export class FakeChildProcess extends EventEmitter {
 
 let nextPid = 5000;
 const spawned: FakeChildProcess[] = [];
-let execHandler: ((command: string, args: readonly string[]) => { stdout?: string; stderr?: string; error?: Error }) | undefined;
+type ExecResult = { stdout?: string; stderr?: string; error?: Error };
+let execHandler: ((command: string, args: readonly string[]) => ExecResult | Promise<ExecResult>) | undefined;
 
 export const childProcessTest = {
   spawned,
@@ -81,14 +85,33 @@ export function spawn(command: string, args: readonly string[] = []): FakeChildP
 
 export function execFile(command: string, argsOrCallback?: unknown, optionsOrCallback?: unknown, maybeCallback?: unknown): void {
   const args = Array.isArray(argsOrCallback) ? argsOrCallback.map(String) : [];
+  const options = [optionsOrCallback, argsOrCallback].find((value) => value && typeof value === "object" && !Array.isArray(value)) as { signal?: AbortSignal } | undefined;
   const callback = [maybeCallback, optionsOrCallback, argsOrCallback].find((value) => typeof value === "function") as
     | ((error: Error | null, stdout?: string, stderr?: string) => void)
     | undefined;
   if (!callback) throw new Error("fake execFile requires a callback");
   queueMicrotask(() => {
-    const result = execHandler?.(command, args) ?? defaultExec(command, args);
-    if (result.error) callback(result.error, result.stdout ?? "", result.stderr ?? "");
-    else callback(null, result.stdout ?? "", result.stderr ?? "");
+    let settled = false;
+    const finish = (error: Error | null, result: ExecResult = {}) => {
+      if (settled) return;
+      settled = true;
+      options?.signal?.removeEventListener("abort", onAbort);
+      callback(error, result.stdout ?? "", result.stderr ?? "");
+    };
+    const onAbort = () => {
+      const error = new Error("The operation was aborted.");
+      error.name = "AbortError";
+      finish(error);
+    };
+    options?.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options?.signal?.aborted) {
+      onAbort();
+      return;
+    }
+    void Promise.resolve(execHandler?.(command, args) ?? defaultExec(command, args)).then(
+      (result) => finish(result.error ?? null, result),
+      (error) => finish(error instanceof Error ? error : new Error(String(error))),
+    );
   });
 }
 

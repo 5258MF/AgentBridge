@@ -252,3 +252,278 @@ test("activity history clear button stays disabled for an all-completed todo lis
   harness.element("clearHistoryButton").click();
   assert.equal(harness.posted.some((message: any) => message.type === "clearActivityHistory"), false);
 });
+
+test("webview presents public health compactly and exposes a manual check", () => {
+  const manager = makeManager();
+  const provider = new BridgePanelProvider(manager, Promise.resolve());
+  const view = createFakeWebviewView();
+  provider.resolveWebviewView(view);
+  const harness = executePanelHtml(view.webview.html);
+  const checkedAt = new Date().toISOString();
+
+  harness.dispatchMessage({
+    type: "status",
+    status: {
+      ...manager.getStatus(),
+      state: "running",
+      tunnelChecked: true,
+      tunnelInstalled: true,
+      tunnelConfigValid: true,
+      publicUrl: "https://agentbridge-test.example.com/mcp/redacted-test-token",
+      publicHealthState: "healthy",
+      publicHealthAvailable: true,
+      publicHealthAutomatic: true,
+      publicHealthChecking: false,
+      publicHealthFailureCount: 0,
+      publicHealthLastCheckedAt: checkedAt,
+      publicHealthLastSuccessAt: checkedAt,
+    },
+    persistentMode: false,
+    quickTunnelCopied: false,
+  });
+  assert.equal(harness.element("sessionPublicHealthBadge").textContent, "Public healthy");
+  assert.match(harness.element("sessionPublicHealthBadge").className, /state-healthy/);
+  assert.equal(harness.element("configPublicHealthBadge").textContent, "Public healthy");
+  assert.equal(harness.element("connectionBadge").textContent, "Public healthy", "collapsed Connection Settings must expose public health");
+  assert.match(harness.element("connectionBadge").className, /agentbridge-public-health-badge state-healthy/);
+  assert.equal(harness.element("publicHealthDetails").textContent, "The public endpoint is reachable.");
+  assert.match(harness.element("publicHealthMeta").textContent, /Last checked:/);
+  assert.equal(harness.element("checkPublicHealthButton").disabled, false);
+
+  harness.dispatchMessage({
+    type: "status",
+    status: {
+      ...manager.getStatus(),
+      state: "running",
+      tunnelChecked: true,
+      tunnelInstalled: true,
+      tunnelConfigValid: true,
+      publicUrl: "https://agentbridge-test.example.com/mcp/redacted-test-token",
+      publicHealthState: "unhealthy",
+      publicHealthAvailable: true,
+      publicHealthAutomatic: true,
+      publicHealthChecking: false,
+      publicHealthFailureCount: 2,
+      publicHealthLastCheckedAt: checkedAt,
+      publicHealthLastSuccessAt: checkedAt,
+      publicHealthError: "Public health check returned HTTP 502.",
+    },
+    persistentMode: false,
+    quickTunnelCopied: false,
+  });
+  assert.equal(harness.element("sessionPublicHealthBadge").textContent, "Public unavailable");
+  assert.match(harness.element("sessionPublicHealthBadge").className, /state-unhealthy/);
+  assert.equal(harness.element("connectionBadge").textContent, "Public unavailable");
+  assert.match(harness.element("connectionDetails").textContent, /^The public endpoint failed consecutive checks while the local Bridge remains running\./);
+  assert.match(harness.element("publicHealthMeta").textContent, /Consecutive failures: 2/);
+  assert.match(view.webview.html, /agentbridge-session-connection-heading[\s\S]*connectionTitle[\s\S]*sessionPublicHealthBadge/);
+  assert.doesNotMatch(view.webview.html, /agentbridge-session-connection-actions[^<]*<span[^>]*sessionPublicHealthBadge/);
+  assert.match(view.webview.html, /agentbridge-public-health-badge[^}]*background:\s*var\(--vscode-badge-background\)[^}]*font-size:\s*11px/);
+  assert.match(view.webview.html, /sessionPublicHealthBadge[^>]*role="status"[^>]*aria-live="polite"/);
+  assert.match(view.webview.html, /agentbridge-session-connection-heading \.agentbridge-public-health-badge[^}]*flex:\s*0 1 auto[^}]*text-overflow:\s*ellipsis/);
+  assert.ok(view.webview.html.indexOf('id="publicHealthPanel"') < view.webview.html.indexOf('id="tunnelSetupPanel"'), "expanded health details belong at the top of Connection Settings, not inside Tunnel Status");
+
+  harness.element("checkPublicHealthButton").click();
+  const healthRequest = harness.posted.find((message: any) => message.type === "checkPublicHealth");
+  assert.equal(typeof healthRequest?.requestId, "string");
+  assert.equal(harness.element("checkPublicHealthButton").disabled, true);
+  assert.equal(harness.element("checkPublicHealthButton").textContent, "Checking");
+
+  harness.dispatchMessage({
+    type: "status",
+    status: {
+      ...manager.getStatus(),
+      state: "running",
+      publicUrl: "https://agentbridge-test.example.com/mcp/redacted-test-token",
+      publicHealthState: "healthy",
+      publicHealthAvailable: true,
+      publicHealthAutomatic: true,
+      publicHealthChecking: false,
+      publicHealthFailureCount: 0,
+    },
+    persistentMode: false,
+    quickTunnelCopied: false,
+  });
+  assert.equal(harness.element("checkPublicHealthButton").disabled, true, "ordinary polling must not clear a pending manual check");
+
+  harness.dispatchMessage({
+    type: "publicHealthChecked",
+    requestId: "stale-health-request",
+    status: {
+      ...manager.getStatus(),
+      state: "running",
+      publicHealthState: "healthy",
+      publicHealthAvailable: true,
+      publicHealthAutomatic: true,
+      publicHealthChecking: false,
+      publicHealthFailureCount: 0,
+    },
+    persistentMode: false,
+    quickTunnelCopied: false,
+  });
+  assert.equal(harness.element("checkPublicHealthButton").disabled, true, "a stale completion must not clear the current request");
+
+  harness.dispatchMessage({
+    type: "publicHealthChecked",
+    requestId: healthRequest.requestId,
+    status: {
+      ...manager.getStatus(),
+      state: "running",
+      publicUrl: "https://agentbridge-test.example.com/mcp/redacted-test-token",
+      publicHealthState: "healthy",
+      publicHealthAvailable: true,
+      publicHealthAutomatic: true,
+      publicHealthChecking: false,
+      publicHealthFailureCount: 0,
+    },
+    persistentMode: false,
+    quickTunnelCopied: false,
+  });
+  assert.equal(harness.element("checkPublicHealthButton").disabled, false);
+
+  harness.dispatchMessage({
+    type: "status",
+    status: {
+      ...manager.getStatus(),
+      state: "running",
+      tunnelProvider: "ngrok",
+      publicUrl: "https://agentbridge-test.ngrok-free.dev/mcp/redacted-test-token",
+      publicHealthState: "healthy",
+      publicHealthAvailable: true,
+      publicHealthAutomatic: false,
+      publicHealthChecking: false,
+      publicHealthFailureCount: 0,
+    },
+    persistentMode: false,
+    quickTunnelCopied: false,
+  });
+  assert.match(harness.element("publicHealthMeta").textContent, /verified only at startup and on manual checks/);
+
+  harness.dispatchMessage({
+    type: "status",
+    status: {
+      ...manager.getStatus(),
+      state: "running",
+      publicUrl: "https://configured-but-not-running.example.com/mcp/redacted-test-token",
+      publicHealthState: "inactive",
+      publicHealthAvailable: false,
+      publicHealthAutomatic: false,
+      publicHealthChecking: false,
+      publicHealthFailureCount: 0,
+    },
+    persistentMode: false,
+    quickTunnelCopied: false,
+  });
+  assert.equal(harness.element("publicHealthPanel").style.display, "none");
+  assert.equal(harness.element("sessionPublicHealthBadge").style.display, "none");
+  assert.equal(harness.element("checkPublicHealthButton").disabled, true);
+
+  harness.dispatchMessage({
+    type: "status",
+    status: {
+      ...manager.getStatus(),
+      state: "starting",
+      tunnelChecked: true,
+      tunnelInstalled: true,
+      tunnelConfigValid: true,
+      publicHealthState: "checking",
+      publicHealthAvailable: false,
+      publicHealthAutomatic: false,
+      publicHealthChecking: false,
+      publicHealthFailureCount: 0,
+    },
+    persistentMode: false,
+    quickTunnelCopied: false,
+  });
+  assert.equal(harness.element("connectionBadge").textContent, "Starting…");
+  assert.equal(harness.element("connectionDetails").textContent, "Generating a new temporary Cloudflare MCP address…");
+});
+
+test("manual public health check uses a dedicated completion message instead of global busy state", async () => {
+  const manager = makeManager();
+  let checks = 0;
+  let failure: Error | undefined;
+  (manager as any).checkPublicHealth = async () => {
+    checks += 1;
+    if (failure) throw failure;
+    return manager.getStatus();
+  };
+  const provider = new BridgePanelProvider(manager, Promise.resolve());
+  const view = createFakeWebviewView();
+  provider.resolveWebviewView(view);
+  view.webview.posted.length = 0;
+
+  view.webview.receive({ type: "checkPublicHealth", requestId: "health-success" });
+  await flushMicrotasks(16);
+
+  assert.equal(checks, 1);
+  assert.ok(view.webview.posted.some((message: any) => message.type === "publicHealthChecked" && message.requestId === "health-success"));
+  assert.equal(
+    view.webview.posted.some((message: any) => message.type === "operationFinished" && message.operation === "checkPublicHealth"),
+    false,
+    "a health completion must not reset an unrelated panel operation",
+  );
+
+  view.webview.posted.length = 0;
+  failure = new Error("simulated public health failure");
+  view.webview.receive({ type: "checkPublicHealth", requestId: "health-failure" });
+  await flushMicrotasks(16);
+  assert.equal(checks, 2);
+  assert.ok(view.webview.posted.some((message: any) => message.type === "publicHealthChecked" && message.requestId === "health-failure"), "failure still releases the Webview pending state");
+  assert.ok(vscodeTest.errors.includes("simulated public health failure"));
+  assert.equal(view.webview.posted.some((message: any) => message.type === "operationFinished"), false);
+});
+
+test("a session initialized after teardown begins is closed instead of being retained", async () => {
+  const manager = makeManager();
+  let reservationReleases = 0;
+  const ownerServer = {};
+  (manager as any).httpServer = ownerServer;
+  const ownerGeneration = (manager as any).tunnelGeneration;
+  const created = (manager as any).createSession(ownerServer, ownerGeneration, () => { reservationReleases += 1; });
+  const callback = (created.transport as any)._webStandardTransport._onsessioninitialized as ((sid: string) => void | Promise<void>);
+  assert.equal(typeof callback, "function");
+  (manager as any).stoppingResources = true;
+  (manager as any).httpServer = undefined;
+  try {
+    await callback("late-session");
+    await flushMicrotasks(8);
+    assert.equal(reservationReleases, 1);
+    assert.equal(manager.getStatus().sessionCount, 0);
+    assert.equal(manager.getStatus().connected, false);
+  } finally {
+    (manager as any).stoppingResources = false;
+  }
+});
+
+test("an initialization owned by an old HTTP server cannot enter a restarted Bridge or release its reservation", async () => {
+  const manager = makeManager();
+  const oldOwner = {};
+  const newOwner = {};
+  const oldGeneration = 7;
+  (manager as any).httpServer = oldOwner;
+  (manager as any).tunnelGeneration = oldGeneration;
+  let reservationReleases = 0;
+  const created = (manager as any).createSession(oldOwner, oldGeneration, () => { reservationReleases += 1; });
+  const callback = (created.transport as any)._webStandardTransport._onsessioninitialized as ((sid: string) => void | Promise<void>);
+
+  (manager as any).httpServer = newOwner;
+  (manager as any).tunnelGeneration = oldGeneration + 1;
+  (manager as any).pendingInitializations = 1;
+  let responseStatus: number | undefined;
+  const staleResponse = {
+    headersSent: false,
+    writeHead(status: number) { responseStatus = status; return this; },
+    end() { return this; },
+  };
+  await (manager as any).handlePost(oldOwner, oldGeneration, {}, staleResponse, {}, undefined);
+  assert.equal(responseStatus, 503, "a POST parsed after its listener was replaced must be rejected before admission");
+  assert.equal((manager as any).pendingInitializations, 1, "the rejected old POST must not alter the new generation's admission count");
+
+  await callback("old-server-session");
+  await flushMicrotasks(8);
+
+  assert.equal(reservationReleases, 1);
+  assert.equal((manager as any).pendingInitializations, 1, "an old reservation must not consume a new generation's capacity slot");
+  assert.equal(manager.getStatus().sessionCount, 0, "the old server's session must be closed instead of retained");
+});

@@ -51,12 +51,14 @@ try {
   const fakeVscode = path.join(testsDir, "helpers", "fake-vscode.ts");
   const fakeChildProcess = path.join(testsDir, "helpers", "fake-child-process.ts");
   const fakeHttp = path.join(testsDir, "helpers", "fake-http.ts");
+  const fakeHttps = path.join(testsDir, "helpers", "fake-https.ts");
   const moduleReplacement = {
     name: "agentbridge-test-module-replacement",
     setup(buildApi) {
       buildApi.onResolve({ filter: /^vscode$/ }, () => ({ path: fakeVscode }));
       buildApi.onResolve({ filter: /^node:child_process$/ }, () => ({ path: fakeChildProcess }));
       buildApi.onResolve({ filter: /^node:http$/ }, () => ({ path: fakeHttp }));
+      buildApi.onResolve({ filter: /^node:https$/ }, () => ({ path: fakeHttps }));
     },
   };
 
