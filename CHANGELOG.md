@@ -1,5 +1,13 @@
 # Change Log
 
+## 0.1.13 (2026-09-17)
+
+- **Continuous Cloudflare public-health visibility** — Cloudflare Quick and Named Tunnel now verify the public MCP endpoint every 10 seconds after startup, distinguish healthy, transiently unstable, and unavailable states, and expose the result consistently in the Configuration and Session views. ngrok retains startup verification and an explicit manual check without background polling that would consume request quota.
+- **Bounded and generation-safe health checks** — each background check has an eight-second wall-clock budget, a single-flight guard, abortable fetch/JSON/DoH/direct-HTTPS stages, strict non-redirecting HTTP semantics, public-IPv4 filtering, and tunnel-generation ownership so Stop/Start cannot inherit stale results, timers, DNS cache entries, or pending requests.
+- **More resilient tunnel recovery** — unexpected tunnel process error, exit, or close keeps the local MCP server alive and reconnects with bounded 1/2/4/8/15-second backoff. HTTP listener ownership, late MCP initialization, Quick Tunnel URL updates, local smoke startup, child termination, and failed-listener cleanup are now protected against stale lifecycle callbacks and overlapping teardown.
+- **Clearer health presentation** — the compact public-health badge sits beside AgentBridge in the Session footer and remains visible from the collapsed Connection Settings summary. Warning state contrast now uses high-contrast badge text with a yellow indicator and outline, while the established healthy and unavailable styling remains unchanged.
+- **Expanded deterministic regression coverage** — production-path tests cover continuous monitoring, manual checks, hard deadlines, redirects, response/request failures, DoH boundaries, stale generations, Stop/Start recovery, pre-listen shutdown, late sessions, Windows taskkill fallback, Webview completion IDs, and isolated VSIX packaging.
+
 ## 0.1.12 (2026-09-16)
 
 - **Cloudflared startup diagnostics and faster failure guidance** — Cloudflare Quick and Named Tunnel startup now consumes per-process connectivity prechecks and transport lifecycle logs, distinguishes DNS and dual UDP/TCP 7844 failures, and stops waiting for the full public-health timeout when cloudflared has already reported a hard connectivity failure. Repeated public-health failures are throttled, route tokens remain redacted, and the resulting guidance is localized.

@@ -653,7 +653,8 @@ private renderHtml(advancedOpen = false): string {
   .agentbridge-public-health-badge { display: inline-flex; box-sizing: border-box; flex: 0 0 auto; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid transparent; border-radius: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 11px; font-weight: 600; line-height: 1; white-space: nowrap; }
   .agentbridge-public-health-badge::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; content: ''; }
   .agentbridge-public-health-badge.state-healthy { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
-  .agentbridge-public-health-badge.state-unstable { color: var(--vscode-editorWarning-foreground); }
+  .agentbridge-public-health-badge.state-unstable { border-color: var(--vscode-editorWarning-foreground); color: var(--vscode-badge-foreground); }
+  .agentbridge-public-health-badge.state-unstable::before { background: var(--vscode-editorWarning-foreground); }
   .agentbridge-public-health-badge.state-unhealthy { color: var(--vscode-errorForeground); }
   .agentbridge-public-health-badge.state-checking { color: var(--vscode-progressBar-background); }
   .agentbridge-public-health-check { flex: 0 0 auto; padding-left: 9px; padding-right: 9px; font-size: 11px; }
