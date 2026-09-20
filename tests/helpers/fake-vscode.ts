@@ -1,6 +1,9 @@
 type ConfigChangeListener = (event: { affectsConfiguration(section: string): boolean }) => void;
 
 const config = new Map<string, unknown>();
+// What a workspace settings.json holds, kept apart from the user-level map above so a
+// test can set a value in one scope and not the other, the way a repository does.
+const workspaceConfig = new Map<string, unknown>();
 const configListeners = new Set<ConfigChangeListener>();
 let updateHandler: ((input: { key: string; value: unknown; apply(): void }) => Promise<void>) | undefined;
 
@@ -30,6 +33,7 @@ export const vscodeTest = {
   information,
   reset(): void {
     config.clear();
+    workspaceConfig.clear();
     configListeners.clear();
     updateHandler = undefined;
     errors.length = 0;
@@ -52,6 +56,10 @@ export const vscodeTest = {
   },
   getConfig<T>(key: string): T | undefined {
     return config.get(key) as T | undefined;
+  },
+  setWorkspaceConfig(key: string, value: unknown): void {
+    if (value === undefined) workspaceConfig.delete(key);
+    else workspaceConfig.set(key, value);
   },
   emitConfig(key: string): void {
     emitConfigurationChange(key);
@@ -141,19 +149,49 @@ export const Uri = {
   },
 };
 
+/**
+ * What `workspace.fs.readDirectory` answers. The real host reads the filesystem; a test names
+ * the entries instead. Left unset, a listing that reaches it fails rather than silently
+ * reporting an empty directory.
+ */
+export const workspaceFs = {
+  readDirectory: undefined as undefined | ((uri: { fsPath: string }) => Promise<Array<[string, number]>>),
+};
+
 export const workspace = {
   workspaceFolders: [{ uri: { fsPath: process.cwd() } }],
+  // Diagnostics exist only for documents a provider has published them for, and get_diagnostics
+  // reports the open ones so that a zero result can be told from an unexamined scope.
+  textDocuments: [] as Array<{ uri: { scheme: string; fsPath: string } }>,
+  fs: {
+    async readDirectory(uri: { fsPath: string }): Promise<Array<[string, number]>> {
+      if (!workspaceFs.readDirectory) throw new Error("workspaceFs.readDirectory is not set up in this test");
+      return workspaceFs.readDirectory(uri);
+    },
+  },
   getConfiguration(section = "") {
     return {
       get<T>(key: string, defaultValue?: T): T {
-        const value = config.get(fullKey(section, key));
+        // A workspace value wins over the user-level one, which is what the real
+        // configuration object answers when both are set.
+        const keyName = fullKey(section, key);
+        const value = workspaceConfig.has(keyName) ? workspaceConfig.get(keyName) : config.get(keyName);
         return (value === undefined ? defaultValue : value) as T;
       },
-      async update(key: string, value: unknown): Promise<void> {
+      inspect<T>(key: string): { key: string; globalValue?: T; workspaceValue?: T } {
+        const keyName = fullKey(section, key);
+        return {
+          key: keyName,
+          globalValue: config.get(keyName) as T | undefined,
+          workspaceValue: workspaceConfig.get(keyName) as T | undefined,
+        };
+      },
+      async update(key: string, value: unknown, configurationTarget?: unknown): Promise<void> {
         const keyName = fullKey(section, key);
         const apply = () => {
-          if (value === undefined) config.delete(keyName);
-          else config.set(keyName, value);
+          const store = configurationTarget === ConfigurationTarget.Workspace ? workspaceConfig : config;
+          if (value === undefined) store.delete(keyName);
+          else store.set(keyName, value);
           emitConfigurationChange(keyName);
         };
         if (updateHandler) {

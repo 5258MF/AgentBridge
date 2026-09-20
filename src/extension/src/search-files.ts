@@ -2,6 +2,12 @@ import { spawn } from "node:child_process";
 import { open, readdir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { rgPath as bundledRipgrepPath } from "@vscode/ripgrep";
+import { COMMON_EXCLUDE_GLOBS, prunableDirectoryNames } from "./find-files.js";
+import { boundedInteger, boundedNotes } from "./bounded-integer.js";
+import { isRipgrepUsageError, isSupportedGlob, matchesAnyGlob } from "./glob.js";
+import { isIgnoreFileName, extendGitignoreRules, gitignoreIgnores, ignoreRulesOutside, type GitignoreRules } from "./gitignore.js";
+import { describeSkippedFilters } from "./skipped-filters.js";
+import { estimateTokens } from "./file-tool-utils.js";
 
 export interface SearchFilesInput {
   pattern: string;
@@ -42,6 +48,8 @@ export interface SearchFilesConfig {
   binaryProbeBytes: number;
   ripgrepPath?: string;
   commonExcludes: string[];
+  /** Added to commonExcludes rather than replacing it, so built-ins cannot be lost. */
+  extraExcludes?: readonly string[];
 }
 
 export const DEFAULT_SEARCH_FILES_CONFIG: SearchFilesConfig = {
@@ -58,22 +66,7 @@ export const DEFAULT_SEARCH_FILES_CONFIG: SearchFilesConfig = {
   maxContextCacheBytes: 16 * 1024 * 1024,
   maxFallbackFilesScanned: 20_000,
   binaryProbeBytes: 8 * 1024,
-  commonExcludes: [
-    "**/.git/**",
-    "**/node_modules/**",
-    "**/dist/**",
-    "**/build/**",
-    "**/out/**",
-    "**/out-build/**",
-    "**/out-vscode/**",
-    "**/coverage/**",
-    "**/.next/**",
-    "**/target/**",
-    "**/vendor/**",
-    "**/VSCode-win32-x64/**",
-    "**/release/**",
-    "**/*.zip",
-  ],
+  commonExcludes: [...COMMON_EXCLUDE_GLOBS],
 };
 
 export type SearchFilesErrorCode =
@@ -108,7 +101,8 @@ export type SearchTruncationReason =
   | "OUTPUT_BYTE_BUDGET"
   | "OUTPUT_TOKEN_BUDGET"
   | "MAX_FILES_SCANNED"
-  | "CONTEXT_CACHE_BYTE_BUDGET";
+  | "CONTEXT_CACHE_BYTE_BUDGET"
+  | "CONTEXT_FILE_TOO_LARGE";
 
 export interface SearchFilesResult {
   pattern: string;
@@ -116,13 +110,24 @@ export interface SearchFilesResult {
   case_mode: "sensitive" | "insensitive" | "smart";
   scope: string;
   engine: "ripgrep" | "node";
+  /**
+   * Which of the default filters were in force, so an empty result can say so. See find_files:
+   * a caller cannot otherwise tell "this text is not here" from "this text is gitignored".
+   */
+  filters: {
+    ignored_skipped: boolean;
+    hidden_skipped: boolean;
+  };
   matches: SearchMatch[];
+  /** Arguments that were brought into range; see boundedInteger. Absent or empty when none were. */
+  adjusted_arguments?: string[];
   summary: {
     returned_matches: number;
     files_with_matches: number;
     files_scanned: number | null;
     skipped_binary_files: number;
     skipped_large_files: number;
+    skipped_outside_scope: number;
     truncated: boolean;
     truncation_reasons: SearchTruncationReason[];
   };
@@ -158,6 +163,8 @@ interface EngineResult {
   filesScanned: number | null;
   skippedBinaryFiles: number;
   skippedLargeFiles: number;
+  /** Matches an engine reported at a path outside the scope it was asked to search. */
+  skippedOutsideScope: number;
   truncationReasons: Set<SearchTruncationReason>;
 }
 
@@ -171,14 +178,16 @@ interface NormalizedOptions {
   include: string[];
   exclude: string[];
   contextLines: number;
+  /** What was brought into range, to be said in the answer. See boundedInteger. Optional
+   *  because a caller that builds options by hand has nothing to report. */
+  adjusted_arguments?: string[];
   maxResults: number;
   maxMatchesPerFile: number;
   noIgnore: boolean;
   includeHidden: boolean;
-}
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  /** True when path named a single file. A file scope is handed to ripgrep by name, from the
+   *  directory holding it, and is not filtered the way a walk is. */
+  scopeIsFile: boolean;
 }
 
 function isInsideRoot(root: string, target: string): boolean {
@@ -222,19 +231,11 @@ async function resolveSafeScope(requestedPath: string, roots: string[]): Promise
   throw new SearchToolError("PATH_OUTSIDE_WORKSPACE", "Search path resolves outside the allowed workspace roots.");
 }
 
-function clampInteger(value: number | undefined, fallback: number, min: number, max: number, name: string): number {
-  if (value === undefined) return fallback;
-  if (!Number.isInteger(value) || value < min) {
-    throw new SearchToolError("INVALID_ARGUMENT", `${name} must be an integer >= ${min}.`);
-  }
-  return Math.min(value, max);
-}
-
 function smartCaseSensitive(pattern: string): boolean {
   return /[A-Z]/.test(pattern);
 }
 
-function normalizeInput(input: SearchFilesInput, config: SearchFilesConfig): Omit<NormalizedOptions, "scopeRealPath" | "scopeRoot"> {
+function normalizeInput(input: SearchFilesInput, config: SearchFilesConfig): Omit<NormalizedOptions, "scopeRealPath" | "scopeRoot" | "scopeIsFile"> {
   if (typeof input.pattern !== "string" || input.pattern.length === 0) {
     throw new SearchToolError("INVALID_ARGUMENT", "pattern must be a non-empty string.");
   }
@@ -253,6 +254,30 @@ function normalizeInput(input: SearchFilesInput, config: SearchFilesConfig): Omi
   if (!Array.isArray(exclude) || exclude.some((item) => typeof item !== "string" || item.length === 0)) {
     throw new SearchToolError("INVALID_ARGUMENT", "exclude must be an array of non-empty glob strings.");
   }
+  // Checked here rather than left to ripgrep because only one of the two engines has a
+  // ripgrep to complain: the fallback reads the same glob as a literal, so an ill-formed
+  // pattern used to be an error under one engine and a quietly different search under the
+  // other. find_files has always refused these.
+  for (const glob of [...include, ...exclude]) {
+    if (!isSupportedGlob(glob)) {
+      throw new SearchToolError("INVALID_ARGUMENT", "Glob patterns must be non-empty, at most 4000 characters, and free of unclosed character classes, unbalanced alternate groups and trailing escapes.");
+    }
+  }
+
+  // Out-of-range numbers are brought into range rather than refused, and named in the answer, so
+  // a caller that asked for more than the tool allows can see what it got.
+  const contextLines = boundedInteger(input.context_lines, config.defaultContextLines, 0, config.maxContextLines, "context_lines");
+  const maxResults = boundedInteger(input.max_results, config.defaultMaxResults, 1, config.hardMaxResults, "max_results");
+  const maxMatchesPerFile = boundedInteger(
+    input.max_matches_per_file,
+    config.defaultMaxMatchesPerFile,
+    1,
+    config.hardMaxMatchesPerFile,
+    "max_matches_per_file",
+  );
+  const adjusted_arguments = [contextLines, maxResults, maxMatchesPerFile]
+    .map((bound) => bound.note)
+    .filter((note): note is string => Boolean(note));
 
   return {
     pattern: input.pattern,
@@ -261,15 +286,10 @@ function normalizeInput(input: SearchFilesInput, config: SearchFilesConfig): Omi
     caseSensitive: input.case_sensitive,
     include,
     exclude,
-    contextLines: clampInteger(input.context_lines, config.defaultContextLines, 0, config.maxContextLines, "context_lines"),
-    maxResults: clampInteger(input.max_results, config.defaultMaxResults, 1, config.hardMaxResults, "max_results"),
-    maxMatchesPerFile: clampInteger(
-      input.max_matches_per_file,
-      config.defaultMaxMatchesPerFile,
-      1,
-      config.hardMaxMatchesPerFile,
-      "max_matches_per_file",
-    ),
+    contextLines: contextLines.value,
+    maxResults: maxResults.value,
+    maxMatchesPerFile: maxMatchesPerFile.value,
+    adjusted_arguments,
     noIgnore: input.no_ignore ?? false,
     includeHidden: input.include_hidden ?? false,
   };
@@ -280,28 +300,117 @@ function displayPath(root: string, filePath: string): string {
   return (relative || path.basename(filePath)).split(path.sep).join("/");
 }
 
-function matchesAnyGlob(relativePath: string, patterns: string[]): boolean {
-  if (patterns.length === 0) return false;
-  const normalized = relativePath.split(path.sep).join("/");
-  const base = path.posix.basename(normalized);
-  return patterns.some((pattern) => {
-    try {
-      return path.matchesGlob(normalized, pattern) || path.matchesGlob(base, pattern);
-    } catch {
-      return false;
-    }
-  });
+/**
+ * Whether a walked entry is still in scope.
+ *
+ * Two bases are in play and they are not interchangeable. The caller's `include`/`exclude`
+ * and the hidden check are matched against the path as seen from the *search scope*, which is
+ * the base ripgrep uses: it walks with cwd = scope, so "sub/**" names what a workspace-relative
+ * reading of the same file would call "pkg/sub/**". Matching them against the workspace made
+ * the two engines answer the same call differently depending only on whether ripgrep was
+ * installed, and made a scope that is itself hidden (`path: ".cache"`) find nothing at all in
+ * the fallback while ripgrep found everything.
+ *
+ * The built-in and the configured exclude lists stay workspace-relative, as they are in
+ * find_files: they are a setting about the workspace rather than about one search, and their
+ * patterns are either basenames or "**"-prefixed, so the base does not change what they select.
+ *
+ * `include`/`exclude` describe files, so they are only applied to files: matching a directory
+ * against a file glob like "**\/*.ts" fails, and pruning on that result stopped the walk from
+ * ever entering a directory whose files would have matched — an include turned the fallback
+ * engine into a search that found nothing.
+ */
+const EMPTY_GLOBS: readonly string[] = [];
+const pruneNameCache = new WeakMap<readonly string[], { caseSensitive: boolean; names: Set<string> }>();
+
+/**
+ * The directory names behind a set of exclude globs, remembered per array.
+ *
+ * The globs do not change during a walk and the same arrays are handed to this function once
+ * per entry, so the names are derived once per array rather than once per path. A WeakMap
+ * keeps that from holding anything alive: a caller that builds its exclude list per call
+ * has it collected with the call.
+ */
+function pruneNamesFor(globs: readonly string[], caseSensitive = false): Set<string> {
+  const cached = pruneNameCache.get(globs);
+  // The case is part of what was computed: the same globs read the other way are a different
+  // set of names, and answering with the wrong one would prune a directory the caller may see.
+  if (cached && cached.caseSensitive === caseSensitive) return cached.names;
+  const names = prunableDirectoryNames(globs, caseSensitive);
+  pruneNameCache.set(globs, { caseSensitive, names });
+  return names;
 }
 
-function shouldIncludePath(relativePath: string, options: NormalizedOptions, config: SearchFilesConfig): boolean {
-  const normalized = relativePath.split(path.sep).join("/");
+export function shouldIncludePath(
+  scopeRelativePath: string,
+  workspaceRelativePath: string,
+  options: NormalizedOptions,
+  config: SearchFilesConfig,
+  isDirectory = false,
+  /** The file the caller named as the scope: not hidden-filtered, see below. */
+  explicitFile = false,
+): boolean {
+  const scope = scopeRelativePath.split(path.sep).join("/");
+  const workspace = workspaceRelativePath.split(path.sep).join("/");
+  // A file the caller named is searched whatever the filters say: ripgrep applies neither the
+  // hidden rule nor any glob - --glob, --iglob, include or exclude - to a path it was handed
+  // on its command line, only to the paths it finds while walking a directory. Checked against
+  // the bundled ripgrep: `rg --iglob '!**/node_modules/**' needle node_modules/pkg/secret.txt`
+  // still answers with the match, and so does an include that names another suffix entirely.
+  // Filtering it here made the two engines disagree about the same call - a hidden file or one
+  // inside a generated directory came back as "no matches" from this engine alone, which reads
+  // as the file not being there at all. excludeGlobs is the same kind of guidance as the rest:
+  // read_files does not consult it either, so a caller is not being let through a boundary.
+  if (explicitFile) return true;
+  // A directory an exclude names whole is not descended into. `**/node_modules/**` rejects
+  // every path under such a directory, so reading it could only produce entries that were then
+  // discarded one at a time - and a workspace with its dependencies installed paid for a
+  // listing of that whole tree. See prunableDirectoryNames for the shapes this is safe for.
+  // The caller's own exclude is matched the way it is matched below: in the case it was
+  // written, where the built-ins are case-insensitive the way ripgrep reads them.
+  if (isDirectory) {
+    const entryName = workspace.slice(workspace.lastIndexOf("/") + 1);
+    const folded = entryName.toLowerCase();
+    if (!options.noIgnore && pruneNamesFor(config.commonExcludes).has(folded)) return false;
+    if (pruneNamesFor(config.extraExcludes ?? EMPTY_GLOBS).has(folded)) return false;
+    if (pruneNamesFor(options.exclude, true).has(entryName)) return false;
+  }
   if (!options.includeHidden) {
-    const segments = normalized.split("/");
+    const segments = scope.split("/");
     if (segments.some((segment) => segment.startsWith(".") && segment !== "." && segment !== "..")) return false;
   }
-  if (!options.noIgnore && matchesAnyGlob(normalized, config.commonExcludes)) return false;
-  if (options.include.length > 0 && !matchesAnyGlob(normalized, options.include)) return false;
-  if (options.exclude.length > 0 && matchesAnyGlob(normalized, options.exclude)) return false;
+  // Case-insensitive, the way ripgrep is asked to read them: they are emitted as --iglob so a
+  // "Vendor" directory is hidden as "vendor" is. This engine never sets --glob-case-insensitive
+  // - case_sensitive governs the text being searched, not the paths - so matching these
+  // case-sensitively here made the two engines disagree about the same directory.
+  if (!options.noIgnore && matchesAnyGlob(workspace, config.commonExcludes, false)) return false;
+  // Applied to directories too, and regardless of no_ignore: a configured exclude names a
+  // path the agent should not be shown, so the walk stops at the directory instead of
+  // descending and then discarding every file underneath it.
+  //
+  // The patterns are written against the workspace root, not against the path that was searched,
+  // and that is the intent rather than an accident of which variable was in scope: the setting
+  // is a workspace setting, so `packages/app/**/generated/**` names the same files whichever
+  // subdirectory a call searched. Read against the scope it would mean something different in
+  // every call - from `packages/app` the same text would have to be written `**/generated/**`,
+  // and a pattern written once could not be moved between calls without being rewritten.
+  if (matchesAnyGlob(workspace, config.extraExcludes ?? [], false)) return false;
+  // The caller's exclude is read against a directory as well, because that is what ripgrep
+  // does: it stops at a directory the glob names instead of walking it. Checked against the
+  // bundled ripgrep, `rg -n needle --glob '!dist'` does not report dist/x.txt and
+  // `--glob '!**/*.ts'` does not report x.ts/inside.txt. Answering for directories before the
+  // exclude was read made this engine report both: a bare `dist` names the directory and
+  // nothing under it, so descending into it and then matching the exclude against every file
+  // found there hid nothing at all - the same call answered two ways.
+  // Sensitive, and deliberately unlike find_files, which follows case_sensitive here: that
+  // tool asks ripgrep for --glob-case-insensitive and this one never does, so a caller's
+  // exclude reaches each engine with a different case rule already. Reading it the other way
+  // round here would make this engine disagree with the ripgrep it is standing in for.
+  if (options.exclude.length > 0 && matchesAnyGlob(scope, options.exclude, true)) return false;
+  if (isDirectory) return true;
+  // An include is a filter on files, not on the directories that hold them: `**/*.ts` says
+  // nothing about a directory called docs, and ripgrep walks it.
+  if (options.include.length > 0 && !matchesAnyGlob(scope, options.include, true)) return false;
   return true;
 }
 
@@ -324,41 +433,23 @@ async function appearsBinary(filePath: string, probeBytes: number): Promise<bool
   }
 }
 
-async function loadRootGitignore(root: string): Promise<string[]> {
-  try {
-    const text = await readFile(path.join(root, ".gitignore"), "utf8");
-    return text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith("#"));
-  } catch {
-    return [];
+/**
+ * ripgrep reports match offsets in bytes, while the fallback matcher reports JavaScript
+ * string indices. Converting keeps the column the same whichever backend ran — without it a
+ * line containing non-ASCII text comes back with a column that points into the middle of a
+ * multi-byte character.
+ */
+export function byteOffsetToColumn(line: string, byteOffset: unknown): number {
+  const offset = typeof byteOffset === "number" && Number.isInteger(byteOffset) ? byteOffset : -1;
+  if (offset <= 0) return 1;
+  let bytes = 0;
+  let units = 0;
+  for (const character of line) {
+    if (bytes >= offset) break;
+    bytes += Buffer.byteLength(character, "utf8");
+    units += character.length;
   }
-}
-
-function gitignorePatternMatches(relativePath: string, rawPattern: string): boolean {
-  const negated = rawPattern.startsWith("!");
-  const source = negated ? rawPattern.slice(1) : rawPattern;
-  if (!source) return false;
-  const normalized = source.replace(/^\//, "").replace(/\\/g, "/");
-  const candidate = relativePath.replace(/\\/g, "/");
-  const directoryPattern = normalized.endsWith("/");
-  const clean = directoryPattern ? normalized.slice(0, -1) : normalized;
-  const patterns = clean.includes("/")
-    ? [clean, directoryPattern ? `${clean}/**` : clean]
-    : [clean, `**/${clean}`, `**/${clean}/**`];
-  return matchesAnyGlob(candidate, patterns);
-}
-
-function ignoredByRootGitignore(relativePath: string, patterns: string[]): boolean {
-  let ignored = false;
-  for (const raw of patterns) {
-    const negated = raw.startsWith("!");
-    if (gitignorePatternMatches(relativePath, raw) || (negated && gitignorePatternMatches(relativePath, raw.slice(1)))) {
-      ignored = !negated;
-    }
-  }
-  return ignored;
+  return units + 1;
 }
 
 function compileFallbackMatcher(options: NormalizedOptions): (line: string) => { matched: boolean; column: number } {
@@ -378,9 +469,11 @@ function compileFallbackMatcher(options: NormalizedOptions): (line: string) => {
     };
   }
 
-  const needle = sensitive ? options.pattern : options.pattern.toLocaleLowerCase();
+  // Locale-invariant on purpose: under a Turkish locale "I" lower-cases to "ı", so a
+  // case-insensitive search for "image" would miss a line containing "IMAGE".
+  const needle = sensitive ? options.pattern : options.pattern.toLowerCase();
   return (line) => {
-    const haystack = sensitive ? line : line.toLocaleLowerCase();
+    const haystack = sensitive ? line : line.toLowerCase();
     const index = haystack.indexOf(needle);
     return index >= 0 ? { matched: true, column: index + 1 } : { matched: false, column: 0 };
   };
@@ -396,20 +489,35 @@ async function collectCandidateFiles(
     throw new SearchToolError("NOT_A_FILE_OR_DIRECTORY", "Search path is not a regular file or directory.");
   }
 
-  if (scopeStat.isFile()) {
+  if (options.scopeIsFile) {
+    // A file scope is its own root, so the path a glob is written against is the file's name.
+    const scope = path.basename(options.scopeRealPath);
     const relative = displayPath(options.scopeRoot, options.scopeRealPath);
-    return { files: shouldIncludePath(relative, options, config) ? [options.scopeRealPath] : [], filesScanned: 1, hitLimit: false };
+    return { files: shouldIncludePath(scope, relative, options, config, false, true) ? [options.scopeRealPath] : [], filesScanned: 1, hitLimit: false };
   }
 
-  const gitignore = options.noIgnore ? [] : await loadRootGitignore(options.scopeRoot);
+  // Each directory carries the ignore rules that apply to it, so a .gitignore below the scope
+  // root is honoured the way ripgrep honours it. Reading only the root's file used to be the
+  // difference between the two engines: the fallback searched files that ripgrep skipped. The
+  // rules above the root count as well, and so does the global exclude, which is why the walk
+  // starts from ignoreRulesOutside rather than from nothing.
   const files: string[] = [];
   let filesScanned = 0;
+  // What the budget counts. find_files counts every entry it walks into, directories
+  // included, because a tree of empty directories costs as much to walk as a tree of files
+  // and nothing here can tell how deep it goes before it gets there. Counting only the
+  // files left the walk unbounded on a tree made of directories: on a machine without a
+  // ripgrep a million empty folders was a walk with no ceiling but the abort signal.
+  let entriesScanned = 0;
   let hitLimit = false;
-  const stack = [options.scopeRealPath];
+  const stack: { directory: string; rules: GitignoreRules }[] = [{
+    directory: options.scopeRealPath,
+    rules: options.noIgnore ? [] : await ignoreRulesOutside(options.scopeRealPath, options.scopeRoot),
+  }];
 
   while (stack.length > 0) {
     if (signal?.aborted) throw new DOMException("Search was cancelled.", "AbortError");
-    const directory = stack.pop()!;
+    const { directory, rules: parentRules } = stack.pop()!;
     let entries;
     try {
       entries = await readdir(directory, { withFileTypes: true });
@@ -419,22 +527,33 @@ async function collectCandidateFiles(
       throw error;
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));
+    let rules = parentRules;
+    if (!options.noIgnore && entries.some((entry) => !entry.isDirectory() && isIgnoreFileName(entry.name))) {
+      rules = await extendGitignoreRules(
+        parentRules,
+        directory,
+        path.relative(options.scopeRoot, directory).split(path.sep).join("/"),
+      );
+    }
 
     for (const entry of entries) {
+      entriesScanned += 1;
+      if (entriesScanned > config.maxFallbackFilesScanned) {
+        hitLimit = true;
+        break;
+      }
       const absolute = path.join(directory, entry.name);
+      const scope = path.relative(options.scopeRealPath, absolute).split(path.sep).join("/");
       const relative = displayPath(options.scopeRoot, absolute);
-      if (!shouldIncludePath(relative, options, config)) continue;
-      if (!options.noIgnore && ignoredByRootGitignore(relative, gitignore)) continue;
-      if (entry.isDirectory()) {
-        stack.push(absolute);
+      const isDirectory = entry.isDirectory();
+      if (!shouldIncludePath(scope, relative, options, config, isDirectory)) continue;
+      if (!options.noIgnore && gitignoreIgnores(relative, rules, isDirectory)) continue;
+      if (isDirectory) {
+        stack.push({ directory: absolute, rules });
         continue;
       }
       if (!entry.isFile()) continue;
       filesScanned += 1;
-      if (filesScanned > config.maxFallbackFilesScanned) {
-        hitLimit = true;
-        break;
-      }
       files.push(absolute);
     }
     if (hitLimit) break;
@@ -463,8 +582,28 @@ async function searchWithNode(
     if (signal?.aborted) throw new DOMException("Search was cancelled.", "AbortError");
     if (checkPermission && !(await checkPermission(filePath))) continue;
 
-    const fileStat = await stat(filePath);
-    if (fileStat.size > config.maxFallbackFileBytes) {
+    // A candidate can vanish between the walk finding it and this read: a build cleaning up,
+    // an editor writing over it. That is not a missing search path, which is what ENOENT is
+    // reported as everywhere else in this tool, and find_files already skips it - so the two
+    // agree now, and the rest of the tree is still searched.
+    let fileStat: Awaited<ReturnType<typeof stat>>;
+    try {
+      fileStat = await stat(filePath);
+    } catch (error) {
+      // A file the caller named is the whole search, so its disappearing is the search path
+      // going away - which is what this tool reports everywhere else - and not one tree entry
+      // out of many that happened to be deleted mid-walk. Answering "no matches" for it says
+      // the file has no match in it, which is a different thing from the file being gone.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        if (options.scopeIsFile) throw new SearchToolError("FILE_NOT_FOUND", "Search path does not exist.");
+        continue;
+      }
+      throw error;
+    }
+    // The ceiling exists to keep a walk from reading a whole tree into memory. A file the
+    // caller named is the whole search, and ripgrep has no such ceiling, so the fallback does
+    // not either: returning nothing for a file that was pointed at reads as it being absent.
+    if (!options.scopeIsFile && fileStat.size > config.maxFallbackFileBytes) {
       skippedLargeFiles += 1;
       continue;
     }
@@ -477,7 +616,13 @@ async function searchWithNode(
     try {
       text = await readFile(filePath, "utf8");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EACCES") continue;
+      // Same race one step later: the file passed the stat above and was gone before the read.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EACCES") continue;
+      if (code === "ENOENT") {
+        if (options.scopeIsFile) throw new SearchToolError("FILE_NOT_FOUND", "Search path does not exist.");
+        continue;
+      }
       throw error;
     }
     const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
@@ -512,6 +657,7 @@ async function searchWithNode(
     filesScanned: candidateResult.filesScanned,
     skippedBinaryFiles,
     skippedLargeFiles,
+    skippedOutsideScope: 0,
     truncationReasons,
   };
 }
@@ -527,25 +673,113 @@ function ripgrepCandidates(config: SearchFilesConfig): string[] {
   return [...new Set(candidates)];
 }
 
-function buildRipgrepArgs(options: NormalizedOptions, config: SearchFilesConfig): string[] {
+export function buildRipgrepArgs(options: NormalizedOptions, config: SearchFilesConfig): string[] {
   const args = ["--json", "--line-number", "--column", "--color=never", "--max-count", String(options.maxMatchesPerFile + 1)];
   if (!options.isRegex) args.push("--fixed-strings");
   if (options.caseSensitive === true) args.push("--case-sensitive");
   else if (options.caseSensitive === false) args.push("--ignore-case");
   else args.push("--smart-case");
   if (options.noIgnore) args.push("--no-ignore");
+  // As in find_files: without this, .gitignore is only read inside a git repository, and the
+  // two engines answered differently about a scope that is not one.
+  else args.push("--no-require-git");
   if (options.includeHidden) args.push("--hidden");
 
-  if (!options.noIgnore) {
-    for (const glob of config.commonExcludes) args.push("--glob", `!${glob}`);
-  }
+  // ripgrep applies later globs with higher precedence, so exclusions must come after the
+  // includes they are meant to narrow. With the excludes first, any include re-admitted what
+  // they had just removed — an include of "**/*.ts" brought back every excluded test file,
+  // and the built-in list stopped keeping node_modules and friends out of a scoped search.
   for (const glob of options.include) args.push("--glob", glob);
+  // --iglob, not --glob: the built-in and configured excludes are case-insensitive on purpose,
+  // so "Vendor/" is hidden the way "vendor/" is. --glob-case-insensitive is a whole-command
+  // switch and this tool never sets it - its case_sensitive governs the text being searched,
+  // not the paths - so a plain --glob here would leave those directories in. --iglob is
+  // per-glob, so the caller's own include and exclude keep the case-sensitivity they asked for.
+  if (!options.noIgnore) {
+    for (const glob of config.commonExcludes) args.push("--iglob", `!${glob}`);
+  }
+  // Configured excludes are not part of the ignore system. The built-ins above exist to keep
+  // a search fast, so no_ignore may lift them; agentbridge.files.excludeGlobs is the user's
+  // decision about what the agent may see at all, and a caller must not be able to switch it
+  // off from the other side of the Bridge.
+  for (const glob of config.extraExcludes ?? []) args.push("--iglob", `!${glob}`);
   for (const glob of options.exclude) args.push("--glob", `!${glob}`);
   // Search root is "." because the child process runs with cwd = scopeRealPath.
   // ripgrep matches --glob patterns against paths as walked from the given root, so an
   // absolute root would make relative globs like "extension/**/*.ts" and "!dist/**" never match.
-  args.push("--", options.pattern, ".");
+  // A file scope is the exception: spawn's cwd has to be a directory, so the child runs one
+  // level up and is handed the file's own name. Handing it the file as cwd fails with ENOENT,
+  // which reads as an unusable ripgrep and quietly costs every file-scoped search its engine.
+  args.push("--", options.pattern, options.scopeIsFile ? path.basename(options.scopeRealPath) : ".");
   return args;
+}
+
+/**
+ * The directory the ripgrep child runs in. A file cannot be a working directory, so a file scope
+ * runs one level up - and that same directory is the base its reported paths are relative to.
+ */
+export function ripgrepSearchDirectory(options: Pick<NormalizedOptions, "scopeIsFile" | "scopeRealPath">): string {
+  return options.scopeIsFile ? path.dirname(options.scopeRealPath) : options.scopeRealPath;
+}
+
+/**
+ * Make an absolute path out of one ripgrep reported. ripgrep emits paths relative to the directory
+ * it ran in, which for a file scope is the file's parent rather than the file, so resolving against
+ * the scope itself produced "pkg/.env/.env" for every match inside a file-scoped search: the match
+ * was counted, but the path it was reported at does not exist.
+ */
+export function resolveRipgrepPath(pathText: string, options: Pick<NormalizedOptions, "scopeIsFile" | "scopeRealPath">): string {
+  return path.isAbsolute(pathText) ? pathText : path.resolve(ripgrepSearchDirectory(options), pathText);
+}
+
+/**
+ * Whether a path an engine reported is one it was asked to search.
+ *
+ * The path comes back as text from a child process and was resolved without question, so a
+ * report naming `../escape.txt` or an absolute path elsewhere on the machine was turned into a
+ * match and read: its lines were fetched from a file outside the scope and shown as a result of
+ * searching inside it. Nothing in a normal run produces such a path, which is the argument for
+ * not trusting one rather than for assuming it cannot happen - a replaced or tampered-with
+ * ripgrep reaches this reader the same way.
+ *
+ * What is compared is the path as written, and that is the whole of it: `path.resolve` folds
+ * "." and ".." and never asks the filesystem where a link points, so a link inside the scope is
+ * inside the scope here. That is the answer both engines are built on - ripgrep is run without
+ * `--follow`, and the fallback walk lists entries `withFileTypes`, where a link is neither a
+ * directory to descend into nor a file to read, so nothing behind one is ever reported. What is
+ * left open is a directory replaced by a link between the walk and the read: its path is still
+ * inside as written and the file behind the link is what gets read. Closing that takes an open
+ * handle and a question put to it, which is a different check made elsewhere, not this one.
+ */
+export function isWithinSearchScope(
+  absolutePath: string,
+  options: Pick<NormalizedOptions, "scopeIsFile" | "scopeRealPath" | "scopeRoot">,
+): boolean {
+  const target = path.resolve(absolutePath);
+  if (options.scopeIsFile) return target === path.resolve(options.scopeRealPath);
+  return containsPath(options.scopeRealPath, target) && containsPath(options.scopeRoot, target);
+}
+
+function containsPath(parent: string, child: string): boolean {
+  const resolvedParent = path.resolve(parent);
+  if (child === resolvedParent) return true;
+  return child.startsWith(resolvedParent.endsWith(path.sep) ? resolvedParent : resolvedParent + path.sep);
+}
+
+/**
+ * One line of ripgrep's --json output, as far as search_files reads it. Every field is
+ * optional and unknown-shaped because the line is whatever the child process emitted: a
+ * different ripgrep build, or a build with a different feature set, may send events this
+ * shape does not describe, and the reader has to keep ignoring those instead of trusting them.
+ */
+interface RipgrepJsonEvent {
+  type?: unknown;
+  data?: {
+    path?: { text?: unknown };
+    lines?: { text?: unknown };
+    line_number?: unknown;
+    submatches?: Array<{ start?: unknown }>;
+  };
 }
 
 async function trySearchWithRipgrep(
@@ -556,10 +790,12 @@ async function trySearchWithRipgrep(
 ): Promise<EngineResult | null> {
   return new Promise((resolve, reject) => {
     const args = buildRipgrepArgs(options, config);
-    const child = spawn(executable, args, { cwd: options.scopeRealPath, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], signal });
+    const cwd = ripgrepSearchDirectory(options);
+    const child = spawn(executable, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], signal });
     const matches: RawMatch[] = [];
     const perFile = new Map<string, number>();
     const truncationReasons = new Set<SearchTruncationReason>();
+    let skippedOutsideScope = 0;
     let stdoutPending = "";
     let stderr = "";
     let unavailable = false;
@@ -593,20 +829,27 @@ async function trySearchWithRipgrep(
 
     const parseLine = (line: string): void => {
       if (!line.trim()) return;
-      let event: any;
+      let parsed: unknown;
       try {
-        event = JSON.parse(line);
+        parsed = JSON.parse(line);
       } catch {
         return;
       }
-      if (event?.type !== "match") return;
+      if (!parsed || typeof parsed !== "object") return;
+      const event = parsed as RipgrepJsonEvent;
+      if (event.type !== "match") return;
       const data = event.data;
       const pathText = data?.path?.text;
       const lineText = data?.lines?.text;
       const lineNumber = data?.line_number;
-      if (typeof pathText !== "string" || typeof lineText !== "string" || !Number.isInteger(lineNumber)) return;
+      if (typeof pathText !== "string" || typeof lineText !== "string") return;
+      if (typeof lineNumber !== "number" || !Number.isInteger(lineNumber)) return;
 
-      const absolute = path.isAbsolute(pathText) ? pathText : path.resolve(options.scopeRealPath, pathText);
+      const absolute = resolveRipgrepPath(pathText, options);
+      if (!isWithinSearchScope(absolute, options)) {
+        skippedOutsideScope += 1;
+        return;
+      }
       const display = displayPath(options.scopeRoot, absolute);
       const count = perFile.get(display) ?? 0;
       if (count >= options.maxMatchesPerFile) {
@@ -619,12 +862,13 @@ async function trySearchWithRipgrep(
         return;
       }
       perFile.set(display, count + 1);
-      const firstSubmatch = Array.isArray(data?.submatches) ? data.submatches[0] : undefined;
+      const submatches = data?.submatches;
+      const firstSubmatch = Array.isArray(submatches) ? submatches[0] : undefined;
       matches.push({
         absolutePath: absolute,
         displayPath: display,
         line: lineNumber,
-        column: Number.isInteger(firstSubmatch?.start) ? firstSubmatch.start + 1 : 1,
+        column: byteOffsetToColumn(lineText, firstSubmatch?.start),
         text: lineText.replace(/\r?\n$/, ""),
       });
     };
@@ -643,11 +887,28 @@ async function trySearchWithRipgrep(
 
     child.on("close", (code, signalName) => {
       if (unavailable || settled) return;
+      // A child that died from a signal while the caller's signal is aborted was killed by
+      // that cancellation. Saying so here rather than waiting for the "error" event keeps
+      // the answer independent of the order the two arrive in - Node reports the abort on a
+      // later tick than the one that started the kill, and the exit only once the process
+      // handle closes - and a cancellation must never come back as an I/O error.
+      if (signalName && signal?.aborted) {
+        finish(null, new DOMException("Search was cancelled.", "AbortError"));
+        return;
+      }
       if (stdoutPending) parseLine(stdoutPending);
       // rg exits 0 when matches exist, 1 when no matches, and 2 on an actual error.
       if (code !== 0 && code !== 1 && !(signalName && truncationReasons.has("MAX_RESULTS"))) {
         if (/regex parse error|error parsing regex|invalid regex/i.test(stderr)) {
           finish(null, new SearchToolError("INVALID_PATTERN", stderr.trim() || "Invalid regular expression."));
+          return;
+        }
+        // A ripgrep that rejects the flags it was given cannot serve the search, but the next
+        // candidate may: the bundled binary is only the first of several, and a build that
+        // does not know one of these flags used to fail every search on that machine.
+        if (isRipgrepUsageError(stderr)) {
+          unavailable = true;
+          finish(null);
           return;
         }
         finish(null, new SearchToolError("IO_ERROR", stderr.trim() || `ripgrep exited with code ${code}.`));
@@ -659,6 +920,7 @@ async function trySearchWithRipgrep(
         filesScanned: null,
         skippedBinaryFiles: 0,
         skippedLargeFiles: 0,
+        skippedOutsideScope,
         truncationReasons,
       });
     });
@@ -723,7 +985,11 @@ async function addContext(
       try {
         const fileStat = await stat(match.absolutePath);
         if (fileStat.size > config.maxFallbackFileBytes) {
+          // Too large to hold for its surrounding lines, which is a different thing from the
+          // cache being full: the match is still reported, and the caller is told why the
+          // lines around it are missing rather than being left to guess.
           lines = null;
+          truncationReasons.add("CONTEXT_FILE_TOO_LARGE");
         } else if (cachedFileBytes + fileStat.size > config.maxContextCacheBytes) {
           lines = null;
           truncationReasons.add("CONTEXT_CACHE_BYTE_BUDGET");
@@ -812,10 +1078,12 @@ export async function searchFiles(input: SearchFilesInput, context: SearchFilesC
   try {
     const normalized = normalizeInput(input, config);
     const scope = await resolveSafeScope(normalized.scopeDisplay, context.workspaceRoots);
+    const scopeStat = await stat(scope.realPath);
     const options: NormalizedOptions = {
       ...normalized,
       scopeRealPath: scope.realPath,
       scopeRoot: scope.root,
+      scopeIsFile: scopeStat.isFile(),
     };
 
     if (context.signal?.aborted) throw new DOMException("Search was cancelled.", "AbortError");
@@ -834,6 +1102,11 @@ export async function searchFiles(input: SearchFilesInput, context: SearchFilesC
       case_mode: options.caseSensitive === true ? "sensitive" : options.caseSensitive === false ? "insensitive" : "smart",
       scope: options.scopeDisplay,
       engine: engine.engine,
+      adjusted_arguments: options.adjusted_arguments ?? [],
+      filters: {
+        ignored_skipped: !options.noIgnore,
+        hidden_skipped: !options.includeHidden,
+      },
       matches: bounded,
       summary: {
         returned_matches: bounded.length,
@@ -841,6 +1114,7 @@ export async function searchFiles(input: SearchFilesInput, context: SearchFilesC
         files_scanned: engine.filesScanned,
         skipped_binary_files: engine.skippedBinaryFiles,
         skipped_large_files: engine.skippedLargeFiles,
+        skipped_outside_scope: engine.skippedOutsideScope,
         truncated: engine.truncationReasons.size > 0,
         truncation_reasons: [...engine.truncationReasons],
       },
@@ -858,6 +1132,9 @@ export function formatSearchFilesForModel(result: SearchFilesResult): string {
     `case_mode: ${result.case_mode}`,
     `scope: ${JSON.stringify(result.scope)}`,
     `engine: ${result.engine}`,
+    ...((result.adjusted_arguments ?? []).length > 0
+      ? [`adjusted: ${(result.adjusted_arguments ?? []).join("; ")}.`]
+      : []),
     `returned_matches: ${result.summary.returned_matches}`,
     `files_with_matches: ${result.summary.files_with_matches}`,
     `truncated: ${result.summary.truncated}`,
@@ -874,6 +1151,8 @@ export function formatSearchFilesForModel(result: SearchFilesResult): string {
     }
   }
 
+  const skipped = describeSkippedFilters(result.filters, "text", result.matches.length > 0);
+  if (skipped) parts.push(skipped);
   if (result.summary.truncated) {
     parts.push(
       `NOTE: Search results were bounded (${result.summary.truncation_reasons.join(", ")}). Narrow path/include/exclude/pattern or run a follow-up search if more results are needed.`,
@@ -881,6 +1160,11 @@ export function formatSearchFilesForModel(result: SearchFilesResult): string {
   }
   if (result.engine === "node") {
     parts.push("NOTE: ripgrep was unavailable; the built-in Node fallback engine was used.");
+  }
+  if (result.summary.skipped_outside_scope > 0) {
+    parts.push(
+      `NOTE: ${result.summary.skipped_outside_scope} match(es) were dropped because the path they were reported at is outside the scope that was searched. An engine is not trusted with paths beyond the one it was given.`,
+    );
   }
   if (result.summary.skipped_large_files > 0 || result.summary.skipped_binary_files > 0) {
     parts.push(

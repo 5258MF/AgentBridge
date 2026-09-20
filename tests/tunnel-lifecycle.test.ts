@@ -17,7 +17,7 @@ function makeContext(extensionMode = 1): any {
   secrets.set("agentbridge.bridge.cloudflareNamedTunnelToken", "named-token");
   return {
     extensionMode,
-    extension: { packageJSON: { version: "0.1.10" } },
+    extension: { packageJSON: { version: "0.1.11" } },
     subscriptions: [],
     secrets: {
       get: async (key: string) => secrets.get(key),
@@ -1068,6 +1068,33 @@ test("cloudflare-named: automatic public health timer performs a real follow-up 
   }
 });
 
+test("cloudflare-named: the monitor reports why a check failed, not that it failed", async () => {
+  // The health request classifies what went wrong - the status it was answered with, or the
+  // cause behind the error - and the monitor used to throw that away and answer with the text
+  // it falls back on when nothing is known.
+  const originalFetch = globalThis.fetch;
+  const timers = installControlledPublicHealthTimers();
+  globalThis.fetch = (async () => healthyResponse(true)) as typeof fetch;
+  const manager = makeManager("cloudflare-named");
+  try {
+    await manager.initialize();
+    await startManager(manager, "cloudflare-named", 0, "classified-cause");
+    (manager as any).requestPublicHealth = async () => ({
+      ok: false,
+      failure: { reason: "classified by the test", status: 0, deterministic: false },
+    });
+    timers.fireNext();
+    await waitFor(() => manager.getStatus().publicHealthFailureCount === 1, "monitor failure");
+    const status = manager.getStatus();
+    assert.equal(status.publicHealthState, "unstable");
+    assert.match(status.publicHealthError ?? "", /classified by the test/, JSON.stringify(status));
+  } finally {
+    await manager.stop();
+    timers.restore();
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("cloudflare-named: the monitor budget is a hard deadline and ignores a late healthy result", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => healthyResponse(true)) as typeof fetch;
@@ -1238,8 +1265,11 @@ test("public-health fetches do not follow redirects", async () => {
   try {
     await manager.initialize();
     (manager as any).domain = NAMED_DOMAIN;
-    assert.equal(await (manager as any).requestPublicHealth(() => undefined), false);
-    assert.equal(await (manager as any).resolveHostViaDoh(NAMED_DOMAIN, undefined, true), null);
+    // The health request reports why it failed, so the assertion is on the
+    // result object this build returns rather than on a bare false.
+    const health = await (manager as any).requestPublicHealth(() => undefined);
+    assert.equal(health.ok, false, "a redirect is not a healthy answer");
+    assert.equal(await (manager as any).resolveHostViaDoh(NAMED_DOMAIN, undefined, undefined, true), null);
     assert.ok(redirects.length >= 3, "the public endpoint and both DoH endpoints should be exercised");
     assert.deepEqual(new Set(redirects), new Set(["manual"]), "neither route-token health requests nor DoH lookups may follow redirects");
   } finally {

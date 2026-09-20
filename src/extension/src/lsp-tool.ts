@@ -1,4 +1,6 @@
 import { realpath } from "node:fs/promises";
+import { boundedInteger } from "./bounded-integer.js";
+import { canonicalWorkspaceRoots, defaultWorkspaceRoot, isInsideAnyRoot, isInsideAnyWorkspaceRoot, isInsideRoot, workspaceRootHolding, workspaceRoots } from "./workspace-roots.js";
 import path from "node:path";
 import * as vscode from "vscode";
 
@@ -46,15 +48,9 @@ function asBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
-function asInteger(value: unknown, fallback: number, min: number, max: number): number {
-  if (!Number.isInteger(value)) return fallback;
-  return Math.min(max, Math.max(min, Number(value)));
-}
-
 function workspaceRoot(): string {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) throw new Error("No workspace folder is open.");
-  return folder.uri.fsPath;
+  // The folder a path falls back to; which folder it really belongs to is decided per path.
+  return defaultWorkspaceRoot();
 }
 
 function isInside(root: string, candidate: string): boolean {
@@ -65,21 +61,21 @@ function isInside(root: string, candidate: string): boolean {
   return candidateCmp === rootCmp || candidateCmp.startsWith(`${rootCmp}${path.sep}`);
 }
 
-async function canonicalWorkspaceRoot(): Promise<string> {
-  return realpath(workspaceRoot());
-}
-
 async function resolveWorkspaceFile(inputPath: string): Promise<{ root: string; relative: string; uri: vscode.Uri }> {
-  const lexicalRoot = workspaceRoot();
   const raw = inputPath.trim();
   if (!raw) throw new Error("path must be a non-empty workspace path");
   const normalized = raw.replace(/\\/g, "/").replace(/^\.\//, "");
-  const absolute = path.isAbsolute(raw) || path.isAbsolute(normalized)
-    ? path.resolve(raw)
-    : path.resolve(lexicalRoot, normalized);
-  if (!isInside(lexicalRoot, absolute)) throw new Error(`Path is outside the workspace: ${inputPath}`);
+  const isAbsolute = path.isAbsolute(raw) || path.isAbsolute(normalized);
+  // A window can hold several folders, and the same relative path may exist in more than one:
+  // the folder that has it wins, instead of the first one always being asked.
+  const lexicalRoot = isAbsolute
+    ? workspaceRoots().find((candidate) => isInsideRoot(candidate, path.resolve(raw))) ?? defaultWorkspaceRoot()
+    : workspaceRootHolding(normalized);
+  const absolute = isAbsolute ? path.resolve(raw) : path.resolve(lexicalRoot, normalized);
+  if (!isInsideAnyWorkspaceRoot(absolute)) throw new Error(`Path is outside the workspace: ${inputPath}`);
   const [root, target] = await Promise.all([realpath(lexicalRoot), realpath(absolute)]);
-  if (!isInside(root, target)) throw new Error(`Path is outside the workspace: ${inputPath}`);
+  const canonicalRoots = await canonicalWorkspaceRoots();
+  if (!isInsideAnyRoot(canonicalRoots, target)) throw new Error(`Path is outside the workspace: ${inputPath}`);
   const relative = path.relative(root, target).replace(/\\/g, "/") || ".";
   return {
     root,
@@ -88,11 +84,14 @@ async function resolveWorkspaceFile(inputPath: string): Promise<{ root: string; 
   };
 }
 
-async function resolveWorkspaceCandidate(root: string, uri: vscode.Uri): Promise<{ relative: string; uri: vscode.Uri } | undefined> {
+async function resolveWorkspaceCandidate(roots: string[], uri: vscode.Uri): Promise<{ relative: string; uri: vscode.Uri } | undefined> {
   if (uri.scheme !== "file") return undefined;
   try {
     const target = await realpath(uri.fsPath);
-    if (!isInside(root, target)) return undefined;
+    // Any folder of the window: a symbol in the second folder used to be dropped, because
+    // only the first one was ever asked whether it holds the file.
+    const root = roots.find((candidate) => isInside(candidate, target));
+    if (!root) return undefined;
     return {
       relative: path.relative(root, target).replace(/\\/g, "/") || ".",
       uri: vscode.Uri.file(target),
@@ -122,7 +121,7 @@ function warmupCandidateScore(relativePath: string, query: string, tokens: strin
 }
 
 async function warmWorkspaceSymbolProjects(query: string, anchorPath?: string): Promise<string[]> {
-  const root = await canonicalWorkspaceRoot();
+  const roots = await canonicalWorkspaceRoots();
   const candidates = new Map<string, vscode.Uri>();
   let searchBase: vscode.Uri | undefined;
   if (anchorPath?.trim()) {
@@ -145,7 +144,7 @@ async function warmWorkspaceSymbolProjects(query: string, anchorPath?: string): 
       16,
     );
     for (const uri of matches) {
-      const candidate = await resolveWorkspaceCandidate(root, uri);
+      const candidate = await resolveWorkspaceCandidate(roots, uri);
       if (!candidate) continue;
       candidates.set(candidate.relative, candidate.uri);
       if (candidates.size >= WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES) break;
@@ -161,7 +160,7 @@ async function warmWorkspaceSymbolProjects(query: string, anchorPath?: string): 
       WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES,
     );
     for (const uri of broadMatches) {
-      const candidate = await resolveWorkspaceCandidate(root, uri);
+      const candidate = await resolveWorkspaceCandidate(roots, uri);
       if (!candidate) continue;
       candidates.set(candidate.relative, candidate.uri);
       if (candidates.size >= WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES) break;
@@ -224,9 +223,10 @@ function symbolKindName(kind: vscode.SymbolKind): string {
   return row?.[0] ?? String(kind);
 }
 
-function uriDisplay(root: string, uri: vscode.Uri): { path: string; workspace: boolean } {
-  if (uri.scheme === "file" && isInside(root, uri.fsPath)) {
-    return { path: path.relative(root, uri.fsPath).replace(/\\/g, "/"), workspace: true };
+function uriDisplay(roots: readonly string[], uri: vscode.Uri): { path: string; workspace: boolean } {
+  if (uri.scheme === "file") {
+    const root = roots.find((candidate) => isInside(candidate, uri.fsPath));
+    if (root) return { path: path.relative(root, uri.fsPath).replace(/\\/g, "/"), workspace: true };
   }
   return { path: uri.toString(), workspace: false };
 }
@@ -251,9 +251,28 @@ function locationRow(value: vscode.Location | vscode.LocationLink): LspLocationR
   return { uri: value.uri, range: value.range };
 }
 
-function locationKey(value: LspLocationRow, preferSelection = false): string {
-  const range = preferSelection && value.selectionRange ? value.selectionRange : value.range;
-  return `${value.uri.toString()}#${range.start.line}:${range.start.character}:${range.end.line}:${range.end.character}`;
+/**
+ * Two URIs for the same file. Providers are free to spell a Windows drive letter either
+ * way, so the same file can arrive as file:///c:/... from one command and file:///C:/...
+ * from another; comparing the strings then says "different file" and a declaration next
+ * to its own reference goes unmatched.
+ */
+export function sameUri(left: vscode.Uri, right: vscode.Uri): boolean {
+  if (left.toString() === right.toString()) return true;
+  // Only paths on Windows are case-insensitive; folding a POSIX path would make two
+  // different files look like one.
+  return process.platform === "win32"
+    && left.scheme === "file"
+    && right.scheme === "file"
+    && left.fsPath.toLowerCase() === right.fsPath.toLowerCase();
+}
+
+/** True when `row` covers the given position, used to tell a declaration from a reference. */
+export function containsPosition(row: LspLocationRow, line: number, character: number): boolean {
+  const { start, end } = row.range;
+  if (line < start.line || line > end.line) return false;
+  if (line === start.line && character < start.character) return false;
+  return !(line === end.line && character > end.character);
 }
 
 function markdownText(value: unknown): string {
@@ -270,12 +289,24 @@ function markdownText(value: unknown): string {
   return String(value ?? "");
 }
 
-function boundedText(text: string, maxChars: number): { text: string; truncated: boolean } {
+/**
+ * Shorten hover content to the hover cap, keeping the head and the tail of it.
+ *
+ * Named apart from the activity helper in bridge-server.ts, which carried the same name and a
+ * different job: that one bounds the text a panel entry shows, this one bounds what a hover
+ * reports to a model, and only this one always answers with a string.
+ */
+export function boundedHoverText(text: string, maxChars: number): { text: string; truncated: boolean } {
   if (text.length <= maxChars) return { text, truncated: false };
   const marker = "\n...[truncated]...\n";
   const budget = Math.max(0, maxChars - marker.length);
   const head = Math.floor(budget * 0.4);
-  return { text: `${text.slice(0, head)}${marker}${text.slice(-(budget - head))}`, truncated: true };
+  // The tail needs a guard: slice(-0) is slice(0), which is the whole string, so a budget no
+  // larger than the marker put the entire text back after it - a function whose only job is to
+  // shorten, returning more than it was given. Unreachable from the one call site today, whose
+  // cap is 16000 characters, and the shape has to be right for any cap regardless.
+  const tail = budget - head;
+  return { text: `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`, truncated: true };
 }
 
 function providerMetadataLines(metadata: LspProviderMetadata): string[] {
@@ -340,9 +371,9 @@ function emitEnvelope(
   ].join("\n");
 }
 
-function formatLocations(root: string, operation: LspOperation, rows: LspLocationRow[], maxResults: number, metadata: string[]): string {
+function formatLocations(roots: readonly string[], operation: LspOperation, rows: LspLocationRow[], maxResults: number, metadata: string[]): string {
   const blocks = rows.map((row, index) => {
-    const display = uriDisplay(root, row.uri);
+    const display = uriDisplay(roots, row.uri);
     return [
       `--- RESULT ${index + 1} ---`,
       `path: ${JSON.stringify(display.path)}`,
@@ -376,11 +407,23 @@ async function locationOperation(
       source.uri,
       source.position,
     );
-    const definitionKeys = new Set((definitions ?? []).map((value) => locationKey(locationRow(value), true)));
-    rows = rows.filter((row) => !definitionKeys.has(locationKey(row)));
+    // Match by containment rather than equal keys: a declaration spans the whole signature
+    // while the reference to it spans only the name, so the two ranges never compare equal
+    // and the option silently kept the declaration in the results.
+    //
+    // Test against the selection range — the declared name — and not the full target range.
+    // The latter covers the entire body for a function or class, so every reference inside it,
+    // a recursive call included, looked like the declaration and was dropped from the results.
+    const definitionRows = (definitions ?? []).map(locationRow).map((row) => ({
+      uri: row.uri,
+      range: row.selectionRange ?? row.range,
+    }));
+    rows = rows.filter((row) => !definitionRows.some((definition) =>
+      sameUri(definition.uri, row.uri)
+      && containsPosition(definition, row.range.start.line, row.range.start.character)));
   }
 
-  return formatLocations(source.root, operation, rows, maxResults, [
+  return formatLocations([source.root], operation, rows, maxResults, [
     `source: ${JSON.stringify(source.relative)}`,
     `position: ${positionText(source.position)}`,
     `language_id: ${JSON.stringify(source.languageId)}`,
@@ -390,7 +433,7 @@ async function locationOperation(
 }
 
 async function workspaceSymbols(input: Record<string, unknown>, maxResults: number): Promise<string> {
-  const root = await canonicalWorkspaceRoot();
+  const roots = await canonicalWorkspaceRoots();
   const query = asString(input.query).trim();
   if (!query) throw new Error("workspace_symbols requires a non-empty query");
 
@@ -423,7 +466,7 @@ async function workspaceSymbols(input: Record<string, unknown>, maxResults: numb
     semanticResultInconclusive: inconclusive,
   };
   const blocks = symbols.map((symbol, index) => {
-    const display = uriDisplay(root, symbol.location.uri);
+    const display = uriDisplay(roots, symbol.location.uri);
     return [
       `--- RESULT ${index + 1} ---`,
       `name: ${JSON.stringify(symbol.name)}`,
@@ -448,6 +491,50 @@ async function workspaceSymbols(input: Record<string, unknown>, maxResults: numb
   ], blocks, symbols.length, maxResults);
 }
 
+/**
+ * Flatten the symbol tree a provider returns into the blocks the answer is made of.
+ *
+ * A DocumentSymbol carries its children, and for a class or a namespace that is where the
+ * methods and fields live. Mapping over the top level alone reported the class and none of
+ * what sits inside it, which for a language with nested symbols is most of the file.
+ */
+export function documentSymbolBlocks(
+  symbols: Array<vscode.SymbolInformation | vscode.DocumentSymbol>,
+  file: { relative: string; root: string },
+): string[] {
+  const blocks: string[] = [];
+  const visit = (symbol: vscode.SymbolInformation | vscode.DocumentSymbol, container: string | null): void => {
+    if ("location" in symbol) {
+      const display = uriDisplay([file.root], symbol.location.uri);
+      blocks.push([
+        `--- RESULT ${blocks.length + 1} ---`,
+        `name: ${JSON.stringify(symbol.name)}`,
+        `kind: ${symbolKindName(symbol.kind)}`,
+        `container: ${JSON.stringify(symbol.containerName || null)}`,
+        `path: ${JSON.stringify(display.path)}`,
+        `workspace: ${display.workspace}`,
+        `range: ${rangeText(symbol.location.range)}`,
+      ].join("\n"));
+      return;
+    }
+    blocks.push([
+      `--- RESULT ${blocks.length + 1} ---`,
+      `name: ${JSON.stringify(symbol.name)}`,
+      `kind: ${symbolKindName(symbol.kind)}`,
+      `detail: ${JSON.stringify(symbol.detail || null)}`,
+      `container: ${JSON.stringify(container)}`,
+      `path: ${JSON.stringify(file.relative)}`,
+      "workspace: true",
+      `range: ${rangeText(symbol.range)}`,
+      `selection_range: ${rangeText(symbol.selectionRange)}`,
+    ].join("\n"));
+    const nested = container ? `${container}.${symbol.name}` : symbol.name;
+    for (const child of symbol.children ?? []) visit(child, nested);
+  };
+  for (const symbol of symbols) visit(symbol, null);
+  return blocks;
+}
+
 async function documentSymbols(input: Record<string, unknown>, maxResults: number): Promise<string> {
   const file = await resolveWorkspaceFile(asString(input.path));
   const document = await vscode.workspace.openTextDocument(file.uri);
@@ -455,35 +542,12 @@ async function documentSymbols(input: Record<string, unknown>, maxResults: numbe
     "vscode.executeDocumentSymbolProvider",
     file.uri,
   ) ?? [];
-  const blocks = symbols.map((symbol, index) => {
-    if ("location" in symbol) {
-      const display = uriDisplay(file.root, symbol.location.uri);
-      return [
-        `--- RESULT ${index + 1} ---`,
-        `name: ${JSON.stringify(symbol.name)}`,
-        `kind: ${symbolKindName(symbol.kind)}`,
-        `container: ${JSON.stringify(symbol.containerName || null)}`,
-        `path: ${JSON.stringify(display.path)}`,
-        `workspace: ${display.workspace}`,
-        `range: ${rangeText(symbol.location.range)}`,
-      ].join("\n");
-    }
-    return [
-      `--- RESULT ${index + 1} ---`,
-      `name: ${JSON.stringify(symbol.name)}`,
-      `kind: ${symbolKindName(symbol.kind)}`,
-      `detail: ${JSON.stringify(symbol.detail || null)}`,
-      `path: ${JSON.stringify(file.relative)}`,
-      "workspace: true",
-      `range: ${rangeText(symbol.range)}`,
-      `selection_range: ${rangeText(symbol.selectionRange)}`,
-    ].join("\n");
-  });
+  const blocks = documentSymbolBlocks(symbols, file);
   return emitEnvelope("document_symbols", [
     `path: ${JSON.stringify(file.relative)}`,
     `language_id: ${JSON.stringify(document.languageId)}`,
-    ...providerMetadataLines(resultProviderMetadata(symbols.length, file.relative)),
-  ], blocks, symbols.length, maxResults);
+    ...providerMetadataLines(resultProviderMetadata(blocks.length, file.relative)),
+  ], blocks, blocks.length, maxResults);
 }
 
 async function hover(input: Record<string, unknown>, maxResults: number): Promise<string> {
@@ -491,7 +555,7 @@ async function hover(input: Record<string, unknown>, maxResults: number): Promis
   const hovers = await vscode.commands.executeCommand<vscode.Hover[] | undefined>("vscode.executeHoverProvider", source.uri, source.position) ?? [];
   let contentTruncated = false;
   const blocks = hovers.map((item, index) => {
-    const bounded = boundedText(item.contents.map(markdownText).filter(Boolean).join("\n\n"), MAX_HOVER_ITEM_CHARS);
+    const bounded = boundedHoverText(item.contents.map(markdownText).filter(Boolean).join("\n\n"), MAX_HOVER_ITEM_CHARS);
     contentTruncated ||= bounded.truncated;
     return [
       `--- RESULT ${index + 1} ---`,
@@ -510,6 +574,13 @@ async function hover(input: Record<string, unknown>, maxResults: number): Promis
   ], blocks, hovers.length, maxResults);
 }
 
+/** Put a note about an adjusted argument under the header, where the other limits are. */
+function withAdjustedNote(text: string, note: string | null): string {
+  if (!note) return text;
+  const lines = text.split("\n");
+  return [lines[0] ?? "", note, ...lines.slice(1)].join("\n");
+}
+
 export async function invokeLspTool(input: Record<string, unknown>): Promise<string> {
   const operation = asString(input.operation) as LspOperation;
   const validOperations = new Set<LspOperation>([
@@ -523,14 +594,16 @@ export async function invokeLspTool(input: Record<string, unknown>): Promise<str
   if (!validOperations.has(operation)) {
     throw new Error(`Unsupported lsp operation: ${JSON.stringify(input.operation)}`);
   }
-  const maxResults = asInteger(input.max_results, operationDefaultMax(operation), 1, HARD_MAX_RESULTS);
+  const maxResultsBound = boundedInteger(input.max_results, operationDefaultMax(operation), 1, HARD_MAX_RESULTS, "max_results");
+  const maxResults = maxResultsBound.value;
+  const note = maxResultsBound.note;
   switch (operation) {
-    case "workspace_symbols": return workspaceSymbols(input, maxResults);
-    case "document_symbols": return documentSymbols(input, maxResults);
-    case "definition": return locationOperation("definition", input, maxResults);
-    case "references": return locationOperation("references", input, maxResults);
-    case "implementation": return locationOperation("implementation", input, maxResults);
-    case "hover": return hover(input, maxResults);
+    case "workspace_symbols": return withAdjustedNote(await workspaceSymbols(input, maxResults), note);
+    case "document_symbols": return withAdjustedNote(await documentSymbols(input, maxResults), note);
+    case "definition": return withAdjustedNote(await locationOperation("definition", input, maxResults), note);
+    case "references": return withAdjustedNote(await locationOperation("references", input, maxResults), note);
+    case "implementation": return withAdjustedNote(await locationOperation("implementation", input, maxResults), note);
+    case "hover": return withAdjustedNote(await hover(input, maxResults), note);
   }
 }
 

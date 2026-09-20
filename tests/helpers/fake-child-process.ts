@@ -17,7 +17,12 @@ export class FakeChildProcess extends EventEmitter {
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
 
-  constructor(pid: number, readonly command: string, readonly args: readonly string[]) {
+  constructor(
+    pid: number,
+    readonly command: string,
+    readonly args: readonly string[],
+    readonly options?: { cwd?: string },
+  ) {
     super();
     this.pid = pid;
   }
@@ -77,8 +82,10 @@ export const childProcessTest = {
   },
 };
 
-export function spawn(command: string, args: readonly string[] = []): FakeChildProcess {
-  const child = new FakeChildProcess(nextPid++, command, [...args]);
+export function spawn(command: string, args: readonly string[] = [], options?: { cwd?: string }): FakeChildProcess {
+  // The working directory is recorded because one bug was exactly here: a search scoped to a
+  // single file spawned with that file as cwd, which fails with ENOENT.
+  const child = new FakeChildProcess(nextPid++, command, [...args], options);
   spawned.push(child);
   return child;
 }

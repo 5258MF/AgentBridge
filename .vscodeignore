@@ -17,6 +17,9 @@ build-args-*.txt
 *.vsix
 media/icon.bak.png
 
+# Local agent scratch space — notes, backups and one-off scripts must never ship
+.workbuddy/**
+
 # VCS / CI / cache — never ship
 .gitignore
 .gitattributes

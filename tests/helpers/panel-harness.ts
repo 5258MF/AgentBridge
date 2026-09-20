@@ -26,7 +26,7 @@ class FakeClassList {
 export class FakeElement {
   value = "";
   disabled = false;
-  textContent = "";
+  private text = "";
   title = "";
   className = "";
   readonly style: Record<string, string> = {};
@@ -45,6 +45,18 @@ export class FakeElement {
 
   constructor(readonly id = "", tagName = "DIV", private readonly owner?: FakeDocument) {
     this.tagName = tagName.toUpperCase();
+  }
+
+  // Assigning textContent replaces an element's content, children included: a real DOM
+  // discards them, and the panel re-renders lists by clearing first. Without this the old
+  // rows piled up beneath the new ones and a re-render looked like an append.
+  get textContent(): string {
+    return this.text;
+  }
+
+  set textContent(value: string) {
+    this.text = value;
+    this.children.length = 0;
   }
 
   addEventListener(type: string, listener: Listener): void {

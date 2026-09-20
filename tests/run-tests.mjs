@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
+import { cp, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,7 @@ const args = process.argv.slice(2);
 const matchIndex = args.indexOf("--match");
 const match = matchIndex >= 0 ? args[matchIndex + 1] : undefined;
 const skipPackage = args.includes("--skip-package");
+const requirePackage = args.includes("--require-package");
 const tempDir = await mkdtemp(path.join(os.tmpdir(), "agentbridge-tests-"));
 
 function run(command, commandArgs, options = {}) {
@@ -33,7 +34,9 @@ function shouldCopyForPackageValidation(source) {
   if (!relative) return true;
   const normalized = relative.replace(/\\/g, "/");
   const first = normalized.split("/")[0];
-  if ([".git", "node_modules", "dist", ".vscode-test", ".vscode-test-web"].includes(first)) return false;
+  // Excluded here as well as in .vscodeignore: relying on the ignore file alone means a
+  // change to that one file silently ships scratch data inside the validation copy.
+  if ([".git", "node_modules", "dist", ".vscode-test", ".vscode-test-web", ".workbuddy"].includes(first)) return false;
   const basename = path.basename(normalized).toLowerCase();
   if (basename.endsWith(".vsix") || basename.endsWith(".orig") || basename.endsWith(".log")) return false;
   if (basename === "tsconfig.tsbuildinfo") return false;
@@ -45,7 +48,9 @@ try {
   console.log("[test] TypeScript checking test sources...");
   run(process.execPath, [path.join(root, "node_modules", "typescript", "bin", "tsc"), "-p", path.join("tests", "tsconfig.json"), "--noEmit"]);
 
-  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "terminal-lifecycle.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts"];
+  // Discovered, not listed: a hard-coded array silently stops running any file that is not
+  // added to it, which reads as passing while covering nothing.
+  const allEntries = (await readdir(testsDir)).filter((name) => name.endsWith(".test.ts")).sort();
   const entries = match ? allEntries.filter((name) => name.replace(/\.test\.ts$/, "") === match) : allEntries;
   if (!entries.length) throw new Error(`No test entry matched ${JSON.stringify(match)}.`);
   const fakeVscode = path.join(testsDir, "helpers", "fake-vscode.ts");
@@ -80,12 +85,20 @@ try {
 
   const bundles = entries.map((entry) => path.join(tempDir, entry.replace(/\.ts$/, ".cjs")));
   run(process.execPath, ["--test", ...bundles], {
-    env: { ...process.env, NODE_PATH: path.join(root, "node_modules") },
+    // The real-shell tests are on by default: they skip themselves per shell, so a machine
+    // without the shell simply covers less, and leaving them off hid the only coverage that
+    // settles a script's fate against an actual readline. Set it to 0 to turn them off.
+    env: {
+      ...process.env,
+      NODE_PATH: path.join(root, "node_modules"),
+      AGENTBRIDGE_PTY_INTEGRATION: process.env.AGENTBRIDGE_PTY_INTEGRATION ?? "1",
+    },
   });
 
   if (!skipPackage) {
     if (process.platform !== "win32") {
-      throw new Error("完整 Windows 发布包验收不支持当前平台；如只运行核心回归测试，请显式传入 --skip-package。");
+      if (requirePackage) throw new Error("完整 Windows 发布包验收不支持当前平台。");
+      console.log("[test] Skipping Windows packaging validation: unsupported platform (pass --require-package to fail instead).");
     } else {
       const packageDir = await mkdtemp(path.join(os.tmpdir(), "agentbridge-vsix-test-"));
       try {
@@ -115,7 +128,11 @@ try {
           `$zip=[System.IO.Compression.ZipFile]::OpenRead('${vsix.replace(/'/g, "''")}')`,
           "try { $zip.Entries | ForEach-Object { $_.FullName } } finally { $zip.Dispose() }",
         ].join("; ");
-        const listed = spawnSync("pwsh", ["-NoProfile", "-Command", ps], { cwd: packageWorkspace, encoding: "utf8" });
+        // pwsh is not installed everywhere; Windows PowerShell 5.1 can read the same archive.
+        let listed = spawnSync("pwsh", ["-NoProfile", "-Command", ps], { cwd: packageWorkspace, encoding: "utf8" });
+        if (listed.error) {
+          listed = spawnSync("powershell", ["-NoProfile", "-Command", ps], { cwd: packageWorkspace, encoding: "utf8" });
+        }
         if (listed.error) throw listed.error;
         if (listed.status !== 0) throw new Error(`VSIX ZIP inspection failed with code ${String(listed.status)}: ${listed.stderr}`);
         const entriesInVsix = listed.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
@@ -128,25 +145,43 @@ try {
           "media/icon.png",
           "media/agentbridge.svg",
           "runtime/bin/rg.exe",
+          "vendor/PSReadLine/PSReadLine.psd1",
           "package.nls.json",
           "package.nls.zh-cn.json",
           "README.md",
           "README.zh-CN.md",
           "CHANGELOG.md",
+          // The package carries vendor/PSReadLine (BSD-2-Clause) and runtime/bin/rg.exe, and
+          // this is the only file holding the BSD text. Nothing imports it, so losing it to a
+          // careless .vscodeignore line would leave every test green and the notice unshipped.
+          "THIRD_PARTY_NOTICES.md",
         ].map((value) => `${prefix}${value}`);
         const lowerEntries = new Set(entriesInVsix.map((value) => value.toLowerCase()));
         for (const requiredEntry of required) {
           if (!lowerEntries.has(requiredEntry.toLowerCase())) throw new Error(`VSIX missing required entry: ${requiredEntry}`);
         }
+        // The licence is looked for by shape and not by name because vsce renames a top-level
+        // LICENSE to LICENSE.txt on the way in, so the name in the archive is not the name in
+        // the repository. It is worth looking for at all for the same reason as the notices
+        // above: nothing imports it, so a package without one still reported success.
+        const licence = entriesInVsix
+          .map((value) => value.slice(prefix.length))
+          .find((value) => /^license(\.(md|txt))?$/i.test(value));
+        if (!licence) throw new Error(`VSIX does not ship a LICENSE file (entries: ${entriesInVsix.join(", ")})`);
         const forbidden = entriesInVsix.filter((value) => {
           const lower = value.toLowerCase();
           return lower.includes("/tests/")
             || lower.startsWith("tests/")
             || lower.includes("test-build")
             || lower.includes("mutation")
+            || lower.includes("workbuddy")
+            || lower.endsWith(".map")
             || lower.endsWith("tsconfig.test.json");
         });
         if (forbidden.length) throw new Error(`VSIX contains forbidden test artifacts:\n${forbidden.join("\n")}`);
+        if (entriesInVsix.length > 60) {
+          throw new Error(`VSIX has ${entriesInVsix.length} entries, expected at most 60: ${entriesInVsix.join("\n")}`);
+        }
         console.log(`[test] VSIX isolation OK (${entriesInVsix.length} ZIP entries, prefix ${JSON.stringify(prefix)}).`);
       } finally {
         await rm(packageDir, { recursive: true, force: true });

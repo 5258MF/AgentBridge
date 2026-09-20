@@ -84,6 +84,15 @@ export const zhMessages = {
   managedShellCleared: "Management Shell 自定义路径已清空。新 MCP 会话与新建终端将回退到默认 shell；如需所有会话立即套用，请 Stop + Start Bridge。",
   managedShellUpdated: "Management Shell 已更新为 {0}。新 MCP 会话与新建终端将使用它；如需所有会话立即套用，请 Stop + Start Bridge。",
   managedShellReset: "Management Shell 已重置为默认。",
+  // Raised while resolving the managed shell, before any MCP session exists. They surface in
+  // the panel's warning row, so they belong in the catalog with the rest of the shell text.
+  managedShellWindowsNeedsAbsolutePath: "managedShell.windows 需要绝对路径（例如 C:\\Program Files\\PowerShell\\7\\pwsh.exe），收到的值：{0}",
+  managedShellWindowsNotFound: "managedShell.windows 指定的 shell 路径不存在：{0}",
+  managedShellWindowsUnsupported: "managedShell.windows 只支持 PowerShell 5.1 / PowerShell 7 / cmd / bash / zsh，无法识别：{0}",
+  managedShellUnixNotOnPath: "managedShell.unix 指定的 shell 未在 PATH 中找到：{0}",
+  managedShellUnixNotFound: "managedShell.unix 指定的 shell 路径不存在：{0}",
+  managedShellWindowsDefaultMissing: "AgentBridge 默认 Management Shell 未找到：{0}。请在设置中指定一个可用的 shell（例如 C:\\Program Files\\PowerShell\\7\\pwsh.exe）。",
+  managedShellUnixDefaultMissing: "AgentBridge 未在默认路径找到 /bin/bash 或 /bin/sh；请在设置中手动指定 managedShell.unix。",
 
   // tabs
   tabConfig: "配置",
@@ -91,7 +100,6 @@ export const zhMessages = {
 
   // hero
   heroDescription: "把当前工作区的工具开放为远程 Streamable HTTP MCP 端点，供 ChatGPT 等远程 MCP 客户端连接。",
-  checkingBridgeStatus: "正在检查 Bridge 状态…",
   openFolderHint: "Bridge 需要一个工作区文件夹作为外部工具的根目录。",
   openFolderButton: "选择文件夹…",
   mcpAddressLabel: "MCP 地址",
@@ -106,6 +114,27 @@ export const zhMessages = {
   openWorkBuddy: "打开 WorkBuddy",
   openTrae: "打开 Trae",
   openQwen: "打开 Qwen",
+  openManus: "打开 Manus",
+  quickOpen: "快速打开",
+  quickOpenHelp: "在这里添加的快捷方式会显示在本页顶部，点击后在内置浏览器中打开。",
+  quickLinkNamePlaceholder: "名称",
+  quickLinkUrlPlaceholder: "https://…",
+  quickLinkAdd: "添加",
+  quickLinkOpen: "打开",
+  quickLinkDelete: "删除",
+  quickLinkDeleteConfirm: "删除快速打开『{0}』？",
+  quickLinkDeleteConfirmDetail: "该按钮将从本页顶部移除。",
+  quickLinkEdit: "编辑",
+  quickLinkSave: "保存",
+  quickLinkCancel: "取消",
+  quickLinkEditing: "正在编辑：{0}",
+  quickLinkConfirmDelete: "确认删除",
+  cancel: "取消",
+  quickLinkNameRequired: "请输入快捷方式名称。",
+  quickLinkUrlInvalid: "请输入有效的 http:// 或 https:// 地址。",
+  quickLinkUrlDuplicate: "该地址已在列表中。",
+  quickLinksEmpty: "还没有自定义快捷方式。",
+  quickLinksInvalid: "快捷方式数据无效。",
   securityNote: "Bridge 可以编辑文件并执行终端命令。请勿泄露 MCP 地址。",
 
   // connection card
@@ -142,6 +171,23 @@ export const zhMessages = {
   fixedLocalPort: "固定本地端口",
   serviceUrlLabel: "Cloudflare Service URL",
   namedHelp: "在 Cloudflare Tunnels 中，发布的应用主机名必须与上面的公网主机名一致，Service URL 必须与此本地地址完全一致。",
+  // The QuickPick and the input boxes of the command palette entries. These are raised from
+  // the extension host, not from the panel, which is why they need keys of their own.
+  tunnelProviderTitle: "AgentBridge · 隧道提供方",
+  currentTunnelProvider: "当前：{0}",
+  quickTunnelPickDescription: "免费免账号，公网地址重启后变化",
+  namedTunnelPickDescription: "固定域名，需 Cloudflare 账号、Tunnel Token 与路由配置",
+  ngrokPickDescription: "保留域名，需 ngrok 账号与 Authtoken",
+  namedHostnameTitle: "Cloudflare Named Tunnel · 公网主机名",
+  namedHostnamePrompt: "Cloudflare Tunnels 中的公网主机名，例如 mcp.example.com",
+  namedHostnameRequired: "Cloudflare Named Tunnel 的公网主机名必须是字符串。",
+  namedTokenTitle: "Cloudflare Named Tunnel · Tunnel Token",
+  namedTokenPrompt: "Cloudflare Zero Trust 中的 Tunnel Token（eyJ...）。留空则保留已有 Token。",
+  namedTokenRequired: "必须提供 Cloudflare Tunnel Token。",
+  namedTokenMustBeString: "Cloudflare Tunnel Token 必须是字符串。",
+  namedLocalPortTitle: "Cloudflare Named Tunnel · 本地端口",
+  namedLocalPortPrompt: "必须与隧道公网主机名的 Service URL 端口一致。",
+  namedLocalPortRequired: "Cloudflare Named Tunnel 的本地端口必须是数字。",
   saveNamedTunnel: "保存 Named Tunnel",
   clearToken: "清除 Token",
   tunnelStatusLabel: "隧道状态",
@@ -155,7 +201,6 @@ export const zhMessages = {
   cloudflaredHelpSummary: "cloudflared 配置帮助",
   installCloudflaredIntro: "一次性安装 cloudflared。Quick Tunnel 不需要 Cloudflare 账号、Token 或域名。",
   installOrUpdateCloudflared: "1. 安装或更新 cloudflared",
-  verifyCloudflared: "2. 验证 cloudflared",
   wingetInstallHelp: "使用 Winget 自动安装。如果未检测到 Winget，请从 Cloudflare 官方下载页手动安装。",
   homebrewInstallHelp: "使用 Homebrew 自动安装。Apple Silicon 默认位于 /opt/homebrew，Intel Mac 默认位于 /usr/local。没有 Homebrew 时请先安装 Homebrew 或改用手动安装。",
   reloadAfterInstallHelp: "如果 VS Code 暂时找不到刚安装的 cloudflared，请重载或重启 VS Code 后再次点击“检查隧道”。",
@@ -216,7 +261,6 @@ export const zhMessages = {
   wingetNotFound: "未检测到 Winget。请从 Cloudflare 官方下载页手动安装 cloudflared，然后再次点击“检查隧道”。",
   homebrewNotFound: "未检测到 Homebrew。请先安装 Homebrew，或手动安装 cloudflared，然后再次点击“检查隧道”。",
   cloudflaredAutoInstallUnavailable: "当前平台不支持一键安装 cloudflared。请按照 Cloudflare 官方安装说明手动安装，然后再次点击“检查隧道”。",
-  cloudflaredInstallFailed: "cloudflared 安装失败：{0}",
   cloudflaredInstallCancelled: "cloudflared 安装已取消。",
   cloudflaredInstallPermissionDenied: "安装 cloudflared 时权限不足：{0}",
   cloudflaredInstallCommandFailed: "cloudflared 安装命令失败：{0}",
@@ -231,7 +275,7 @@ export const zhMessages = {
   createOrOpenTunnel: "2. 创建或打开 Cloudflare Tunnel 并复制 Token",
   openCloudflareTunnels: "打开 Cloudflare Tunnels",
   addPublishedRoute: "3. 添加发布的应用路由",
-  publishedRouteHelp: "将公网主机名设为上面保存的值，Service URL 设为 AgentBridge 显示的 http://127.0.0.1:&lt;port&gt;。",
+  publishedRouteHelp: "将公网主机名设为上面保存的值，Service URL 设为 AgentBridge 显示的 http://127.0.0.1:<port>。",
   checkDnsRecords: "4. 检查主机名 DNS 记录",
   openCloudflareDns: "打开 Cloudflare DNS",
   setupNgrokSummary: "配置 ngrok",
@@ -248,12 +292,12 @@ export const zhMessages = {
   persistentOffTitle: "Bridge 将仅在手动启动时运行",
 
   readOnlyLabel: "只读模式",
-  readOnlyHelp: "禁用 apply_patch、run_command、send_command_input 和 terminate_command,远程 AI 只能读取和分析,不能修改文件或执行命令。切换立即生效。",
-  readOnlyOnTitle: "只读模式已启用:修改与执行类工具已被拦截",
-  readOnlyOffTitle: "只读模式未启用:AI 可修改文件并执行命令",
+  readOnlyHelp: "禁用 apply_patch、run_command、send_command_input 和 terminate_command，远程 AI 只能读取和分析，不能修改文件或执行命令。切换立即生效。",
+  readOnlyOnTitle: "只读模式已启用：修改与执行类工具已被拦截",
+  readOnlyOffTitle: "只读模式未启用：AI 可修改文件并执行命令",
   readOnlyBadge: "只读模式",
-  readOnlyEnabledNotice: "只读模式已开启并即时生效;已连接的客户端重新拉取工具列表后,被禁工具将不再显示。",
-  readOnlyDisabledNotice: "只读模式已关闭;客户端重新拉取工具列表后恢复全部工具。",
+  readOnlyEnabledNotice: "只读模式已开启并即时生效；已连接的客户端重新拉取工具列表后，被禁工具将不再显示。",
+  readOnlyDisabledNotice: "只读模式已关闭；客户端重新拉取工具列表后恢复全部工具。",
 
   // advanced
   advancedSettings: "高级设置",
@@ -289,7 +333,7 @@ export const zhMessages = {
   tunnelProtocolAutoLabel: "自动",
   tunnelProtocolQuicLabel: "QUIC",
   tunnelProtocolHttp2Label: "HTTP/2",
-  openModeHelp: "默认「智能」:ChatGPT / Arena 在 VS Code 内置 Simple Browser 中打开，其他外链仍跳 OS 默认浏览器。「全部内嵌」连 Cloudflare / ngrok 等第三方 OAuth dashboard 也强制嵌 Simple Browser，但 iframe X-Frame-Options 限制可能导致登录卡住。「全部外跳」恢复当前 agentbridge 早期所有链接走 OS 浏览器的行为。",
+  openModeHelp: "默认「智能」：ChatGPT / Arena 在 VS Code 内置 Simple Browser 中打开，其他外链仍跳 OS 默认浏览器。「全部内嵌」连 Cloudflare / ngrok 等第三方 OAuth dashboard 也强制嵌 Simple Browser，但 iframe X-Frame-Options 限制可能导致登录卡住。「全部外跳」恢复当前 agentbridge 早期所有链接走 OS 浏览器的行为。",
   smart: "智能",
   embedAll: "全部内嵌",
   externalAll: "全部外跳",
@@ -374,6 +418,7 @@ export const zhMessages = {
   readySuffix: "{0} · 已就绪",
   quickAddressCopied: "临时 MCP 地址已复制。每次重启 Bridge 后，请在所使用的 MCP 客户端中更新地址。",
   quickAddressCopyFailed: "无法自动复制临时 MCP 地址，请使用复制按钮手动复制。",
+  openExternalBlocked: "只能打开 http(s) 链接，已拒绝：{0}",
   tokenSaved: "Token 已安全保存。留空则保持不变。",
   tokenNotSaved: "尚未保存 Token。",
   unknown: "（未知）",
@@ -385,8 +430,7 @@ export const zhMessages = {
   enterNgrokDomainFirst: "启动 Bridge 前请先填写 ngrok 保留域名。",
   saveNamedConfigFirst: "启动 Bridge 前请先保存 Cloudflare 主机名与 Tunnel Token。",
   confirmClearToken: "清除 Cloudflare Tunnel Token？",
-  workspaceRootHint: "Bridge 需要一个工作区文件夹作为外部工具的根目录。",
-  sessionIdRequired: "sessionId must be a string.",
+  sessionIdRequired: "sessionId 必须是字符串。",
 } as const satisfies Record<string, string>;
 
 export type MessageKey = keyof typeof zhMessages;
@@ -466,12 +510,18 @@ export const enMessages: Record<MessageKey, string> = {
   managedShellCleared: "Management Shell custom path cleared. New MCP sessions and new terminals will fall back to the default shell; to apply to all sessions immediately, Stop + Start Bridge.",
   managedShellUpdated: "Management Shell updated to {0}. New MCP sessions and new terminals will use it; to apply to all sessions immediately, Stop + Start Bridge.",
   managedShellReset: "Management Shell reset to default.",
+  managedShellWindowsNeedsAbsolutePath: "managedShell.windows needs an absolute path (for example C:\\Program Files\\PowerShell\\7\\pwsh.exe), received: {0}",
+  managedShellWindowsNotFound: "The shell path given in managedShell.windows does not exist: {0}",
+  managedShellWindowsUnsupported: "managedShell.windows supports only PowerShell 5.1 / PowerShell 7 / cmd / bash / zsh, could not recognise: {0}",
+  managedShellUnixNotOnPath: "The shell given in managedShell.unix was not found on PATH: {0}",
+  managedShellUnixNotFound: "The shell path given in managedShell.unix does not exist: {0}",
+  managedShellWindowsDefaultMissing: "AgentBridge could not find its default Management Shell: {0}. Set a usable shell in settings (for example C:\\Program Files\\PowerShell\\7\\pwsh.exe).",
+  managedShellUnixDefaultMissing: "AgentBridge found neither /bin/bash nor /bin/sh in the default locations; set managedShell.unix manually in settings.",
 
   tabConfig: "Config",
   tabSession: "Session",
 
   heroDescription: "Expose your current workspace tools as a remote Streamable HTTP MCP endpoint for ChatGPT and other remote MCP clients.",
-  checkingBridgeStatus: "Checking Bridge status…",
   openFolderHint: "Bridge needs a workspace folder as the root for external tools.",
   openFolderButton: "Select Folder…",
   mcpAddressLabel: "MCP Address",
@@ -486,6 +536,27 @@ export const enMessages: Record<MessageKey, string> = {
   openWorkBuddy: "Open WorkBuddy",
   openTrae: "Open Trae",
   openQwen: "Open Qwen",
+  openManus: "Open Manus",
+  quickOpen: "Quick open",
+  quickOpenHelp: "Shortcuts you add here appear as buttons at the top of this page and open in the embedded browser.",
+  quickLinkNamePlaceholder: "Name",
+  quickLinkUrlPlaceholder: "https://…",
+  quickLinkAdd: "Add",
+  quickLinkOpen: "Open",
+  quickLinkDelete: "Delete",
+  quickLinkDeleteConfirm: "Delete the quick open shortcut \"{0}\"?",
+  quickLinkDeleteConfirmDetail: "The button is removed from the top of this page.",
+  quickLinkEdit: "Edit",
+  quickLinkSave: "Save",
+  quickLinkCancel: "Cancel",
+  quickLinkEditing: "Editing: {0}",
+  quickLinkConfirmDelete: "Confirm",
+  cancel: "Cancel",
+  quickLinkNameRequired: "Enter a name for the shortcut.",
+  quickLinkUrlInvalid: "Enter a valid http:// or https:// address.",
+  quickLinkUrlDuplicate: "This address is already in the list.",
+  quickLinksEmpty: "No custom shortcuts yet.",
+  quickLinksInvalid: "Invalid quick-open shortcut data.",
   securityNote: "Bridge can edit files and run terminal commands. Do not share the MCP address.",
 
   connectionSettings: "Connection Settings",
@@ -521,6 +592,21 @@ export const enMessages: Record<MessageKey, string> = {
   fixedLocalPort: "Fixed Local Port",
   serviceUrlLabel: "Cloudflare Service URL",
   namedHelp: "In Cloudflare Tunnels, the published application hostname must match the public hostname above, and the Service URL must exactly match this local address.",
+  tunnelProviderTitle: "AgentBridge · Tunnel Provider",
+  currentTunnelProvider: "Current: {0}",
+  quickTunnelPickDescription: "Free, no account needed; the public address changes on restart",
+  namedTunnelPickDescription: "Fixed hostname; needs a Cloudflare account, a Tunnel Token and a route",
+  ngrokPickDescription: "Reserved domain; needs an ngrok account and Authtoken",
+  namedHostnameTitle: "Cloudflare Named Tunnel · Hostname",
+  namedHostnamePrompt: "Public hostname from Cloudflare Tunnels, e.g. mcp.example.com",
+  namedHostnameRequired: "Cloudflare Named Tunnel hostname must be a string.",
+  namedTokenTitle: "Cloudflare Named Tunnel · Tunnel Token",
+  namedTokenPrompt: "Tunnel token from Cloudflare Zero Trust (eyJ...). Leave blank to keep the existing token.",
+  namedTokenRequired: "Cloudflare Tunnel Token is required.",
+  namedTokenMustBeString: "Cloudflare Tunnel Token must be a string.",
+  namedLocalPortTitle: "Cloudflare Named Tunnel · Local Port",
+  namedLocalPortPrompt: "Must match the tunnel's public hostname Service URL port.",
+  namedLocalPortRequired: "Cloudflare Named Tunnel local port must be a number.",
   saveNamedTunnel: "Save Named Tunnel",
   clearToken: "Clear Token",
   tunnelStatusLabel: "Tunnel Status",
@@ -534,7 +620,6 @@ export const enMessages: Record<MessageKey, string> = {
   cloudflaredHelpSummary: "cloudflared Setup Help",
   installCloudflaredIntro: "One-time cloudflared install. Quick Tunnel needs no Cloudflare account, token or domain.",
   installOrUpdateCloudflared: "1. Install or update cloudflared",
-  verifyCloudflared: "2. Verify cloudflared",
   wingetInstallHelp: "Install automatically with Winget. If Winget is unavailable, install manually from the official Cloudflare downloads page.",
   homebrewInstallHelp: "Install automatically with Homebrew. The default prefix is /opt/homebrew on Apple Silicon and /usr/local on Intel Macs. If Homebrew is unavailable, install Homebrew first or use the manual download.",
   reloadAfterInstallHelp: "If VS Code cannot find the newly installed cloudflared yet, reload or restart VS Code and click Check Tunnel again.",
@@ -595,7 +680,6 @@ export const enMessages: Record<MessageKey, string> = {
   wingetNotFound: "Winget was not found. Install cloudflared manually from the official Cloudflare downloads page, then click Check Tunnel again.",
   homebrewNotFound: "Homebrew was not found. Install Homebrew or install cloudflared manually, then click Check Tunnel again.",
   cloudflaredAutoInstallUnavailable: "One-click cloudflared installation is not available on this platform. Follow the official Cloudflare installation instructions, then click Check Tunnel again.",
-  cloudflaredInstallFailed: "cloudflared installation failed: {0}",
   cloudflaredInstallCancelled: "cloudflared installation was cancelled.",
   cloudflaredInstallPermissionDenied: "Insufficient permission to install cloudflared: {0}",
   cloudflaredInstallCommandFailed: "The cloudflared installation command failed: {0}",
@@ -610,7 +694,7 @@ export const enMessages: Record<MessageKey, string> = {
   createOrOpenTunnel: "2. Create or open a Cloudflare Tunnel and copy the Token",
   openCloudflareTunnels: "Open Cloudflare Tunnels",
   addPublishedRoute: "3. Add a published application route",
-  publishedRouteHelp: "Set the public hostname to the value saved above, and the Service URL to the AgentBridge-displayed http://127.0.0.1:&lt;port&gt;.",
+  publishedRouteHelp: "Set the public hostname to the value saved above, and the Service URL to the AgentBridge-displayed http://127.0.0.1:<port>.",
   checkDnsRecords: "4. Check the hostname DNS records",
   openCloudflareDns: "Open Cloudflare DNS",
   setupNgrokSummary: "Configure ngrok",
@@ -751,6 +835,7 @@ export const enMessages: Record<MessageKey, string> = {
   readySuffix: "{0} · ready",
   quickAddressCopied: "Temporary MCP address copied. After every Bridge restart, update it in the MCP client you use.",
   quickAddressCopyFailed: "Could not copy the temporary MCP address automatically. Use the copy button to copy it manually.",
+  openExternalBlocked: "Only http(s) links can be opened. Refused: {0}",
   tokenSaved: "Token saved securely. Leave empty to keep unchanged.",
   tokenNotSaved: "No token saved yet.",
   unknown: "(unknown)",
@@ -762,7 +847,6 @@ export const enMessages: Record<MessageKey, string> = {
   enterNgrokDomainFirst: "Enter your ngrok reserved domain before starting Bridge.",
   saveNamedConfigFirst: "Save the Cloudflare hostname and Tunnel Token before starting Bridge.",
   confirmClearToken: "Clear the Cloudflare Tunnel Token?",
-  workspaceRootHint: "Bridge needs a workspace folder as the root for external tools.",
   sessionIdRequired: "sessionId must be a string.",
 };
 
@@ -809,6 +893,23 @@ export function createTranslator(lang: Lang) {
   return (key: MessageKey, ...args: unknown[]): string => formatMessage(dict[key], args);
 }
 
+let cachedTranslator: ReturnType<typeof createTranslator> | undefined;
+
 export function translate(key: MessageKey, ...args: unknown[]): string {
-  return createTranslator(detectLang())(key, ...args);
+  // Built once and kept: every message used to read the language setting and then build a
+  // translator over the whole catalogue again, and the panel and the activity log translate on
+  // paths that run for every entry they show. The setting is the user's, and changing it is
+  // answered where the configuration change arrives - see invalidateTranslator.
+  cachedTranslator ??= createTranslator(detectLang());
+  return cachedTranslator(key, ...args);
+}
+
+/**
+ * Forget the translator, so the next message reads the language setting again.
+ *
+ * Called when `agentbridge.language` changes. Nothing else needs to: the display language it
+ * falls back to is fixed for the lifetime of the window.
+ */
+export function invalidateTranslator(): void {
+  cachedTranslator = undefined;
 }

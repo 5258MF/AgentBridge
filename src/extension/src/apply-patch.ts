@@ -38,8 +38,10 @@ export type ApplyPatchErrorCode =
   | "UNSUPPORTED_ENCODING"
   | "FILE_TOO_LARGE"
   | "STALE_FILE"
+  | "MISSING_EXPECTED_VERSION"
   | "PATCH_CONTEXT_NOT_FOUND"
   | "PATCH_CONTEXT_AMBIGUOUS"
+  | "PATCH_CONTEXT_MISMATCH"
   | "ABORTED"
   | "ROLLBACK_FAILED"
   | "IO_ERROR";
@@ -94,6 +96,15 @@ interface ParsedHunk {
   additions: number;
   deletions: number;
   endOfFile: boolean;
+  /**
+   * Whether the hunk's old side is marked as ending without a newline. A marker is a claim
+   * about a file's last line, so it says as much about where the hunk sits as about the
+   * newline: read against the file, it is only consistent with a hunk that reaches the end of
+   * a file that really has no trailing newline.
+   */
+  oldEndsWithoutNewline: boolean;
+  /** The same claim for the new side. It decides what gets written back. */
+  newEndsWithoutNewline: boolean;
 }
 
 type ParsedOperation =
@@ -214,7 +225,35 @@ async function canonicalRoots(roots: string[]): Promise<string[]> {
   return Promise.all(roots.map((root) => realpath(root)));
 }
 
-async function resolveExistingPath(requestedPath: string, roots: string[]): Promise<ResolvedExistingPath> {
+/** Resolutions shared by one applyPatch call, keyed by the path as requested. */
+export interface PathResolutionCache {
+  existing: Map<string, ResolvedExistingPath>;
+  created: Map<string, ResolvedNewPath>;
+}
+
+export function createPathResolutionCache(): PathResolutionCache {
+  return { existing: new Map(), created: new Map() };
+}
+
+/**
+ * Resolves a path, reusing a result from the same applyPatch call when there is one. Locking,
+ * preflight and the write phase each used to call realpath independently, so a symlink swapped
+ * in between meant the lock was held on one real path while a different one was checked and
+ * then written — the mutual exclusion did not actually cover the file being changed.
+ */
+async function resolveExistingPath(
+  requestedPath: string,
+  roots: string[],
+  cache?: PathResolutionCache,
+): Promise<ResolvedExistingPath> {
+  const cached = cache?.existing.get(requestedPath);
+  if (cached) return cached;
+  const resolved = await resolveExistingPathOnce(requestedPath, roots);
+  cache?.existing.set(requestedPath, resolved);
+  return resolved;
+}
+
+async function resolveExistingPathOnce(requestedPath: string, roots: string[]): Promise<ResolvedExistingPath> {
   const canonical = await canonicalRoots(roots);
   const candidates = path.isAbsolute(requestedPath)
     ? [requestedPath]
@@ -247,7 +286,21 @@ async function resolveExistingPath(requestedPath: string, roots: string[]): Prom
   throw new PatchToolError("PATH_OUTSIDE_WORKSPACE", `${requestedPath} resolves outside the allowed workspace roots.`);
 }
 
-async function resolveNewPath(requestedPath: string, roots: string[]): Promise<ResolvedNewPath> {
+/**
+ * Resolves a path that need not exist yet. The parent directory is resolved through
+ * realpath, so it is exposed to the same swap: the locks and the write each resolved it
+ * afresh, and a symlinked parent replaced in between left the pair guarding one directory
+ * while another was written to. Results are shared within one call like the existing ones.
+ */
+export async function resolveNewPath(requestedPath: string, roots: string[], cache?: PathResolutionCache): Promise<ResolvedNewPath> {
+  const cached = cache?.created.get(requestedPath);
+  if (cached) return cached;
+  const resolved = await resolveNewPathOnce(requestedPath, roots);
+  cache?.created.set(requestedPath, resolved);
+  return resolved;
+}
+
+async function resolveNewPathOnce(requestedPath: string, roots: string[]): Promise<ResolvedNewPath> {
   const canonical = await canonicalRoots(roots);
   const candidates = path.isAbsolute(requestedPath)
     ? [path.resolve(requestedPath)]
@@ -303,7 +356,7 @@ function decodeSnapshot(bytes: Buffer, config: ApplyPatchConfig, displayPath: st
     throw new PatchToolError("UNSUPPORTED_ENCODING", `${displayPath} is not valid UTF-8 text.`);
   }
 
-  const eol: "\n" | "\r\n" = text.includes("\r\n") ? "\r\n" : "\n";
+  const eol = dominantEol(text);
   const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const endsWithNewline = normalized.endsWith("\n");
   const body = endsWithNewline ? normalized.slice(0, -1) : normalized;
@@ -321,16 +374,144 @@ function decodeSnapshot(bytes: Buffer, config: ApplyPatchConfig, displayPath: st
 
 function encodeText(lines: string[], endsWithNewline: boolean, eol: "\n" | "\r\n", bom: boolean): Buffer {
   let normalized = lines.join("\n");
-  if (endsWithNewline) normalized += "\n";
+  // An empty file has no line to terminate, so emptying a file must not leave a lone "\n"
+  // behind — the result has to be zero bytes, not a blank line.
+  if (endsWithNewline && lines.length > 0) normalized += "\n";
   const text = eol === "\r\n" ? normalized.replace(/\n/g, "\r\n") : normalized;
   const body = Buffer.from(text, "utf8");
   return bom ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]) : body;
 }
 
+/**
+ * Explain an Add File that landed on a file which is already there.
+ *
+ * An existing *empty* file is the one case a caller cannot act on from the code alone: Add is
+ * refused, and Update looks like it needs context to match against. It does not — a file with
+ * no lines has exactly one position, so a hunk of additions only is unambiguous there. Say so,
+ * or the only way out a reader can see is deleting the file first.
+ */
+async function fileAlreadyExistsMessage(absolutePath: string, displayPath: string): Promise<string> {
+  const base = `${displayPath} already exists.`;
+  let size: number;
+  try {
+    const info = await stat(absolutePath);
+    if (!info.isFile()) return base;
+    size = info.size;
+  } catch {
+    return base;
+  }
+  if (size !== 0) return base;
+  return `${base} It is empty: use Update File with a hunk of additions only (no context, no removals), which is unambiguous against a file with no lines.`;
+}
+
+/**
+ * The line ending to write back. Chooses the dominant one rather than reacting to a single
+ * CRLF: a mostly-LF file with one stray CRLF used to be rewritten as CRLF throughout, so a
+ * one-line patch turned into a whole-file change. Genuinely mixed files are still normalized
+ * to the winner — fixing that properly needs per-line endings in the snapshot.
+ */
+export function dominantEol(text: string): "\n" | "\r\n" {
+  const crlf = (text.match(/\r\n/g) ?? []).length;
+  const lf = (text.match(/(?<!\r)\n/g) ?? []).length;
+  return crlf > lf ? "\r\n" : "\n";
+}
+
+/**
+ * One file, one spelling. The duplicate check, the resolution cache and the expected-version
+ * lookup all compare paths as written, so "./a.txt" and "a.txt" used to be two unrelated
+ * entries: a patch updating both slipped past the duplicate check and applied the second
+ * edit to a snapshot taken before the first was written, and a version keyed "./a.txt" was
+ * reported as missing for a file the patch called "a.txt". Folding "." and ".." away here
+ * gives every spelling of one path a single form.
+ *
+ * The trim is kept on purpose: a model that writes `*** Add File: a.txt ` with a space at the end
+ * is far more common than a file whose name really begins or ends with one. A name like that
+ * cannot be addressed here at all - the space is gone before the path is looked up, and the
+ * format has no quoting to put it back - so the choice is between two callers, not two bugs.
+ */
 function normalizePatchPath(value: string): string {
   const trimmed = value.trim();
   if (!trimmed || trimmed.includes("\0")) throw new PatchToolError("INVALID_PATCH", "Patch paths must be non-empty.");
-  return trimmed.replace(/\\/g, "/");
+  const slashed = trimmed.replace(/\\/g, "/");
+  // A UNC prefix is two leading slashes and posix.normalize would fold them into one, which
+  // names a different Windows path, so it is put back afterwards.
+  const prefix = slashed.startsWith("//") ? "//" : "";
+  const rest = slashed.slice(prefix.length);
+  if (!rest) return prefix || trimmed;
+  return prefix + path.posix.normalize(rest);
+}
+
+/**
+ * Two paths that differ only in case name one file on Windows and on a macOS volume left
+ * case-insensitive, and two files on Linux. The duplicate check and the expected-version
+ * lookup folded case unconditionally, so on Linux a patch that legitimately edits `A.txt`
+ * and `a.txt` was refused as touching one path twice, and a version the caller keyed for
+ * one of them was offered as the version of the other. Folding only where the filesystem
+ * does. The platform is a parameter so both answers can be checked from any machine.
+ *
+ * Folding on macOS is the common case rather than the certain one: a volume can be formatted
+ * case-sensitive, and then `A.txt` and `a.txt` are two files that this reads as one. The volume's
+ * own property is not consulted - a patch that edits both on such a volume is refused as a
+ * duplicate instead of being applied to a file the check did not know it had two of.
+ */
+export function patchPathKey(value: string, platform: string = process.platform): string {
+  return platform === "win32" || platform === "darwin" ? value.toLowerCase() : value;
+}
+
+/**
+ * True when the line after `index` still belongs to the current hunk body. A blank line
+ * is an empty context line when real hunk content follows it, and a separator when the
+ * hunk or the patch ends there. Writers and models routinely strip the trailing space
+ * from context lines, so both shapes have to be told apart by what follows.
+ */
+function hunkBodyContinues(lines: readonly string[], index: number, endIndex: number): boolean {
+  const next = index + 1;
+  if (next >= endIndex) return false;
+  const row = lines[next]!;
+  // "*** End of File" terminates the hunk but the hunk still spans to the end of the file,
+  // so a blank line in front of it is the file's last (empty) line rather than a separator.
+  if (row === "*** End of File") return true;
+  return !row.startsWith("@@") && !row.startsWith("*** ");
+}
+
+function sameLines(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((line, i) => line === b[i]);
+}
+
+/**
+ * A patch is text a caller wrote, and what a caller writes is often wrapped in a code fence or
+ * preceded by a blank line. Neither changes what the patch says, so both are stripped before the
+ * directives are read - a fence costs a whole round trip otherwise, and the retry teaches the
+ * caller nothing about the patch itself.
+ *
+ * Only the outermost wrapper goes: a line inside a patch cannot start with a fence, because every
+ * line of a hunk body carries its own leading space, +/- or directive.
+ *
+ * The two ends are treated alike, which is the whole point of it: a fence is stripped from the
+ * front whether or not one closes it, and from the back whether or not one opened it. A caller
+ * that opens a fence and forgets to close it, or closes one it never opened, is describing the
+ * same wrapper from one side; refusing the second while forgiving the first made whether a patch
+ * was accepted depend on which half of the pair the caller dropped.
+ */
+function stripPatchWrapper(text: string): string[] {
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  let start = 0;
+  while (start < lines.length && lines[start]!.trim().length === 0) start += 1;
+  const fenced = /^(?:```|~~~)/.test(lines[start] ?? "");
+  if (fenced) {
+    start += 1;
+    while (start < lines.length && lines[start]!.trim().length === 0) start += 1;
+  }
+  let end = lines.length;
+  while (end > start && lines[end - 1]!.trim().length === 0) end -= 1;
+  // Every closing fence is wrapper, not only the first one: a caller that closes twice has made
+  // the same mistake as one that never closed at all, and the second fence used to be answered
+  // as content after the patch. Trailing blank lines inside the fence are wrapper too.
+  while (end > start && /^(?:```|~~~)/.test(lines[end - 1] ?? "")) {
+    end -= 1;
+    while (end > start && lines[end - 1]!.trim().length === 0) end -= 1;
+  }
+  return lines.slice(start, end);
 }
 
 function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperation[] {
@@ -338,8 +519,7 @@ function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperatio
     throw new PatchToolError("PATCH_TOO_LARGE", `Patch exceeds ${config.maxPatchBytes} bytes.`);
   }
 
-  const normalized = patchText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const lines = normalized.split("\n");
+  const lines = stripPatchWrapper(patchText);
   if (lines[0] !== "*** Begin Patch") throw new PatchToolError("INVALID_PATCH", "Patch must start with '*** Begin Patch'.");
   const endIndex = lines.lastIndexOf("*** End Patch");
   if (endIndex < 1) throw new PatchToolError("INVALID_PATCH", "Patch must end with '*** End Patch'.");
@@ -362,6 +542,13 @@ function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperatio
       const content: string[] = [];
       while (index < endIndex && !lines[index]!.startsWith("*** ")) {
         const row = lines[index]!;
+        // A blank line separates blocks here as it does everywhere else in the patch, so a
+        // file written with one between its Add File sections was rejected as a content line
+        // that had lost its '+'. An empty line in the file is still written as '+'.
+        if (row.trim().length === 0) {
+          index += 1;
+          continue;
+        }
         if (!row.startsWith("+")) {
           throw new PatchToolError("INVALID_PATCH", `Add File lines must start with '+': ${row}`);
         }
@@ -403,6 +590,9 @@ function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperatio
         let additions = 0;
         let deletions = 0;
         let endOfFile = false;
+        let lastMarker: string | null = null;
+        let oldNoNewlineAt: number | null = null;
+        let newNoNewlineAt: number | null = null;
 
         while (index < endIndex) {
           const row = lines[index]!;
@@ -415,8 +605,34 @@ function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperatio
           if (row.startsWith("*** Move to: ")) {
             throw new PatchToolError("INVALID_PATCH", "'*** Move to:' must appear immediately after '*** Update File:'.");
           }
+          // The canonical diff marks a side whose last line has no trailing newline. The
+          // marker follows the line it describes, so after a removal it belongs to the old
+          // side only, after an addition to the new side, and after context to both.
+          if (row === "\\ No newline at end of file") {
+            if (lastMarker === null) {
+              throw new PatchToolError("INVALID_PATCH", `'\\ No newline at end of file' must follow a line.`);
+            }
+            if (lastMarker !== "+") oldNoNewlineAt = oldLines.length - 1;
+            if (lastMarker !== "-") newNoNewlineAt = newLines.length - 1;
+            index += 1;
+            continue;
+          }
           if (row.length === 0) {
-            throw new PatchToolError("INVALID_PATCH", "Patch hunk lines must start with a space, '+' or '-'.");
+            // An empty line inside a hunk is an empty context line, provided the hunk
+            // body continues after it. A blank line sitting right before the next
+            // directive or the end of the patch is a separator, not file content.
+            if (hunkBodyContinues(lines, index, endIndex)) {
+              oldLines.push("");
+              newLines.push("");
+              // The line is context, so the marker has to say so: it is what a following
+              // "\ No newline at end of file" is read against, and leaving it at the previous
+              // line's marker attributed the marker to the wrong side - after an addition it
+              // then stated a fact about the new file only, and the check that the old file
+              // really ends without a newline was skipped for a file that does end with one.
+              lastMarker = " ";
+            }
+            index += 1;
+            continue;
           }
           const marker = row[0]!;
           const content = row.slice(1);
@@ -432,16 +648,50 @@ function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperatio
           } else {
             throw new PatchToolError("INVALID_PATCH", `Unsupported patch hunk line: ${row}`);
           }
+          lastMarker = marker;
           index += 1;
         }
 
-        if (oldLines.length === 0) {
-          throw new PatchToolError(
-            "INVALID_PATCH",
-            `Update hunk for ${filePath} has no old/context lines. Include exact surrounding context so the edit can be located safely.`,
-          );
+        // "No newline at end of file" can only be true of a file's last line. A marker that
+        // landed anywhere else in the hunk is not a statement about the file at all, and used
+        // to be taken as one: sitting after a context line in the middle of a hunk it silently
+        // stripped the file's trailing newline, and sitting after a removal it was discarded
+        // so the file kept one the patch said it would not.
+        if (oldNoNewlineAt !== null && oldNoNewlineAt !== oldLines.length - 1) {
+          throw new PatchToolError("INVALID_PATCH", `'\\ No newline at end of file' must follow the last line of the hunk.`);
         }
-        hunks.push({ oldLines, newLines, additions, deletions, endOfFile });
+        if (newNoNewlineAt !== null && newNoNewlineAt !== newLines.length - 1) {
+          throw new PatchToolError("INVALID_PATCH", `'\\ No newline at end of file' must follow the last line of the hunk.`);
+        }
+
+        // A hunk with no old lines is an insertion into an empty file. It is allowed here
+        // because the parser cannot see the target: applyHunks rejects it anywhere else,
+        // where an empty needle matches every position and reads back as ambiguous.
+        hunks.push({
+          oldLines,
+          newLines,
+          additions,
+          deletions,
+          endOfFile,
+          oldEndsWithoutNewline: oldNoNewlineAt !== null,
+          newEndsWithoutNewline: newNoNewlineAt !== null,
+        });
+      }
+
+      // Hunks are located by context search, so two hunks looking for the same text cannot
+      // both mean something: the second matches either the same original region again or the
+      // text the first one just produced, and silently overwrites it. Compare the searched-for
+      // text alone — a different replacement does not make the repeat meaningful, because the
+      // second hunk still cannot be placed independently of the first.
+      for (let i = 1; i < hunks.length; i += 1) {
+        for (let j = 0; j < i; j += 1) {
+          if (sameLines(hunks[i]!.oldLines, hunks[j]!.oldLines)) {
+            throw new PatchToolError(
+              "INVALID_PATCH",
+              `Update File ${filePath} has hunk ${i + 1} searching for the same text as hunk ${j + 1}. Each hunk is located by context, so the second one cannot be placed independently; give the hunks distinct context.`,
+            );
+          }
+        }
       }
 
       if (hunks.length === 0 && !moveTo) {
@@ -461,11 +711,11 @@ function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperatio
 
   const touched = new Set<string>();
   for (const operation of operations) {
-    const source = operation.path.toLocaleLowerCase();
+    const source = patchPathKey(operation.path);
     if (touched.has(source)) throw new PatchToolError("INVALID_PATCH", `Patch touches ${operation.path} more than once.`);
     touched.add(source);
     if (operation.action === "update" && operation.moveTo) {
-      const destination = operation.moveTo.toLocaleLowerCase();
+      const destination = patchPathKey(operation.moveTo);
       if (touched.has(destination)) throw new PatchToolError("INVALID_PATCH", `Patch destination ${operation.moveTo} is touched more than once.`);
       touched.add(destination);
     }
@@ -476,8 +726,17 @@ function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperatio
   return operations;
 }
 
-function findSequence(lines: string[], needle: string[], requireEndOfFile: boolean): number {
-  const candidates: number[] = [];
+/**
+ * Where a hunk's searched-for lines sit in the file: a position, -1 for nowhere, -2 for more
+ * than one place. Ambiguity is settled by the second candidate, so the scan stops there.
+ */
+export function findSequence(lines: string[], needle: string[], requireEndOfFile: boolean): number {
+  // Only the first candidate matters, and only up to the second: the answer is -1 when there
+  // is none, -2 when there are several, and a position when there is exactly one. Collecting
+  // every position was a full scan of the file for a needle that is almost always short and
+  // unique, and an empty needle - which the parser rejects later but this function still sees -
+  // built one candidate per line before anything looked at them.
+  let found = -1;
   for (let start = 0; start + needle.length <= lines.length; start += 1) {
     if (requireEndOfFile && start + needle.length !== lines.length) continue;
     let matches = true;
@@ -487,17 +746,25 @@ function findSequence(lines: string[], needle: string[], requireEndOfFile: boole
         break;
       }
     }
-    if (matches) candidates.push(start);
+    if (!matches) continue;
+    if (found >= 0) return -2;
+    found = start;
   }
-  if (candidates.length === 0) return -1;
-  if (candidates.length > 1) return -2;
-  return candidates[0]!;
+  return found;
 }
 
-function applyHunks(filePath: string, snapshot: TextFileSnapshot, hunks: ParsedHunk[]): { lines: string[]; additions: number; deletions: number } {
+function applyHunks(
+  filePath: string,
+  snapshot: TextFileSnapshot,
+  hunks: ParsedHunk[],
+): { lines: string[]; additions: number; deletions: number; endsWithNewline: boolean } {
   const lines = [...snapshot.lines];
   let additions = 0;
   let deletions = 0;
+  // Only a hunk that reaches the current end of the file decides the trailing newline; a hunk
+  // in the middle carries the parser's default of true and says nothing about the last line.
+  // Without this every ordinary edit forced a trailing newline onto files that had none.
+  let endsWithNewline = snapshot.endsWithNewline;
 
   for (const hunk of hunks) {
     const start = findSequence(lines, hunk.oldLines, hunk.endOfFile);
@@ -513,11 +780,32 @@ function applyHunks(filePath: string, snapshot: TextFileSnapshot, hunks: ParsedH
         `Hunk context matches multiple locations in ${filePath}. Include more unchanged context around the edit.`,
       );
     }
+    const reachesEnd = start + hunk.oldLines.length === lines.length;
+    // The old side's marker is a claim about the file as it stands now, so it has to be checked
+    // rather than believed: a patch written against a different trailing newline is a patch
+    // written against a different file, and applying it quietly wrote a newline the patch said
+    // was not there - or dropped one it said was.
+    // Only an explicit marker is checked. A patch that says nothing about the trailing newline
+    // makes no claim to contradict — the common case is a model that never heard of the marker,
+    // and refusing those would break every edit to a file that happens to end without one.
+    if (hunk.oldEndsWithoutNewline && !reachesEnd) {
+      throw new PatchToolError(
+        "PATCH_CONTEXT_MISMATCH",
+        `A hunk of ${filePath} marks the end of the file as having no trailing newline, but it does not reach the end of the file.`,
+      );
+    }
+    if (hunk.oldEndsWithoutNewline && reachesEnd && endsWithNewline) {
+      throw new PatchToolError(
+        "PATCH_CONTEXT_MISMATCH",
+        `A hunk of ${filePath} marks the end of the file as having no trailing newline, but the file ends with one. Re-read the file and regenerate the patch.`,
+      );
+    }
     lines.splice(start, hunk.oldLines.length, ...hunk.newLines);
     additions += hunk.additions;
     deletions += hunk.deletions;
+    if (reachesEnd) endsWithNewline = !hunk.newEndsWithoutNewline;
   }
-  return { lines, additions, deletions };
+  return { lines, additions, deletions, endsWithNewline };
 }
 
 function normalizedExpectedVersions(input: ApplyPatchInput): Map<string, string> {
@@ -526,7 +814,9 @@ function normalizedExpectedVersions(input: ApplyPatchInput): Map<string, string>
     if (typeof version !== "string" || !version.startsWith("sha256:")) {
       throw new PatchToolError("INVALID_PATCH", `expected_versions[${filePath}] must be a sha256:... version string.`);
     }
-    map.set(filePath.replace(/\\/g, "/").toLocaleLowerCase(), version);
+    // Same normalisation as patch paths, so "./a.txt", "a\b.txt" and stray whitespace resolve
+    // to the entry callers wrote rather than reporting the version as missing.
+    map.set(patchPathKey(normalizePatchPath(filePath)), version);
   }
   return map;
 }
@@ -535,21 +825,25 @@ async function loadSnapshot(filePath: string, displayPath: string, config: Apply
   return decodeSnapshot(await readFile(filePath), config, displayPath);
 }
 
-async function collectLockPaths(operations: ParsedOperation[], context: ApplyPatchContext): Promise<string[]> {
+async function collectLockPaths(
+  operations: ParsedOperation[],
+  context: ApplyPatchContext,
+  resolved: PathResolutionCache,
+): Promise<string[]> {
   const lockPaths: string[] = [];
   for (const operation of operations) {
     if (context.signal?.aborted) throw new DOMException("Patch application was cancelled.", "AbortError");
 
     if (operation.action === "add") {
-      const destination = await resolveNewPath(operation.path, context.workspaceRoots);
+      const destination = await resolveNewPath(operation.path, context.workspaceRoots, resolved);
       lockPaths.push(destination.absolutePath);
       continue;
     }
 
-    const source = await resolveExistingPath(operation.path, context.workspaceRoots);
+    const source = await resolveExistingPath(operation.path, context.workspaceRoots, resolved);
     lockPaths.push(source.absolutePath);
     if (operation.action === "update" && operation.moveTo) {
-      const destination = await resolveNewPath(operation.moveTo, context.workspaceRoots);
+      const destination = await resolveNewPath(operation.moveTo, context.workspaceRoots, resolved);
       lockPaths.push(destination.absolutePath);
     }
   }
@@ -561,22 +855,21 @@ async function preflight(
   input: ApplyPatchInput,
   context: ApplyPatchContext,
   config: ApplyPatchConfig,
-): Promise<{ plans: MutationPlan[]; lockPaths: string[] }> {
+  resolved: PathResolutionCache,
+): Promise<MutationPlan[]> {
   const expected = normalizedExpectedVersions(input);
   const plans: MutationPlan[] = [];
-  const lockPaths: string[] = [];
 
   for (const operation of operations) {
     if (context.signal?.aborted) throw new DOMException("Patch application was cancelled.", "AbortError");
 
     if (operation.action === "add") {
-      const destination = await resolveNewPath(operation.path, context.workspaceRoots);
-      lockPaths.push(destination.absolutePath);
+      const destination = await resolveNewPath(operation.path, context.workspaceRoots, resolved);
       if (context.checkPermission && !(await context.checkPermission(destination.absolutePath))) {
         throw new PatchToolError("PERMISSION_DENIED", `Creating ${operation.path} is not permitted by the current policy.`);
       }
       if (await pathExists(destination.absolutePath)) {
-        throw new PatchToolError("FILE_ALREADY_EXISTS", `${operation.path} already exists.`);
+        throw new PatchToolError("FILE_ALREADY_EXISTS", await fileAlreadyExistsMessage(destination.absolutePath, operation.path));
       }
       const newBytes = encodeText(operation.lines, operation.lines.length > 0, "\n", false);
       plans.push({
@@ -592,14 +885,22 @@ async function preflight(
       continue;
     }
 
-    const source = await resolveExistingPath(operation.path, context.workspaceRoots);
-    lockPaths.push(source.absolutePath);
+    const source = await resolveExistingPath(operation.path, context.workspaceRoots, resolved);
     if (context.checkPermission && !(await context.checkPermission(source.absolutePath))) {
       throw new PatchToolError("PERMISSION_DENIED", `Modifying ${operation.path} is not permitted by the current policy.`);
     }
     const snapshot = await loadSnapshot(source.absolutePath, operation.path, config);
-    const expectedVersion = expected.get(operation.path.toLocaleLowerCase());
-    if (expectedVersion && snapshot.version !== expectedVersion) {
+    const expectedVersion = expected.get(patchPathKey(operation.path));
+    // Editing or deleting an existing file without the version read_files reported is the
+    // one way a patch can silently overwrite content the agent never saw, so the version
+    // is mandatory here. Additions are exempt: a new file has no previous version.
+    if (!expectedVersion) {
+      throw new PatchToolError(
+        "MISSING_EXPECTED_VERSION",
+        `${operation.path} needs an expected version before it can be ${operation.action === "delete" ? "deleted" : "modified"}. Pass expected_versions["${operation.path}"] with the sha256:... version read_files returned for it.`,
+      );
+    }
+    if (snapshot.version !== expectedVersion) {
       throw new PatchToolError(
         "STALE_FILE",
         `${operation.path} changed since it was read. Expected ${expectedVersion}, current ${snapshot.version}. Re-read before patching.`,
@@ -622,10 +923,13 @@ async function preflight(
     }
 
     const applied = applyHunks(operation.path, snapshot, operation.hunks);
-    const newBytes = encodeText(applied.lines, snapshot.endsWithNewline, snapshot.eol, snapshot.bom);
+    // A "\ No newline" marker on the hunk that reaches the end of the file decides the new
+    // file's trailing newline; anywhere else the file keeps whatever it had. Without this a
+    // patch could never add or remove the final newline, so a diff handed back by apply_patch
+    // would not feed back in — the same change would silently do nothing the second time.
+    const newBytes = encodeText(applied.lines, applied.endsWithNewline, snapshot.eol, snapshot.bom);
     if (operation.moveTo) {
-      const destination = await resolveNewPath(operation.moveTo, context.workspaceRoots);
-      lockPaths.push(destination.absolutePath);
+      const destination = await resolveNewPath(operation.moveTo, context.workspaceRoots, resolved);
       if (context.checkPermission && !(await context.checkPermission(destination.absolutePath))) {
         throw new PatchToolError("PERMISSION_DENIED", `Moving to ${operation.moveTo} is not permitted by the current policy.`);
       }
@@ -662,7 +966,7 @@ async function preflight(
     }
   }
 
-  return { plans, lockPaths };
+  return plans;
 }
 
 async function assertSourceUnchanged(plan: MutationPlan): Promise<void> {
@@ -843,14 +1147,17 @@ export async function applyPatch(input: ApplyPatchInput, context: ApplyPatchCont
       throw new PatchToolError("INVALID_PATCH", "patch must be a non-empty string.");
     }
     const operations = parsePatch(input.patch, config);
-    const lockPaths = await collectLockPaths(operations, context);
+    // One resolution set for the whole call: locking, preflight and the write phase must all
+    // act on the same real path, or the lock does not cover the file being changed.
+    const resolved = createPathResolutionCache();
+    const lockPaths = await collectLockPaths(operations, context, resolved);
 
     return await withFileLocks(lockPaths, async () => {
       // Re-run all validation while locks are held. This protects concurrent AgentBridge writers and makes
       // expected_version/context checks authoritative immediately before mutation.
-      const locked = await preflight(operations, input, context, config);
+      const plans = await preflight(operations, input, context, config, resolved);
       const canonicalDiff = createCanonicalUnifiedDiff(
-        locked.plans.map((plan) => ({
+        plans.map((plan) => ({
           action: plan.action,
           old_path: plan.action === "add" ? undefined : plan.sourceDisplay,
           new_path: plan.action === "delete" ? undefined : plan.destinationDisplay ?? plan.sourceDisplay,
@@ -858,8 +1165,8 @@ export async function applyPatch(input: ApplyPatchInput, context: ApplyPatchCont
           new_bytes: plan.newBytes,
         })),
       );
-      await commitPlans(locked.plans, context.signal);
-      const files: AppliedPatchFile[] = locked.plans.map((plan) => ({
+      await commitPlans(plans, context.signal);
+      const files: AppliedPatchFile[] = plans.map((plan) => ({
         action: plan.action,
         path: plan.sourceDisplay,
         ...(plan.destinationDisplay ? { destination_path: plan.destinationDisplay } : {}),

@@ -1,19 +1,72 @@
 import * as vscode from "vscode";
-import { BridgeManager, BridgeStartCancelledError, type BridgeStatus } from "./bridge-server.js";
+import { BridgeManager, BridgeStartCancelledError, DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT, type BridgeStatus } from "./bridge-server.js";
 import { BridgePanelProvider } from "./bridge-panel.js";
-import { IdeToolBroker, invalidateManagedShellCache } from "./ide-tool-broker.js";
-import { translate } from "./i18n.js";
+import { IdeToolBroker, invalidateManagedShellCache, setIdeToolWarningSink } from "./ide-tool-broker.js";
+import { invalidateTranslator, translate } from "./i18n.js";
+import { boundedInteger } from "./bounded-integer.js";
+import { workspaceFolders } from "./workspace-roots.js";
+import fs from "node:fs";
+import path from "node:path";
 
 let activeBridge: BridgeManager | undefined;
 
-function bridgeWorkspaceUri(relativePath: string): vscode.Uri {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) throw new Error("No workspace folder is open.");
-  const normalized = relativePath.trim().replace(/\\/g, "/").replace(/^\.\//, "");
-  if (!normalized || normalized === "." || normalized.startsWith("../") || normalized.includes("/../") || normalized.startsWith("/")) {
+/**
+ * The line and column a bridge resource is to be opened at.
+ *
+ * A position counts from one and is a whole number, and a caller sending 2.5, -1, Infinity or
+ * a string used to be given exactly that: the fractional part was dropped by the constructor
+ * without a word, a negative number landed before the first line, and Infinity named a line no
+ * document has. Each is now brought into range the way every other number the bridge receives
+ * is, so a caller that sent something else is answered with the first line rather than with a
+ * different line entirely - and a value that is not an integer at all is the fallback, which
+ * is what the rest of the bridge does with one.
+ */
+export function bridgeOpenPosition(input: { line?: unknown; column?: unknown }): { line: number; column: number } {
+  return {
+    line: boundedInteger(input.line, 1, 1, Number.MAX_SAFE_INTEGER, "line").value,
+    column: boundedInteger(input.column, 1, 1, Number.MAX_SAFE_INTEGER, "column").value,
+  };
+}
+
+/**
+ * Split a caller-supplied path into the segments it names below the workspace root.
+ *
+ * Every segment is resolved against what came before it, so ".." can be honoured when it
+ * stays inside the root and rejected when it would climb out of it. The checks this
+ * replaced only recognised ".." followed by a separator, so a bare ".." — and "./..",
+ * which is rewritten to it — slipped through and resolved to the workspace's parent.
+ *
+ * An absolute path is rejected rather than reinterpreted. Stripping the leading separator
+ * and joining the rest onto the root would turn "/etc/passwd" into <root>/etc/passwd: no
+ * escape, but the caller silently gets a different file from the one it named.
+ */
+export function bridgeWorkspaceSegments(relativePath: string): string[] {
+  const normalized = relativePath.trim().replace(/\\/g, "/");
+  // POSIX absolute, and a Windows drive-qualified path ("C:/x") whose colon would otherwise
+  // become an ordinary segment name.
+  if (normalized.startsWith("/") || /^[a-zA-Z]:\/?/.test(normalized)) {
     throw new Error(`Invalid Bridge workspace path: ${relativePath}`);
   }
-  return vscode.Uri.joinPath(folder.uri, ...normalized.split("/").filter(Boolean));
+  const segments: string[] = [];
+  for (const segment of normalized.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length === 0) throw new Error(`Invalid Bridge workspace path: ${relativePath}`);
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return segments;
+}
+
+function bridgeWorkspaceUri(relativePath: string): vscode.Uri {
+  const segments = bridgeWorkspaceSegments(relativePath);
+  const folders = workspaceFolders();
+  // The folder that has the file, not always the first one: in a window holding two folders a
+  // click in the panel opened <root1>/<path> for a file that only exists under the second.
+  const folder = folders.find((candidate) => fs.existsSync(path.join(candidate.uri.fsPath, ...segments))) ?? folders[0]!;
+  return vscode.Uri.joinPath(folder.uri, ...segments);
 }
 
 function bridgeDiffSnippet(diff: string, filePath?: string): { before: string; after: string } {
@@ -43,6 +96,9 @@ function bridgeDiffSnippet(diff: string, filePath?: string): { before: string; a
 export function activate(context: vscode.ExtensionContext): void {
   const t = translate;
   const output = vscode.window.createOutputChannel("AgentBridge");
+  // Tool-level warnings (a bridged temp script that could not be unlinked, say) have to land
+  // where the user can read them; the extension host's console is not that place.
+  setIdeToolWarningSink((message) => output.appendLine(message));
   const ideToolBroker = new IdeToolBroker();
   const bridge = new BridgeManager(context, output, ideToolBroker);
   activeBridge = bridge;
@@ -66,7 +122,8 @@ export function activate(context: vscode.ExtensionContext): void {
       statusBarItem.tooltip = `Bridge error: ${status.lastError}\nClick to view output`;
     } else {
       statusBarItem.text = `${icon} Bridge`;
-      statusBarItem.tooltip = `Bridge ${status.state}\nClick to view output`;
+      const tunnel = status.lastError ? `\nTunnel: ${status.lastError}` : "";
+      statusBarItem.tooltip = `Bridge ${status.state}${tunnel}\nClick to view output`;
     }
   }
 
@@ -86,6 +143,12 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (event.affectsConfiguration("agentbridge.bridge.readOnlyMode")) {
         bridge.setReadOnlyMode(vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("readOnlyMode", false));
+      }
+      // The language a message is written in is decided once, so a change to the setting has to
+      // be told about: without this the panel and the log went on answering in the language
+      // they started in.
+      if (event.affectsConfiguration("agentbridge.language")) {
+        invalidateTranslator();
       }
     }),
     vscode.window.registerWebviewViewProvider("agentbridge.bridge.panel", bridgePanel),
@@ -160,13 +223,19 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("agentbridge.bridge.openResource", async (value: unknown) => {
       const input = value && typeof value === "object" ? value as { path?: unknown; line?: unknown; column?: unknown; folder?: unknown } : {};
       if (typeof input.path !== "string") throw new Error("Bridge resource path is required.");
-      const uri = bridgeWorkspaceUri(input.path);
+      let uri: vscode.Uri;
+      try {
+        uri = bridgeWorkspaceUri(input.path);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        void vscode.window.showWarningMessage(message);
+        return;
+      }
       if (input.folder === true) {
         await vscode.commands.executeCommand("revealInExplorer", uri);
         return;
       }
-      const line = typeof input.line === "number" && input.line > 0 ? input.line : 1;
-      const column = typeof input.column === "number" && input.column > 0 ? input.column : 1;
+      const { line, column } = bridgeOpenPosition(input);
       const position = new vscode.Position(line - 1, column - 1);
       await vscode.window.showTextDocument(uri, { preview: true, selection: new vscode.Range(position, position) });
     }),
@@ -201,29 +270,29 @@ export function activate(context: vscode.ExtensionContext): void {
         : undefined;
       if (!input || typeof input.domain !== "string" || typeof input.localPort !== "number") {
         const domain = (await vscode.window.showInputBox({
-          title: "Cloudflare Named Tunnel · Hostname",
-          prompt: "Public hostname from Cloudflare Tunnels, e.g. mcp.example.com",
+          title: t("namedHostnameTitle"),
+          prompt: t("namedHostnamePrompt"),
           ignoreFocusOut: true,
         }))?.trim();
-        if (!domain) throw new Error("Cloudflare Named Tunnel hostname must be a string.");
+        if (!domain) throw new Error(t("namedHostnameRequired"));
         const tokenInput = await vscode.window.showInputBox({
-          title: "Cloudflare Named Tunnel · Tunnel Token",
-          prompt: "Tunnel token from Cloudflare Zero Trust (eyJ...). Leave blank to keep the existing token.",
+          title: t("namedTokenTitle"),
+          prompt: t("namedTokenPrompt"),
           password: true,
           ignoreFocusOut: true,
         });
-        if (tokenInput === undefined) throw new Error("Cloudflare Tunnel Token is required.");
+        if (tokenInput === undefined) throw new Error(t("namedTokenRequired"));
         const portText = (await vscode.window.showInputBox({
-          title: "Cloudflare Named Tunnel · Local Port",
-          prompt: "Must match the tunnel's public hostname Service URL port.",
-          value: String(vscode.workspace.getConfiguration("agentbridge.bridge").get<number>("cloudflareNamedLocalPort", 48271)),
+          title: t("namedLocalPortTitle"),
+          prompt: t("namedLocalPortPrompt"),
+          value: String(vscode.workspace.getConfiguration("agentbridge.bridge").get<number>("cloudflareNamedLocalPort", DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT)),
           ignoreFocusOut: true,
         }))?.trim();
         const localPort = Number(portText);
-        if (!portText || !Number.isInteger(localPort)) throw new Error("Cloudflare Named Tunnel local port must be a number.");
+        if (!portText || !Number.isInteger(localPort)) throw new Error(t("namedLocalPortRequired"));
         input = { domain, token: tokenInput.trim() || undefined, localPort };
       }
-      if (input.token !== undefined && typeof input.token !== "string") throw new Error("Cloudflare Tunnel Token must be a string.");
+      if (input.token !== undefined && typeof input.token !== "string") throw new Error(t("namedTokenMustBeString"));
       return bridge.configureNamedTunnel({
         domain: input.domain as string,
         token: input.token as string | undefined,
@@ -243,11 +312,11 @@ export function activate(context: vscode.ExtensionContext): void {
         const current = bridge.getStatus().tunnelProvider;
         const choice = await vscode.window.showQuickPick(
           [
-            { label: "Cloudflare Quick Tunnel", description: "免费免账号，公网地址重启后变化", value: "cloudflare" },
-            { label: "Cloudflare Named Tunnel", description: "固定域名，需 Cloudflare 账号、Tunnel Token、路由配置", value: "cloudflare-named" },
-            { label: "ngrok", description: "保留域名，需 ngrok 账号与 Authtoken", value: "ngrok" },
+            { label: "Cloudflare Quick Tunnel", description: t("quickTunnelPickDescription"), value: "cloudflare" },
+            { label: "Cloudflare Named Tunnel", description: t("namedTunnelPickDescription"), value: "cloudflare-named" },
+            { label: "ngrok", description: t("ngrokPickDescription"), value: "ngrok" },
           ],
-          { title: "AgentBridge · Tunnel Provider", placeHolder: `当前: ${current}` },
+          { title: t("tunnelProviderTitle"), placeHolder: t("currentTunnelProvider", current) },
         );
         selected = choice?.value;
       }
@@ -259,10 +328,19 @@ export function activate(context: vscode.ExtensionContext): void {
   output.appendLine("[extension] AgentBridge registered: Streamable HTTP MCP + Cloudflare Quick/Named Tunnel + ngrok");
   output.appendLine("[extension] IDE tool broker registered: list_directory, run_command, get_command_output, send_command_input, terminate_command, get_diagnostics, lsp");
 
-  if (vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false)) {
+  // Persistent mode brings the Bridge up with the window; either way the tunnel is checked, because
+  // a check starts nothing - it reads the configured provider and asks its CLI for a version. Left
+  // out, a machine whose cloudflared is missing or whose named-tunnel hostname is unset looks
+  // exactly like a working one until the user starts the Bridge and waits to find out.
+  const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
+  if (persistentMode) {
     output.appendLine("[extension] persistent Bridge mode enabled; auto-starting");
-    const autoStartTimer = setTimeout(() => {
-      if (activeBridge !== bridge) return;
+  }
+  const startupTimer = setTimeout(() => {
+    // The window can be reloaded before the timer fires, and the Bridge it captured then belongs
+    // to an activation that is already gone.
+    if (activeBridge !== bridge) return;
+    if (persistentMode) {
       void bridgeReady.then(() => bridge.start(undefined, { automaticCheck: true })).then(
         (status) => {
           updateStatusBar();
@@ -271,9 +349,25 @@ export function activate(context: vscode.ExtensionContext): void {
         },
         (error) => output.appendLine(`[bridge] persistent start failed: ${error instanceof Error ? error.message : String(error)}`),
       );
-    }, 100);
-    context.subscriptions.push({ dispose: () => clearTimeout(autoStartTimer) });
-  }
+      return;
+    }
+    void bridgeReady.then(() => bridge.checkTunnel()).then(
+      (status) => {
+        updateStatusBar();
+        const parts: Array<string | undefined> = [
+          status.tunnelProvider,
+          status.tunnelInstalled === undefined ? "installed: unknown" : status.tunnelInstalled ? "installed" : "not installed",
+          status.tunnelVersion,
+          status.lastError,
+        ];
+        output.appendLine(`[bridge] startup tunnel check: ${parts.filter((part) => part).join(" | ")}`);
+      },
+      (error) => output.appendLine(`[bridge] startup tunnel check failed: ${error instanceof Error ? error.message : String(error)}`),
+    );
+  }, 100);
+  // The timer outlives activation by design, so deactivation has to be able to call it off: a
+  // reload must not start a Bridge, or log a check, against a manager that is already gone.
+  context.subscriptions.push({ dispose: () => clearTimeout(startupTimer) });
 }
 
 export async function deactivate(): Promise<void> {

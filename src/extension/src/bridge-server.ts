@@ -9,6 +9,8 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport, type EventStore } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, type CallToolResult, isInitializeRequest, type JSONRPCMessage, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as vscode from "vscode";
+import { isSupportedGlob } from "./glob.js";
+import { boundedInteger, boundedNotes } from "./bounded-integer.js";
 import { FILE_TOOL_DEFINITIONS, invokeFileTool, isFileToolName } from "./file-tool-registry.js";
 import { BRIDGE_EXCLUDED_TOOL_NAMES, getIdeToolDefinition, IDE_TOOL_DEFINITIONS } from "./ide-tool-definitions.js";
 import { getManagedShellChoice } from "./ide-tool-broker.js";
@@ -51,7 +53,28 @@ function isPublicIpv4Address(value: string): boolean {
   return true;
 }
 const ROUTE_TOKEN_SECRET = "agentbridge.bridge.routeToken";
+// The token rides in the URL path, and every endpoint handed to a model carries it, so it is kept
+// short: 16 base36 characters is roughly 83 bits, far past guessing distance, at half the length
+// of the 32-hex form it replaces.
+const ROUTE_TOKEN_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
+const ROUTE_TOKEN_LENGTH = 16;
+
+// Bytes at or above the largest whole multiple of the alphabet size are redrawn, so all 36
+// characters are equally likely instead of the first few being favoured by a plain modulo.
+function createRouteToken(): string {
+  const alphabetSize = ROUTE_TOKEN_ALPHABET.length;
+  const limit = Math.floor(256 / alphabetSize) * alphabetSize;
+  let token = "";
+  while (token.length < ROUTE_TOKEN_LENGTH) {
+    for (const byte of randomBytes(ROUTE_TOKEN_LENGTH * 2)) {
+      if (byte < limit) token += ROUTE_TOKEN_ALPHABET[byte % alphabetSize];
+      if (token.length === ROUTE_TOKEN_LENGTH) break;
+    }
+  }
+  return token;
+}
 const NGROK_DOMAIN_SETTING = "bridge.ngrokDomain";
+const NGROK_USE_HTTP_PROXY_SETTING = "bridge.ngrokUseHttpProxy";
 const NGROK_DOMAIN_STATE_KEY = "agentbridge.bridge.ngrokDomain";
 const CLOUDFLARE_NAMED_DOMAIN_SETTING = "bridge.cloudflareNamedDomain";
 const CLOUDFLARE_NAMED_DOMAIN_STATE_KEY = "agentbridge.bridge.cloudflareNamedDomain";
@@ -72,8 +95,32 @@ const SESSION_KEEPALIVE_INTERVAL_MS = 15_000;
 const SESSION_RETRY_INTERVAL_MS = 2_000;
 const SESSION_EVENT_STORE_LIMIT = 512;
 const SESSION_EVENT_STORE_MAX_BYTES = 8 * 1024 * 1024;
-const PUBLIC_HEALTH_STARTUP_TIMEOUT_MS = 60_000;
+const DEFAULT_PUBLIC_HEALTH_STARTUP_TIMEOUT_MS = 20_000;
+const PUBLIC_HEALTH_STARTUP_TIMEOUT_SETTING = "bridge.startupTimeoutMs";
 const PUBLIC_HEALTH_REQUEST_TIMEOUT_MS = 5_000;
+/** Consecutive deterministic health-request failures (bad DNS, refused/reset connection,
+ * TLS interception) before startup gives up instead of burning the whole timeout budget on
+ * retries that cannot succeed with the current network configuration. */
+const PUBLIC_HEALTH_DETERMINISTIC_FAILURE_LIMIT = 3;
+
+/**
+ * Error codes that mean the tunnel host cannot be reached as currently configured, so
+ * retrying cannot succeed. Includes unreachable networks: a campus or corporate network that
+ * blackholes the host would otherwise burn the whole startup budget silently.
+ */
+const PUBLIC_HEALTH_DETERMINISTIC_CODES = new Set([
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ECONNABORTED",
+  "EPROTO",
+  "EPIPE",
+]);
+/** Whole phrases, never bare "tls" or "ssl": see the note where they are used. */
+const TLS_ERROR_PHRASES = ["certificate", "self-signed", "wrong version number", "handshake", "alert number"];
 const PUBLIC_HEALTH_LOG_THROTTLE_MS = 10_000;
 const PUBLIC_HEALTH_MONITOR_INTERVAL_MS = 10_000;
 const PUBLIC_HEALTH_MONITOR_BUDGET_MS = 8_000;
@@ -107,12 +154,141 @@ const PUBLIC_HEALTH_DOH_CACHE_TTL_MS = 60_000;
  * real hostname, so a stale IP fails safe. Two IPs to avoid a single point of
  * failure; values observed from historical successful resolutions. */
 const PUBLIC_HEALTH_CF_ANYCAST_IPS = ["104.16.230.132", "104.16.231.132"] as const;
+
+/** Milliseconds left before the startup budget runs out, or undefined when unbounded. */
+export function publicHealthTimeLeft(deadline: number | undefined, now: number): number | undefined {
+  return deadline === undefined ? undefined : deadline - now;
+}
+
+/** Whether an unbounded run should stop starting new requests. */
+export function publicHealthBudgetExhausted(deadline: number | undefined, now: number): boolean {
+  const timeLeft = publicHealthTimeLeft(deadline, now);
+  return timeLeft !== undefined && timeLeft <= 0;
+}
+
+/**
+ * Advance the run of consecutive deterministic health failures by one attempt.
+ *
+ * A deterministic failure (bad DNS, a refused or reset connection, TLS interception) cannot be
+ * fixed by retrying the same configuration, so a run of them ends startup early instead of
+ * burning the rest of the budget. Anything else clears the run - including a failure the
+ * classifier does not recognise - because a tunnel that answered once can answer again, and a
+ * single success between failures resets what "consecutive" means.
+ */
+export function nextDeterministicFailureCount(
+  previous: number,
+  deterministic: boolean | undefined,
+  limit: number = PUBLIC_HEALTH_DETERMINISTIC_FAILURE_LIMIT,
+): { count: number; giveUp: boolean } {
+  const count = deterministic === true ? previous + 1 : 0;
+  return { count, giveUp: count >= limit };
+}
+
+/**
+ * How long one health request may take: the per-request limit, or what is left of the startup
+ * budget when that is the smaller of the two.
+ *
+ * Not capped at the budget exactly. A nearly exhausted budget used to cut a request off
+ * before it could have answered, so there is a floor of one second - which a request may
+ * therefore outlive the deadline the user configured by, by up to a second. A caller that
+ * needs the budget honoured to the millisecond has to ask publicHealthBudgetExhausted.
+ */
+export function publicHealthAttemptTimeout(timeLeft: number | undefined, perRequestMs: number = PUBLIC_HEALTH_REQUEST_TIMEOUT_MS): number {
+  if (timeLeft === undefined) return perRequestMs;
+  return Math.max(1_000, Math.min(perRequestMs, timeLeft));
+}
 const TUNNEL_RESTART_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
 const CLOUDFLARED_WINGET_PACKAGE = "Cloudflare.cloudflared";
-const DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT = 48271;
+// Exported because the panel writes the same number into its port input box and the
+// configureNamedTunnel command offers it as the default: three copies of one default is how
+// the value shown to the user stops being the value the tunnel is configured with.
+export const DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT = 48271;
 
 export type BridgeTunnelProvider = "cloudflare" | "cloudflare-named" | "ngrok";
 export type BridgePublicHealthState = "inactive" | "checking" | "healthy" | "unstable" | "unhealthy";
+
+interface PublicHealthFailure {
+  /** Human-readable cause chain surfaced in startup errors and the Bridge UI. */
+  readonly reason: string;
+  /** Primary error code when Node reported one (e.g. ENOTFOUND, ECONNRESET). */
+  readonly code?: string;
+  /** HTTP status when a response arrived. */
+  readonly status?: number;
+  /** True when retrying with the current network configuration cannot succeed. */
+  readonly deterministic: boolean;
+}
+
+/**
+ * Proxy variables that must not reach the ngrok process: ngrok Free rejects an agent that
+ * connects through a proxy with ERR_NGROK_9009, so inherited variables are stripped unless
+ * the user explicitly opted into the resolved proxy.
+ */
+export function withoutProxyVariables(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = { ...env };
+  for (const key of Object.keys(result)) {
+    // NO_PROXY goes with them: it is the bypass list for a proxy that is no longer
+    // there, and leaving it hands the child an environment that still looks like one.
+    if (/^(https?|all|no)_proxy$/i.test(key)) delete result[key];
+  }
+  return result;
+}
+
+/** True when ngrok output reports the Free-plan proxy rejection, which has an actionable fix. */
+export function isNgrokProxyRejection(output: string): boolean {
+  const lower = output.toLowerCase();
+  return lower.includes("err_ngrok_9009") || lower.includes("pay-as-you-go");
+}
+
+/**
+ * HTTP statuses that mean the public-health endpoint is refusing us for a reason retrying
+ * cannot fix: credentials are missing or wrong, or a proxy is demanding authentication. A
+ * 404 is deliberately absent — the endpoint legitimately does not exist until the tunnel is
+ * up, so that one has to stay retryable.
+ */
+export function isDeterministicHealthStatus(status: number): boolean {
+  return status === 401 || status === 403 || status === 407;
+}
+
+/**
+ * Classifies a failed public-health request. DNS failures, unreachable networks, refused or
+ * reset connections and TLS errors are deterministic: the same request will keep failing until
+ * the network or proxy configuration changes, so startup aborts early instead of retrying
+ * until the deadline. Walks the cause chain because Node wraps fetch failures
+ * (TypeError: fetch failed) around the underlying system error.
+ */
+export function publicHealthFailure(error: unknown): PublicHealthFailure {
+  const messages: string[] = [];
+  const codes: string[] = [];
+  let current = error;
+  for (let depth = 0; depth < 4 && current !== undefined && current !== null; depth++) {
+    if (typeof current === "object") {
+      const record = current as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown };
+      if (typeof record.code === "string") codes.push(record.code);
+      if (typeof record.message === "string") messages.push(record.message);
+      current = record.cause;
+    } else {
+      messages.push(String(current));
+      current = undefined;
+    }
+  }
+  const reason = messages.join(": ") || (error instanceof Error ? error.message : String(error));
+  const detail = `${codes.join(",")} ${reason}`.toLowerCase();
+  // Every code here means the tunnel host cannot be reached as currently configured, so
+  // retrying only burns the startup budget. Unreachable networks matter as much as refused
+  // ones: a campus or corporate network that blackholes the host otherwise costs the whole
+  // 20-120 second window before the user hears anything.
+  // "tls" and "ssl" used to be tested as bare substrings of the whole reason. The reason is
+  // free text - it carries file paths and tool names as well as the error - so anything
+  // containing those letters read as a certificate problem, and startup gave up and pointed
+  // the user at TLS interception over a failure that had nothing to do with certificates.
+  // The failures this was written for are still caught: a rejected chain says "certificate"
+  // or "self-signed", a proxy answering in plain HTTP says "wrong version number", and the
+  // remaining protocol errors arrive with code EPROTO, which the set above already treats as
+  // deterministic because there is nothing a retry could correct.
+  const deterministic = codes.some((code) => PUBLIC_HEALTH_DETERMINISTIC_CODES.has(code))
+    || TLS_ERROR_PHRASES.some((phrase) => detail.includes(phrase));
+  return { reason, code: codes.length ? codes[0] : undefined, deterministic };
+}
 
 /** cloudflared transport protocol between the local daemon and Cloudflare's edge.
  * "auto" keeps cloudflared's own QUIC-first behavior; "quic"/"http2" pin the
@@ -288,7 +464,7 @@ export const REPORT_PROGRESS_TOOL = {
     properties: {
       message: { type: "string", minLength: 1, maxLength: 2000, description: "Human-readable progress update." },
       phase: { type: "string", maxLength: 160, description: "Optional short phase label, such as Reading, Editing, Testing, or Done." },
-      percent: { type: "integer", minimum: 0, maximum: 100, description: "Optional completion estimate from 0 to 100 for the current activity/todo." },
+      percent: { type: "integer", minimum: 0, maximum: 100, description: "Optional completion estimate from 0 to 100 for the current activity/todo. A value outside the range is brought into it, and the answer names what was used." },
       todo_id: { type: "string", minLength: 1, maxLength: 80, description: "Optional todo id from set_todos. Omit when there is exactly one in_progress todo; AgentBridge will link it automatically." },
     },
     additionalProperties: false,
@@ -492,7 +668,16 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function boundedText(value: unknown, maxChars = 16_000): string | undefined {
+/**
+ * Bound the text an activity entry carries into the panel, keeping both ends of it.
+ *
+ * The same name was used for the hover helper in lsp-tool.ts, which shortens language-server
+ * content for a model. They answer to different limits for different readers - this one keeps
+ * what the activity log shows, that one keeps what a hover reports - so they are named apart.
+ * The other difference is the return: an entry with no text has none to show, so this answers
+ * undefined where the hover one always answers with a string.
+ */
+function boundedActivityText(value: unknown, maxChars = 16_000): string | undefined {
   if (value === undefined || value === null) return undefined;
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   if (!text) return undefined;
@@ -669,15 +854,17 @@ function parseUnifiedDiffPreview(diff: string | undefined): BridgeDiffFilePrevie
   return files;
 }
 
-function bridgePresentation(
+// Exported so the shape the panel reads and the shape the tool writes can be asserted in one
+// place: they drifted apart once, and nothing in the suite noticed.
+export function bridgePresentation(
   toolName: string,
   args: Record<string, unknown>,
   resultText?: string,
   structuredContent?: Record<string, unknown>,
   isError = false,
 ): BridgeActivityPresentation {
-  const input = boundedText(args, 8_000);
-  const output = boundedText(resultText, 24_000);
+  const input = boundedActivityText(args, 8_000);
+  const output = boundedActivityText(resultText, 24_000);
   const structured = structuredContent ?? {};
 
   if (toolName === "read_files") {
@@ -700,9 +887,11 @@ function bridgePresentation(
     const statusRow = asRecord(structured);
     const isError2 = statusRow.status === "error";
     const errorRow = asRecord(statusRow.error);
-    const successRow = asRecord(statusRow.success);
-    const mimeType = typeof successRow.mimeType === "string" ? successRow.mimeType : undefined;
-    const sizeBytes = typeof successRow.sizeBytes === "number" ? successRow.sizeBytes : undefined;
+    // The tool answers flat, the way every other file tool does: status, path and the image
+    // fields sit side by side. Reading a nested "success" here found nothing, so an image that
+    // was read fine carried no subtitle at all.
+    const mimeType = typeof statusRow.mimeType === "string" ? statusRow.mimeType : undefined;
+    const sizeBytes = typeof statusRow.sizeBytes === "number" ? statusRow.sizeBytes : undefined;
     const sizeKB = sizeBytes !== undefined ? `${(sizeBytes / 1024).toFixed(1)} KB` : undefined;
     const subtitleParts: string[] = [];
     if (mimeType) subtitleParts.push(mimeType);
@@ -768,7 +957,7 @@ function bridgePresentation(
     const additions = typeof summary.additions === "number" ? summary.additions : undefined;
     const deletions = typeof summary.deletions === "number" ? summary.deletions : undefined;
     const changeSummary = additions !== undefined || deletions !== undefined ? `+${additions ?? 0} -${deletions ?? 0}` : undefined;
-    const diff = boundedText(structured.diff, 32_000);
+    const diff = boundedActivityText(structured.diff, 32_000);
     return {
       kind: "edit",
       title: files.length === 1 ? `Edited ${files[0]}` : `Edited ${files.length || "workspace"} files`,
@@ -831,7 +1020,7 @@ function bridgePresentation(
 
   if (toolName === "send_command_input") {
     const commandId = typeof args.command_id === "string" ? args.command_id : undefined;
-    return { kind: "terminal", title: "Sent command input", subtitle: commandId, input: boundedText(args.input, 2_000), terminalId: stringField(resultText, "terminal_id"), commandId, output: isError ? output : undefined };
+    return { kind: "terminal", title: "Sent command input", subtitle: commandId, input: boundedActivityText(args.input, 2_000), terminalId: stringField(resultText, "terminal_id"), commandId, output: isError ? output : undefined };
   }
 
   if (toolName === "terminate_command") {
@@ -963,41 +1152,103 @@ function normalizeNamedTunnelLocalPort(value: number): number {
   return value;
 }
 
-function readJsonBody(request: IncomingMessage): Promise<unknown> {
+/** JSON-RPC 2.0 "Parse error": the request body was not valid JSON. */
+export const JSON_RPC_PARSE_ERROR = -32700;
+
+/**
+ * Raised when a request body cannot be parsed. Kept distinct so the caller can answer with
+ * the protocol's parse-error code: a client that sent malformed JSON needs to be told that,
+ * and a generic -32000 tells it nothing actionable.
+ */
+export class McpParseError extends Error {
+  readonly status = 400;
+  readonly code = JSON_RPC_PARSE_ERROR;
+
+  constructor() {
+    super("MCP request body is not valid JSON.");
+    this.name = "McpParseError";
+  }
+}
+
+/**
+ * JSON-RPC error code for a failed request. A malformed body is a parse error; everything
+ * else falls back to the server-error codes already in use.
+ */
+export function jsonRpcErrorCode(error: unknown, statusCode: number): number {
+  if (error instanceof McpParseError) return error.code;
+  return statusCode === 404 ? -32004 : -32000;
+}
+
+/**
+ * Raised when a request body is larger than the server is willing to read. A client error
+ * like the parse error, but with a status of its own: "413 Payload Too Large" tells the
+ * caller what to change, where a generic 500 points at the Bridge.
+ */
+export class McpRequestTooLargeError extends Error {
+  readonly status = 413;
+
+  constructor(readonly limitBytes: number) {
+    super(`MCP request body exceeds ${limitBytes} bytes.`);
+    this.name = "McpRequestTooLargeError";
+  }
+}
+
+/**
+ * Strict UTF-8 decoder. Buffer.toString("utf8") substitutes U+FFFD for anything it cannot
+ * decode, so a body mangled in transit could still parse as JSON — with the damaged bytes
+ * silently changed instead of rejected.
+ */
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+export function readJsonBody(request: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let total = 0;
+    let overflowed = false;
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer | string) => {
+      if (overflowed) return;
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       total += buffer.length;
       if (total > MAX_REQUEST_BYTES) {
-        reject(new Error(`MCP request body exceeds ${MAX_REQUEST_BYTES} bytes.`));
-        request.destroy();
+        reject(new McpRequestTooLargeError(MAX_REQUEST_BYTES));
+        // The rest of the body is read and thrown away. Destroying the request here closed the
+        // socket before the caller could write its error response, and pausing in its place
+        // traded that for a quieter failure: a client cannot read the 413 until it has finished
+        // writing, and a body the server stops reading never lets that write finish, so a real
+        // oversized request came back as an SSL EOF with no status at all. Not buffering is the
+        // point of the cap, and this releases what had been buffered.
+        overflowed = true;
+        chunks.length = 0;
         return;
       }
       chunks.push(buffer);
     });
     request.on("end", () => {
+      if (overflowed) return;
+      // An empty body carries no JSON-RPC message at all, which is the same parse error as a
+      // malformed one. Resolving it to undefined instead pushed the body into isInitializeRequest,
+      // so the client was told it should have sent an initialize request — an answer about the
+      // wrong problem for a request that never arrived.
       if (chunks.length === 0) {
-        resolve(undefined);
+        reject(new McpParseError());
         return;
       }
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        resolve(JSON.parse(UTF8_DECODER.decode(Buffer.concat(chunks))));
       } catch {
-        reject(new Error("MCP request body is not valid JSON."));
+        reject(new McpParseError());
       }
     });
     request.on("error", reject);
   });
 }
 
-function writeJsonError(response: ServerResponse, statusCode: number, message: string): void {
+function writeJsonError(response: ServerResponse, statusCode: number, message: string, error?: unknown): void {
   if (response.headersSent) return;
   response.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify({
     jsonrpc: "2.0",
-    error: { code: statusCode === 404 ? -32004 : -32000, message },
+    error: { code: jsonRpcErrorCode(error, statusCode), message },
     id: null,
   }));
 }
@@ -1013,6 +1264,8 @@ export function normalizeTrustedBrowserOrigin(value: string): string | undefined
     if (!origin.hostname) return undefined;
 
     if (origin.protocol === "http:" || origin.protocol === "https:") {
+      // Canonical form only. tests/origin.test.ts pins the strictness: an origin has to be
+      // written exactly as the browser sends it, trailing slash included in neither.
       return candidate === origin.origin ? origin.origin : undefined;
     }
     if (origin.protocol === "chrome-extension:" || origin.protocol === "moz-extension:") {
@@ -1024,6 +1277,51 @@ export function normalizeTrustedBrowserOrigin(value: string): string | undefined
   } catch {
     return undefined;
   }
+}
+
+/** Declared in package.json as the minimum and maximum of agentbridge.files.veryLargeFileBytes. */
+const VERY_LARGE_FILE_BYTES_MIN = 262_144;
+const VERY_LARGE_FILE_BYTES_MAX = 134_217_728;
+
+/**
+ * Clamp the implicit-read ceiling to the range the setting advertises. A hand-edited
+ * settings.json can hold 0 or a negative number, which the old code read as "every file is
+ * very large" and forced an explicit line range for a one-line file; a value far above the
+ * maximum would quietly disable the threshold altogether.
+ */
+export function normalizeVeryLargeFileBytes(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.min(Math.max(Math.round(value), VERY_LARGE_FILE_BYTES_MIN), VERY_LARGE_FILE_BYTES_MAX);
+}
+
+/**
+ * Declared in package.json as the minimum and maximum of agentbridge.files.imageMaxBytes.
+ * The default is the built-in ceiling read_image_file has always applied.
+ */
+const IMAGE_MAX_BYTES_MIN = 262_144;
+const IMAGE_MAX_BYTES_MAX = 134_217_728;
+
+export function normalizeImageMaxBytes(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.min(Math.max(Math.round(value), IMAGE_MAX_BYTES_MIN), IMAGE_MAX_BYTES_MAX);
+}
+
+/**
+ * Keep only globs ripgrep and the fallback engine can actually apply. A pattern arriving as
+ * a tool argument is validated per call and rejected with INVALID_GLOB; read from
+ * configuration it would instead fail every find_files and search_files call the user made
+ * afterwards, with nothing pointing at the setting that caused it.
+ */
+export function normalizeExcludeGlobs(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const globs: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const glob = entry.trim();
+    if (!glob || globs.includes(glob) || !isSupportedGlob(glob)) continue;
+    globs.push(glob);
+  }
+  return globs;
 }
 
 function readTrustedBrowserOrigins(): string[] {
@@ -1173,7 +1471,7 @@ export class BridgeManager implements vscode.Disposable {
   async initialize(): Promise<void> {
     this.routeToken = await this.context.secrets.get(ROUTE_TOKEN_SECRET) ?? "";
     if (!this.routeToken) {
-      this.routeToken = randomBytes(16).toString("hex");
+      this.routeToken = createRouteToken();
       await this.context.secrets.store(ROUTE_TOKEN_SECRET, this.routeToken);
     }
     this.tunnelProvider = this.readTunnelProvider();
@@ -1185,7 +1483,21 @@ export class BridgeManager implements vscode.Disposable {
     this.domain = this.configuredDomainForProvider(this.tunnelProvider);
   }
 
-  getStatus(): BridgeStatus {
+  /**
+   * Re-read the tunnel settings while the Bridge is stopped, and forget what was learned
+   * about the ones they replace.
+   *
+   * This is a getter with a side effect, and it is deliberate rather than accidental: there
+   * is no configuration-change listener, so a setting edited while the Bridge is stopped is
+   * picked up on the next read instead of never. The panel draws from getStatus, so this is
+   * also what moves the radio groups when the user edits settings by hand.
+   *
+   * It is safe at the rate getStatus is called: nothing is re-read while the Bridge is
+   * running or starting, and the tunnel checks are dropped only when the provider or the
+   * named-tunnel settings actually changed, so reading the status never clears an error that
+   * is still on screen.
+   */
+  private syncStoppedConfiguration(): void {
     if (
       this.state !== "running"
       && this.state !== "starting"
@@ -1211,6 +1523,11 @@ export class BridgeManager implements vscode.Disposable {
         this.lastError = undefined;
       }
     }
+  }
+
+  /** The status as it stands now. See syncStoppedConfiguration for the settings it re-reads. */
+  getStatus(): BridgeStatus {
+    this.syncStoppedConfiguration();
     const localUrl = this.localPort && this.routeToken ? `http://127.0.0.1:${this.localPort}/mcp/${this.routeToken}` : undefined;
     const publicUrl = this.domain && this.routeToken ? `https://${this.domain}/mcp/${this.routeToken}` : undefined;
     const visibleToolNames = BRIDGE_TOOL_DEFINITIONS
@@ -1312,7 +1629,14 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   private readReadOnlyMode(): boolean {
-    return vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("readOnlyMode", false);
+    const configuration = vscode.workspace.getConfiguration("agentbridge.bridge");
+    // Read-only mode is a restriction, and a restriction is worth no more than the
+    // weakest scope it is read from. The merged value honours the workspace as well, so a
+    // settings.json committed to a repository could switch the write tools back on for
+    // anyone who opened it. The user-level setting decides when the mode is on; a
+    // workspace may tighten it for one project, but never loosen it.
+    if (configuration.inspect<boolean>("readOnlyMode")?.globalValue === true) return true;
+    return configuration.get<boolean>("readOnlyMode", false);
   }
 
   /**
@@ -1488,7 +1812,7 @@ export class BridgeManager implements vscode.Disposable {
     if (this.state === "running" || this.state === "starting") {
       throw new Error("Stop the Bridge before rotating its endpoint URL.");
     }
-    this.routeToken = randomBytes(16).toString("hex");
+    this.routeToken = createRouteToken();
     await this.context.secrets.store(ROUTE_TOKEN_SECRET, this.routeToken);
     return this.getStatus();
   }
@@ -1982,7 +2306,16 @@ export class BridgeManager implements vscode.Disposable {
       void this.handleHttpRequest(server, ownerGeneration, endpointPath, healthPath, request, response).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         this.output.appendLine(`[bridge] HTTP error: ${message}`);
-        writeJsonError(response, 500, message);
+        // A body that could not be parsed is the client's problem and has its own status and
+        // JSON-RPC code; lumping it in with server errors hides the cause from the caller.
+        if (error instanceof McpParseError || error instanceof McpRequestTooLargeError) {
+          writeJsonError(response, error.status, message, error);
+          // The client is still sending a body we refused to read, so drop the connection
+          // once the response is out — never before, or the error never reaches it.
+          response.once("finish", () => request.destroy());
+          return;
+        }
+        writeJsonError(response, 500, message, error);
       });
     });
     this.httpServer = server;
@@ -2136,6 +2469,35 @@ export class BridgeManager implements vscode.Disposable {
     });
   }
 
+  /**
+   * ngrok Free rejects agents that connect through an HTTP/S proxy with ERR_NGROK_9009, so
+   * the ngrok process runs in direct mode by default and inherited proxy variables are
+   * stripped (both case variants). Users with an ngrok Pay-as-you-go plan can opt into the
+   * resolved proxy explicitly via agentbridge.bridge.ngrokUseHttpProxy.
+   */
+  private ngrokProcessEnvironment(): NodeJS.ProcessEnv {
+    const env = withoutProxyVariables(process.env);
+    if (this.ngrokUseHttpProxyEnabled()) {
+      const httpConfiguration = vscode.workspace.getConfiguration("http");
+      const configuredProxy = httpConfiguration.get<string>("proxy")?.trim();
+      const proxyUrl = (configuredProxy || process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy);
+      if (httpConfiguration.get<string>("proxySupport") !== "off" && proxyUrl) {
+        env.HTTPS_PROXY = proxyUrl;
+        env.HTTP_PROXY = proxyUrl;
+        this.output.appendLine("[bridge] ngrok process will use the resolved HTTP proxy (agentbridge.bridge.ngrokUseHttpProxy); this requires an ngrok Pay-as-you-go plan.");
+      } else {
+        this.output.appendLine("[bridge] agentbridge.bridge.ngrokUseHttpProxy is enabled, but no HTTP proxy was resolved; the ngrok process will connect directly.");
+      }
+      return env;
+    }
+    this.output.appendLine("[bridge] ngrok process will connect directly; inherited proxy variables were removed (ngrok Free rejects HTTP proxies with ERR_NGROK_9009).");
+    return env;
+  }
+
+  private ngrokUseHttpProxyEnabled(): boolean {
+    return vscode.workspace.getConfiguration("agentbridge").get<boolean>(NGROK_USE_HTTP_PROXY_SETTING, false) === true;
+  }
+
   private startTunnelProcess(protocolOverride?: BridgeTunnelProtocol): ChildProcessWithoutNullStreams {
     if (!this.localPort) throw new Error("Bridge local HTTP port is unavailable.");
     const isCloudflare = this.tunnelProvider === "cloudflare" || this.tunnelProvider === "cloudflare-named";
@@ -2156,7 +2518,9 @@ export class BridgeManager implements vscode.Disposable {
       stdio: ["pipe", "pipe", "pipe"],
       env: this.tunnelProvider === "cloudflare-named"
         ? { ...process.env, TUNNEL_TOKEN: this.namedTunnelToken }
-        : process.env,
+        : this.tunnelProvider === "ngrok"
+          ? this.ngrokProcessEnvironment()
+          : process.env,
     });
     this.tunnelProcess = child;
     const exitAbort = new AbortController();
@@ -2391,6 +2755,12 @@ export class BridgeManager implements vscode.Disposable {
           finish();
           return;
         }
+        // ERR_NGROK_9009 has an actionable cause, so it gets dedicated guidance instead of
+        // the generic reserved-domain error.
+        if (isNgrokProxyRejection(lower)) {
+          finish(new Error(`ngrok cannot run through an HTTP/S proxy on the Free plan (ERR_NGROK_9009). Bridge starts ngrok with proxy variables removed, so check the ngrok config file (for example %LOCALAPPDATA%\\ngrok\\ngrok.yml) for a proxy_url entry and remove it, switch the proxy client to TUN mode with the system proxy off, or upgrade ngrok to a Pay-as-you-go plan and set agentbridge.bridge.ngrokUseHttpProxy to reuse this proxy. ${output.trim().slice(-2_000)}`));
+          return;
+        }
         if (lower.includes("err_ngrok_") || lower.includes("endpoint is already online") || lower.includes("failed to start tunnel")) {
           finish(new Error(`ngrok failed to establish the reserved domain. ${output.trim().slice(-4_000)}`));
         }
@@ -2521,7 +2891,7 @@ export class BridgeManager implements vscode.Disposable {
     this.publicHealthChecking = true;
     const operation = (async () => {
       let failureMessage = t("publicHealthMonitorUnknownFailure");
-      type HealthOutcome = { kind: "result"; healthy: boolean } | { kind: "error"; error: unknown } | { kind: "timeout" };
+      type HealthOutcome = { kind: "result"; healthy: boolean; failure?: PublicHealthFailure } | { kind: "error"; error: unknown } | { kind: "timeout" };
       let resolveBudget!: (outcome: HealthOutcome) => void;
       let budgetDidExpire = false;
       const budgetDeadline = Date.now() + PUBLIC_HEALTH_MONITOR_BUDGET_MS;
@@ -2535,7 +2905,7 @@ export class BridgeManager implements vscode.Disposable {
       const requestOutcome = this.requestPublicHealth((message) => {
         if (failureMessage === t("publicHealthMonitorUnknownFailure")) failureMessage = message;
       }, abort.signal).then<HealthOutcome, HealthOutcome>(
-        (healthy) => ({ kind: "result", healthy }),
+        (result) => ({ kind: "result", healthy: result.ok, failure: result.failure }),
         (error) => ({ kind: "error", error }),
       );
       let outcome = await Promise.race([requestOutcome, budgetExpired]);
@@ -2545,6 +2915,12 @@ export class BridgeManager implements vscode.Disposable {
         failureMessage = t("publicHealthMonitorBudgetExceeded", Math.round(PUBLIC_HEALTH_MONITOR_BUDGET_MS / 1_000));
       } else if (outcome.kind === "error") {
         failureMessage = this.redactRouteToken(outcome.error instanceof Error ? outcome.error.message : String(outcome.error));
+      } else if (outcome.kind === "result" && !outcome.healthy && outcome.failure?.reason) {
+        // The request says why it failed - the status it was answered with, or the cause behind
+        // the error - and that is the one worth showing. The message the request reported on the
+        // way is written for startup, where a failing answer is followed by a DoH round-trip;
+        // a monitor that repeats it reads as if the fallback were still running.
+        failureMessage = this.redactRouteToken(outcome.failure.reason);
       }
       if ((abort.signal.aborted && outcome.kind !== "timeout") || this.stoppingResources || this.state !== "running" || !this.httpServer || generation !== this.tunnelGeneration) return;
       if (outcome.kind === "result" && outcome.healthy) this.recordPublicHealthSuccess();
@@ -2621,12 +2997,15 @@ export class BridgeManager implements vscode.Disposable {
     return { report, flush };
   }
 
-  private createPublicHealthAbortController(externalSignal?: AbortSignal): { signal: AbortSignal; abort: () => void; dispose: () => void } {
+  private createPublicHealthAbortController(
+    externalSignal?: AbortSignal,
+    timeoutMs: number = PUBLIC_HEALTH_REQUEST_TIMEOUT_MS,
+  ): { signal: AbortSignal; abort: () => void; dispose: () => void } {
     const controller = new AbortController();
     const abortFromExternal = () => controller.abort();
     if (externalSignal?.aborted) abortFromExternal();
     else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
-    const timer = setTimeout(() => controller.abort(), PUBLIC_HEALTH_REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     return {
       signal: controller.signal,
       abort: () => controller.abort(),
@@ -2678,8 +3057,13 @@ export class BridgeManager implements vscode.Disposable {
     });
   }
 
-  private async requestPublicHealth(reportFailure: (message: string) => void, signal?: AbortSignal): Promise<boolean> {
-    const requestAbort = this.createPublicHealthAbortController(signal);
+  private async requestPublicHealth(
+    reportFailure: (message: string) => void,
+    signal?: AbortSignal,
+    timeoutMs: number = PUBLIC_HEALTH_REQUEST_TIMEOUT_MS,
+    deadline?: number,
+  ): Promise<{ ok: boolean; failure?: PublicHealthFailure }> {
+    const requestAbort = this.createPublicHealthAbortController(signal, timeoutMs);
     try {
       const response = await this.fetchWithHardAbort(this.publicHealthUrl(), {
         method: "GET",
@@ -2693,21 +3077,32 @@ export class BridgeManager implements vscode.Disposable {
         // here would defeat the monitor's overall time budget.
         requestAbort.abort();
         void response.body?.cancel().catch(() => undefined);
-        return false;
+        return {
+          ok: false,
+          failure: {
+            reason: `HTTP ${response.status} ${response.statusText ?? ""}`.trim(),
+            code: `HTTP_${response.status}`,
+            status: response.status,
+            deterministic: isDeterministicHealthStatus(response.status),
+          },
+        };
       }
       const payload = await this.runWithHardAbort(() => response.json(), requestAbort.signal).catch(() => undefined) as { ok?: unknown } | undefined;
       if (payload?.ok !== true) {
         reportFailure(t("publicHealthSystemPayloadFailure", JSON.stringify(payload)));
+        return { ok: false, failure: { reason: "health response did not confirm ok", status: response.status, deterministic: false } };
       }
-      return payload?.ok === true;
+      return { ok: true };
     } catch (error) {
-      if (signal?.aborted) return false;
-      const reason = error instanceof Error ? error.message : String(error);
-      reportFailure(t("publicHealthSystemError", this.redactRouteToken(reason)));
-      const ok = await this.requestPublicHealthViaDoh(reportFailure, signal);
-      if (signal?.aborted) return false;
+      if (signal?.aborted) return { ok: false };
+      const failure = publicHealthFailure(error);
+      reportFailure(t("publicHealthSystemError", this.redactRouteToken(failure.reason)));
+      const ok = await this.requestPublicHealthViaDoh(reportFailure, signal, deadline);
+      if (signal?.aborted) return { ok: false };
       reportFailure(t("publicHealthDohResult", ok));
-      return ok;
+      // A successful DoH round-trip proves the direct failure was recoverable; otherwise the
+      // original classification stands and a deterministic cause aborts startup early.
+      return ok ? { ok: true } : { ok: false, failure };
     } finally {
       requestAbort.dispose();
     }
@@ -2727,22 +3122,22 @@ export class BridgeManager implements vscode.Disposable {
    * retries against pinned Cloudflare anycast IPs. Uses node:https directly
    * with SNI + Host headers so TLS verification still runs against the real
    * hostname either way. */
-  private async requestPublicHealthViaDoh(reportFailure: (message: string) => void, signal?: AbortSignal): Promise<boolean> {
+  private async requestPublicHealthViaDoh(reportFailure: (message: string) => void, signal?: AbortSignal, deadline?: number): Promise<boolean> {
     const hostname = this.domain;
     if (!hostname || signal?.aborted) return false;
-    const ip = await this.resolveHostViaDoh(hostname, signal);
+    const ip = await this.resolveHostViaDoh(hostname, signal, deadline);
     if (signal?.aborted) return false;
     if (ip) {
       reportFailure(`DoH fallback: ${hostname} -> ${ip}, sending direct health request...`);
-      if (await this.sendPublicHealthRequest(hostname, ip, reportFailure, signal)) return true;
+      if (await this.sendPublicHealthRequest(hostname, ip, reportFailure, signal, deadline)) return true;
       if (signal?.aborted) return false;
       if (this.dohCache.hostname === hostname && this.dohCache.ip === ip) {
         this.dohCache = { hostname: "", ip: "", at: 0, generation: -1 };
       }
-      const refreshedIp = await this.resolveHostViaDoh(hostname, signal, true);
+      const refreshedIp = await this.resolveHostViaDoh(hostname, signal, deadline, true);
       if (refreshedIp && refreshedIp !== ip) {
         reportFailure(`DoH fallback: refreshed ${hostname} -> ${refreshedIp}, retrying direct health request...`);
-        return this.sendPublicHealthRequest(hostname, refreshedIp, reportFailure, signal);
+        return this.sendPublicHealthRequest(hostname, refreshedIp, reportFailure, signal, deadline);
       }
       return false;
     }
@@ -2752,8 +3147,11 @@ export class BridgeManager implements vscode.Disposable {
     }
     for (const anycastIp of PUBLIC_HEALTH_CF_ANYCAST_IPS) {
       if (signal?.aborted) return false;
+      // Each of these is a fresh request against a new address, so each would previously
+      // have taken the full five seconds no matter how little budget was left.
+      if (publicHealthBudgetExhausted(deadline, Date.now())) return false;
       reportFailure(`DoH fallback exhausted, trying pinned Cloudflare anycast for *.trycloudflare.com: ${anycastIp}`);
-      if (await this.sendPublicHealthRequest(hostname, anycastIp, reportFailure, signal)) return true;
+      if (await this.sendPublicHealthRequest(hostname, anycastIp, reportFailure, signal, deadline)) return true;
     }
     reportFailure(`DoH fallback: pinned anycast health checks failed for ${hostname}`);
     return false;
@@ -2766,10 +3164,14 @@ export class BridgeManager implements vscode.Disposable {
     ip: string,
     reportFailure: (message: string) => void,
     signal?: AbortSignal,
+    deadline?: number,
   ): Promise<boolean> {
     const { request } = await import("node:https");
     return await new Promise<boolean>((resolve) => {
-      const requestAbort = this.createPublicHealthAbortController(signal);
+      const requestAbort = this.createPublicHealthAbortController(
+        signal,
+        publicHealthAttemptTimeout(publicHealthTimeLeft(deadline, Date.now())),
+      );
       let settled = false;
       const onAbort = () => finish(false);
       const finish = (healthy: boolean) => {
@@ -2866,14 +3268,18 @@ export class BridgeManager implements vscode.Disposable {
 
   /** Ask a DoH endpoint for an A record of the given hostname. Caches the
    * result briefly to avoid hammering the DoH server during startup retries. */
-  private async resolveHostViaDoh(hostname: string, signal?: AbortSignal, bypassCache = false): Promise<string | null> {
+  private async resolveHostViaDoh(hostname: string, signal?: AbortSignal, deadline?: number, bypassCache = false): Promise<string | null> {
     const lookupGeneration = this.tunnelGeneration;
     if (!bypassCache && this.dohCache.hostname === hostname && this.dohCache.generation === lookupGeneration && Date.now() - this.dohCache.at < PUBLIC_HEALTH_DOH_CACHE_TTL_MS) {
       return this.dohCache.ip;
     }
     for (const endpoint of PUBLIC_HEALTH_DOH_ENDPOINTS) {
       if (signal?.aborted) return null;
-      const requestAbort = this.createPublicHealthAbortController(signal);
+      if (publicHealthBudgetExhausted(deadline, Date.now())) return null;
+      const requestAbort = this.createPublicHealthAbortController(
+        signal,
+        publicHealthAttemptTimeout(publicHealthTimeLeft(deadline, Date.now())),
+      );
       try {
         const url = `${endpoint}?name=${encodeURIComponent(hostname)}&type=A&rand=${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const response = await this.fetchWithHardAbort(url, {
@@ -2905,7 +3311,14 @@ export class BridgeManager implements vscode.Disposable {
   private dohCache: { hostname: string; ip: string; at: number; generation: number } = { hostname: "", ip: "", at: 0, generation: -1 };
 
   private async waitForPublicHealth(child: ChildProcessWithoutNullStreams): Promise<void> {
-    const deadline = Date.now() + PUBLIC_HEALTH_STARTUP_TIMEOUT_MS;
+    // The startup budget is configurable: a slow public network benefits from a longer
+    // window, while a failing one should not make the user wait the full default.
+    const configuredTimeout = vscode.workspace.getConfiguration("agentbridge").get<number>(PUBLIC_HEALTH_STARTUP_TIMEOUT_SETTING, DEFAULT_PUBLIC_HEALTH_STARTUP_TIMEOUT_MS);
+    const timeoutMs = typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout)
+      ? Math.min(Math.max(configuredTimeout, 5_000), 120_000)
+      : DEFAULT_PUBLIC_HEALTH_STARTUP_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
+    let consecutiveDeterministicFailures = 0;
     const isCloudflare = this.tunnelProvider === "cloudflare" || this.tunnelProvider === "cloudflare-named";
     const logThrottle = isCloudflare ? this.createPublicHealthLogThrottle() : undefined;
     const reportFailure = logThrottle?.report ?? ((message: string) => this.output.appendLine(`[bridge] ${this.redactRouteToken(message)}`));
@@ -2973,11 +3386,20 @@ export class BridgeManager implements vscode.Disposable {
             throw new BridgeQuicUnstableError();
           }
         }
-        const healthy = await this.requestPublicHealth(reportFailure, precheckAbort.signal);
-        await assertTunnelAvailable();
+        // Bound this attempt by what is left of the budget as well as by the per-request
+        // limit. The loop condition only gates when an attempt starts, so a request launched
+        // just before the deadline would otherwise keep running past the window the user
+        // configured and make startup overrun its own declared budget.
+        const remaining = deadline - Date.now();
+        const result = await this.requestPublicHealth(
+          reportFailure,
+          isCloudflare ? precheckAbort.signal : undefined,
+          publicHealthAttemptTimeout(remaining),
+          deadline,
+        );
         const postRequestPrecheckError = observedPrecheckError;
         if (postRequestPrecheckError) throw postRequestPrecheckError;
-        if (healthy) {
+        if (result.ok) {
           const pendingFailure = this.cloudflaredPrecheckFailure(child);
           if (!pendingFailure) return;
           if (pendingFailure.kind !== "generic") throw pendingFailure.error;
@@ -2986,7 +3408,16 @@ export class BridgeManager implements vscode.Disposable {
           if (completedFailure) throw completedFailure;
           return;
         }
-        await this.waitForPublicHealthRetry(precheckAbort.signal);
+        // Deterministic failures (bad DNS, refused/reset connection, TLS interception) do not
+        // resolve by retrying with the same configuration, so give up early rather than
+        // burning the remaining startup budget.
+        const failure = result.failure;
+        const { count, giveUp } = nextDeterministicFailureCount(consecutiveDeterministicFailures, failure?.deterministic);
+        consecutiveDeterministicFailures = count;
+        if (giveUp && failure) {
+          throw new Error(this.publicHealthUnreachableMessage(failure));
+        }
+        await this.waitForPublicHealthRetry(isCloudflare ? precheckAbort.signal : undefined);
       }
       const precheckError = observedPrecheckError ?? this.cloudflaredPrecheckError(child);
       if (precheckError) throw precheckError;
@@ -3000,7 +3431,7 @@ export class BridgeManager implements vscode.Disposable {
       if (this.tunnelProvider === "cloudflare-named") {
         throw new Error(t("tunnelNeverRegisteredError", cloudflaredLogTail(diagnostics, 200)));
       }
-      throw new Error(t("publicHealthTimeout", Math.round(PUBLIC_HEALTH_STARTUP_TIMEOUT_MS / 1000), this.publicHealthLogUrl()));
+      throw new Error(t("publicHealthTimeout", Math.round(timeoutMs / 1000), this.publicHealthLogUrl()));
     } finally {
       if (isCloudflare) {
         child.stdout.off("data", onCloudflaredData);
@@ -3010,6 +3441,22 @@ export class BridgeManager implements vscode.Disposable {
       if (precheckDetailTimer) clearTimeout(precheckDetailTimer);
       logThrottle?.flush();
     }
+  }
+
+  /**
+   * Explains a deterministic public-health failure and points at the network layer that has
+   * to change. Distinguishes "a proxy is configured and still failing" from "no proxy at
+   * all", because the fix differs: verify/replace the proxy versus set one up.
+   */
+  private publicHealthUnreachableMessage(failure: PublicHealthFailure): string {
+    const httpConfiguration = vscode.workspace.getConfiguration("http");
+    const hasProxy = Boolean(httpConfiguration.get<string>("proxy")?.trim()
+      || process.env.HTTPS_PROXY || process.env.https_proxy
+      || process.env.HTTP_PROXY || process.env.http_proxy);
+    const guidance = hasProxy
+      ? "The health request was routed through the configured HTTP proxy and still failed. Verify the proxy can reach the public endpoint, or enable a system/global (TUN) proxy."
+      : "This machine cannot reach the public endpoint directly. Set http.proxy to a working HTTP proxy or enable a system/global (TUN) proxy so the health check can route around the block.";
+    return `Public Bridge health endpoint unreachable: ${this.publicHealthLogUrl()} (${this.redactRouteToken(failure.reason)}). ${guidance}`;
   }
 
   private async startTunnelOnce(expectedGeneration?: number): Promise<void> {
@@ -3161,17 +3608,29 @@ export class BridgeManager implements vscode.Disposable {
       response.setHeader("Access-Control-Allow-Origin", originValidation.origin);
       response.setHeader("Vary", "Origin");
     }
-    response.setHeader("Access-Control-Allow-Headers", "content-type, accept, mcp-session-id, mcp-protocol-version, mcp-method, mcp-name, last-event-id, authorization");
-    response.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
+    response.setHeader("Access-Control-Allow-Headers", "content-type, accept, Mcp-Session-Id, mcp-protocol-version, mcp-method, mcp-name, last-event-id, authorization");
+    response.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
     response.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
     response.setHeader("Cache-Control", "no-store");
+    // Wrap every response here, once, rather than at the points that are known to carry the header
+    // today: the SDK writes it from four places, and a GET stream or a DELETE answer that starts
+    // writing it should not need this line to be found and moved first.
+    this.useCanonicalSessionHeader(response);
     if (request.method === "OPTIONS") {
       response.writeHead(204).end();
       return;
     }
 
-    // Route to existing session by mcp-session-id header
-    const sessionId = request.headers["mcp-session-id"] as string | undefined;
+    // Route to existing session by mcp-session-id header. Node hands back an array when the header
+    // arrived more than once; the protocol allows exactly one, and reading the array as a string
+    // made the lookup key "abc,def" - a lookup that can only miss, answered as an expired session
+    // rather than as the malformed request it is.
+    const rawSessionId = request.headers["mcp-session-id"];
+    if (rawSessionId !== undefined && typeof rawSessionId !== "string") {
+      writeJsonError(response, 400, "Bad Request: send Mcp-Session-Id once.");
+      return;
+    }
+    const sessionId: string | undefined = rawSessionId;
 
     if (request.method === "POST") {
       const body = await readJsonBody(request);
@@ -3190,6 +3649,34 @@ export class BridgeManager implements vscode.Disposable {
     }
 
     writeJsonError(response, 405, "Method not allowed.");
+  }
+
+  /**
+   * The MCP SDK writes its session header in lower case, which is legal HTTP but not the
+   * spelling the protocol documents use. Header names compare case-insensitively, so this is
+   * naming rather than behaviour: whichever way the SDK chooses to write that one header, it
+   * leaves here in the canonical form. Called once per response, before any branch writes to it.
+   */
+  private useCanonicalSessionHeader(response: ServerResponse): void {
+    const setHeader = response.setHeader.bind(response);
+    const writeHead = response.writeHead.bind(response);
+    response.setHeader = ((name: string, value: number | string | readonly string[]) => {
+      const isSession = typeof name === "string" && name.toLowerCase() === "mcp-session-id";
+      return isSession ? setHeader("Mcp-Session-Id", value) : setHeader(name, value);
+    }) as typeof response.setHeader;
+    response.writeHead = ((...args: unknown[]) => {
+      for (const arg of args) {
+        if (!arg || typeof arg !== "object" || Array.isArray(arg)) continue;
+        const headers = arg as Record<string, unknown>;
+        for (const key of Object.keys(headers)) {
+          if (key !== "Mcp-Session-Id" && key.toLowerCase() === "mcp-session-id") {
+            headers["Mcp-Session-Id"] = headers[key];
+            delete headers[key];
+          }
+        }
+      }
+      return (writeHead as (...a: unknown[]) => ServerResponse)(...args);
+    }) as typeof response.writeHead;
   }
 
   private async handlePost(ownerServer: HttpServer, ownerGeneration: number, request: IncomingMessage, response: ServerResponse, body: unknown, sessionId: string | undefined): Promise<void> {
@@ -3302,8 +3789,14 @@ export class BridgeManager implements vscode.Disposable {
       writeJsonError(response, 404, "Session not found.");
       return;
     }
-    await session.transport.handleRequest(request, response);
-    this.destroySession(sessionId);
+    try {
+      await session.transport.handleRequest(request, response);
+    } finally {
+      // The SDK owns the transport from here, but a request that throws still has to take the
+      // session with it: otherwise the client is answered with a 500 and the session stays in
+      // the table until something else notices it is gone.
+      this.destroySession(sessionId);
+    }
   }
 
   private createSession(ownerServer: HttpServer, ownerGeneration: number, onSessionInitialized?: () => void): { transport: StreamableHTTPServerTransport; server: McpServer } {
@@ -3396,7 +3889,26 @@ export class BridgeManager implements vscode.Disposable {
       };
     }
     if (toolName === SET_TODOS_TOOL.name) {
-      return this.handleSetTodos(args);
+      // The todo list is the one piece of state a caller keeps across a whole job, and it
+      // used to go straight through: no activity, so no line in the panel and no count.
+      // report_progress has always been recorded, so a job that reported its progress but
+      // never restated its plan looked like a job that did nothing in between.
+      const activityId = this.pushActivity({
+        tool: toolName,
+        status: "running",
+        presentation: bridgePresentation(toolName, args),
+        sessionId: extra.sessionId,
+      });
+      const startedAt = Date.now();
+      try {
+        const result = this.handleSetTodos(args);
+        this.finishActivity(activityId, "completed", Date.now() - startedAt, undefined, bridgePresentation(toolName, args));
+        return result;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.finishActivity(activityId, "error", Date.now() - startedAt, message, bridgePresentation(toolName, args, message, undefined, true));
+        throw error;
+      }
     }
     if (toolName === REPORT_PROGRESS_TOOL.name) {
       return this.handleReportProgress(args, extra.sessionId);
@@ -3411,16 +3923,22 @@ export class BridgeManager implements vscode.Disposable {
     const startedAt = Date.now();
     try {
       if (isFileToolName(toolName)) {
+        const filesConfiguration = vscode.workspace.getConfiguration("agentbridge");
+        const configuredExcludes = filesConfiguration.get<unknown>("files.excludeGlobs");
+        const configuredCeiling = filesConfiguration.get<unknown>("files.veryLargeFileBytes");
         const result = await invokeFileTool(toolName, args, {
           workspaceRoots: this.workspaceRoots(),
           signal: extra.signal,
+          excludeGlobs: normalizeExcludeGlobs(configuredExcludes),
+          veryLargeFileBytes: normalizeVeryLargeFileBytes(configuredCeiling),
+          imageMaxBytes: normalizeImageMaxBytes(filesConfiguration.get<unknown>("files.imageMaxBytes")),
         });
         this.finishActivity(
           activityId,
-          "completed",
+          result.isError ? "error" : "completed",
           Date.now() - startedAt,
-          undefined,
-          bridgePresentation(toolName, args, result.text, result.structuredContent as Record<string, unknown>),
+          result.isError ? result.text : undefined,
+          bridgePresentation(toolName, args, result.text, result.structuredContent as Record<string, unknown>, result.isError === true),
         );
         const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
           { type: "text" as const, text: result.text },
@@ -3432,6 +3950,9 @@ export class BridgeManager implements vscode.Disposable {
         }
         return {
           content,
+          // Only a call that failed as a whole. read_files reports an unreadable file as one
+          // row of an answer that still succeeded, and that is not an error result.
+          isError: result.isError || undefined,
           structuredContent: result.structuredContent as Record<string, unknown>,
         };
       }
@@ -3536,13 +4057,17 @@ export class BridgeManager implements vscode.Disposable {
     if (!message) throw new Error("report_progress.message must be a non-empty string.");
     if (message.length > 2_000) throw new Error("report_progress.message must be at most 2000 characters.");
     const phase = typeof input.phase === "string" ? input.phase.trim().slice(0, 160) : undefined;
-    let percent: number | undefined;
-    if (input.percent !== undefined) {
-      if (!Number.isInteger(input.percent) || Number(input.percent) < 0 || Number(input.percent) > 100) {
-        throw new Error("report_progress.percent must be an integer from 0 to 100.");
-      }
-      percent = Number(input.percent);
-    }
+    // Brought into range and named in the answer, the way every other bounded number is. This
+    // one was the exception: a caller reporting 120% had its whole progress report refused, so
+    // the panel lost the message as well as the number - and a percentage past the end is a
+    // caller being optimistic, not a call that cannot be answered.
+    const boundedPercent = boundedInteger(input.percent, 0, 0, 100, "report_progress.percent");
+    // A caller sending null means "no percentage", not zero. boundedInteger reads a value that
+    // is not a number as absent and falls back, so without this a progress update that carried
+    // no percentage was shown as "(0%)".
+    const hasPercent = input.percent !== undefined && input.percent !== null;
+    const percent = hasPercent ? boundedPercent.value : undefined;
+    const adjusted = hasPercent ? boundedNotes([boundedPercent]) : null;
     const requestedTodoId = typeof input.todo_id === "string" ? input.todo_id.trim() : "";
     let linkedTodo: BridgeTodo | undefined;
     if (requestedTodoId) {
@@ -3562,7 +4087,8 @@ export class BridgeManager implements vscode.Disposable {
       sessionId,
     });
     this.output.appendLine(`[bridge-progress]${linkedTodo ? ` [${linkedTodo.id}]` : ""}${phase ? ` ${phase}:` : ""} ${message}${percent !== undefined ? ` (${percent}%)` : ""}`);
-    return { content: [{ type: "text", text: linkedTodo ? `Progress reported to AgentBridge for todo ${linkedTodo.id}.` : "Progress reported to AgentBridge." }] };
+    const answer = linkedTodo ? `Progress reported to AgentBridge for todo ${linkedTodo.id}.` : "Progress reported to AgentBridge.";
+    return { content: [{ type: "text", text: adjusted ? `${answer}\n${adjusted}` : answer }] };
   }
 
   private handleSetTodos(value: unknown): { content: Array<{ type: "text"; text: string }> } {

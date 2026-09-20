@@ -16,10 +16,10 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
       type: "object",
       properties: {
         path: { type: "string", description: "Workspace-relative directory path. Defaults to the workspace root." },
-        depth: { type: "integer", enum: [1, 2], default: 1, description: "Directory depth to list. Keep this small; use find_files for recursive discovery." },
+        depth: { type: "integer", enum: [1, 2], default: 1, description: "Directory depth to list. Keep this small; use find_files for recursive discovery. A value outside the range is brought into it, and the answer names what was used." },
         include_hidden: { type: "boolean", default: false, description: "Include dot-prefixed entries." },
         no_ignore: { type: "boolean", default: false, description: "Include common generated/ignored directories such as node_modules, dist and .git." },
-        max_entries: { type: "integer", minimum: 1, maximum: 500, default: 200, description: "Maximum returned entries." }
+        max_entries: { type: "integer", minimum: 1, maximum: 500, default: 200, description: "Maximum returned entries. A value outside the range is brought into it, and the answer names what was used." },
       },
       additionalProperties: false
     }
@@ -28,7 +28,7 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "run_command",
     vscodeToolName: "agentbridge_run_command",
     capability: "execute",
-    description: "Run a shell command in an AgentBridge-managed persistent real PTY that is independent of the user's terminal profiles and VS Code Shell Integration. ${RUNTIME_SHELL_DESCRIPTION}. ${RUNTIME_SHELL_SYNTAX_HINT} Shell state such as environment variables, functions and the current directory persists when the same terminal is reused. Omit cwd to continue from the most recently used idle AgentBridge terminal's current directory; a new terminal starts at the workspace root. Interactive input, resize, and TTY-aware CLI behavior are supported. Concurrent commands may use additional managed terminals, up to 8 live terminals total; when all are busy, additional run_command calls fail until a terminal becomes available or a stuck command is terminated. Explicitly choose background=true for long-running servers/watchers and background=false for commands whose result should be awaited. Returns a command_id for later output inspection or interactive input.",
+    description: "Run a shell command in an AgentBridge-managed persistent real PTY that is independent of the user's terminal profiles and VS Code Shell Integration. ${RUNTIME_SHELL_DESCRIPTION}. ${RUNTIME_SHELL_SYNTAX_HINT} Shell state such as environment variables, functions and the current directory persists when the same terminal is reused. Omit cwd to continue from the most recently used idle AgentBridge terminal's current directory; a new terminal starts at the workspace root. Interactive input, resize, and TTY-aware CLI behavior are supported. Concurrent commands may use additional managed terminals, up to 8 live terminals total; when all are busy, additional run_command calls fail until a terminal becomes available or a stuck command is terminated. Explicitly choose background=true for long-running servers/watchers and background=false for commands whose result should be awaited. Returns a command_id for later output inspection or interactive input. Execution modes: pty (default) runs in the managed persistent terminal above and supports interactive input; direct runs the command through a one-shot child process with piped output and a process-level exit code (no terminal view, no interactive input). Prefer execution=\"direct\" for non-interactive one-shot commands such as builds, tests and scripts; keep the default pty for interactive programs, TUIs, and background=true servers that should stay visible in a terminal. The result header always carries the same fixed fields: facts that would be absent are explicit instead (script_bridge is null when the command was not bridged through a temp script, hint is \"none\" when the command is not running) — parse the header by field name, never by line presence.",
     inputSchema: {
       type: "object",
       required: ["command", "background"],
@@ -36,7 +36,8 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
         command: { type: "string", minLength: 1, description: "Shell command to run." },
         cwd: { type: "string", description: "Optional workspace-relative working directory. When omitted, reuse the most recently used idle AgentBridge terminal and continue from its current directory; a new terminal starts at the workspace root." },
         background: { type: "boolean", description: "Whether this is expected to keep running. Must be chosen explicitly." },
-        timeout_ms: { type: "integer", minimum: 1000, maximum: 120000, default: 120000, description: "For foreground commands, maximum time to wait before returning status=running. The command is not killed on timeout." }
+        execution: { type: "string", enum: ["pty", "direct"], default: "pty", description: "pty = managed persistent terminal (interactive, visible in a terminal tab); direct = one-shot child process with a process-level exit code (non-interactive, no terminal view). direct spawns a fresh shell per command (about 1-4s PowerShell cold-start overhead on Windows); prefer the default pty when running many rapid sequential commands that need shell state. Not compatible with background=true." },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: 120000, default: 120000, description: "For foreground commands, maximum time to wait before returning status=running. The command is not killed on timeout. A value outside the range is brought into it, and the answer names what was used." },
       },
       additionalProperties: false
     }
@@ -51,8 +52,8 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
       required: ["command_id"],
       properties: {
         command_id: { type: "string", minLength: 1 },
-        offset: { type: "integer", minimum: 0, default: 0, description: "Absolute UTF-8 byte offset into captured output." },
-        max_bytes: { type: "integer", minimum: 1, maximum: 131072, default: 32768 }
+        offset: { type: "integer", minimum: 0, default: 0, description: "Absolute UTF-8 byte offset into captured output. A value outside the range is brought into it, and the answer names what was used." },
+        max_bytes: { type: "integer", minimum: 1, maximum: 131072, default: 32768, description: "Maximum bytes of captured output returned in one read. Defaults to 32768; hard maximum 131072. A value outside the range is brought into it, and the answer names what was used." }
       },
       additionalProperties: false
     }
@@ -100,9 +101,9 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
           type: "array",
           items: { type: "string", enum: ["error", "warning", "information", "hint"] },
           uniqueItems: true,
-          description: "Optional severity filter. Defaults to all severities."
+          description: "Optional severity filter. Defaults to all severities. A value that is not one of the four is reported as ignored rather than refused; if none of them is recognised, no filter is applied and the report says so."
         },
-        max_results: { type: "integer", minimum: 1, maximum: 500, default: 100 }
+        max_results: { type: "integer", minimum: 1, maximum: 500, default: 100, description: "Maximum diagnostics returned. Defaults to 100; hard maximum 500. A value outside the range is brought into it, and the answer names what was used." }
       },
       additionalProperties: false
     }
@@ -126,20 +127,22 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
         column: { type: "integer", minimum: 1, description: "1-based UTF-16 source column. Required for definition/references/implementation/hover." },
         query: { type: "string", description: "Symbol query. Required for workspace_symbols." },
         include_declaration: { type: "boolean", default: true, description: "For references, include the symbol declaration/definition when present." },
-        max_results: { type: "integer", minimum: 1, maximum: 500, description: "Maximum returned semantic results. Operation-specific defaults are used when omitted." }
+        max_results: { type: "integer", minimum: 1, maximum: 500, description: "Maximum returned semantic results. Operation-specific defaults are used when omitted. A value outside the range is brought into it, and the answer names what was used." },
       },
       additionalProperties: false
     }
   }
 ] as const;
 
-export const IDE_TOOL_NAMES = IDE_TOOL_DEFINITIONS.map((tool) => tool.name);
-
 /**
  * IDE tools that only make sense inside the native Chat runtime and must not be
  * exposed over the Bridge MCP surface. Remote agents connected through Bridge
  * have their own pacing; a tool that sleeps on the local terminal is meaningless
  * to them and only pollutes their tool list.
+ *
+ * Empty on purpose, not by oversight: this build registers no tool that is local-only, so
+ * there is nothing to exclude. The set is the one place to name one, and the two filters
+ * that read it stay correct whether or not it ever holds anything.
  */
 export const BRIDGE_EXCLUDED_TOOL_NAMES: ReadonlySet<string> = new Set<string>();
 

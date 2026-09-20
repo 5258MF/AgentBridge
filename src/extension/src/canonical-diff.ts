@@ -40,10 +40,26 @@ function decodeLines(bytes?: Uint8Array): DecodedLines {
   const normalized = payload.toString("utf8").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const endsWithNewline = normalized.endsWith("\n");
   const body = endsWithNewline ? normalized.slice(0, -1) : normalized;
+  // A body that is empty only because the trailing newline was stripped is still one line:
+  // "\n" is a file holding one empty line, which is not the same file as "".
+  const lines = body.length === 0 ? (endsWithNewline ? [""] : []) : body.split("\n");
   return {
-    lines: body.length === 0 ? [] : body.split("\n"),
+    lines,
     ends_with_newline: endsWithNewline,
   };
+}
+
+/**
+ * Give every line the newline that follows it.
+ *
+ * Whether a newline follows a line is part of the line: "a" is not "a\n", and a diff that
+ * treats them as equal cannot describe a change between them. Only the last line of a side
+ * can be the one without one, so every other line simply gets one appended and the diff then
+ * compares whole lines the way git does. Rendering strips it again; the marker that reports a
+ * missing newline is written from the file's own state, never from these strings.
+ */
+function withTrailingNewlines(lines: string[], endsWithNewline: boolean): string[] {
+  return lines.map((line, index) => (index === lines.length - 1 && !endsWithNewline ? line : `${line}\n`));
 }
 
 function fallbackReplace(oldLines: string[], newLines: string[]): LineEdit[] {
@@ -159,11 +175,59 @@ function annotateEdits(edits: LineEdit[]): AnnotatedEdit[] {
   });
 }
 
-function formatRange(start: number, count: number): string {
-  return `${start},${count}`;
+const NO_NEWLINE_MARKER = "\\ No newline at end of file";
+
+/** Trailing-newline state for both sides, needed to mark a file that ends without one. */
+interface TrailingNewlineState {
+  oldLineCount: number;
+  newLineCount: number;
+  oldEndsWithNewline: boolean;
+  newEndsWithNewline: boolean;
 }
 
-function renderHunks(edits: LineEdit[], contextLines = DEFAULT_CONTEXT_LINES): string[] {
+/**
+ * Write one side of a hunk header the way git writes it.
+ *
+ * A range of exactly one line carries no count - git prints "@@ -1 +1 @@", not
+ * "@@ -1,1 +1,1 @@" - while a range of no lines keeps its ",0" so that a pure insertion
+ * still says where it landed. Anything else is "start,count".
+ */
+function formatRange(start: number, count: number): string {
+  return count === 1 ? `${start}` : `${start},${count}`;
+}
+
+/**
+ * Reorder a hunk's edits the way git writes them: within one run of changes, every removed
+ * line comes before every added one.
+ *
+ * The order carries no meaning on its own - a reader reconstructs the old side from the
+ * removals and the new side from the additions, and neither is reordered here - but the
+ * marker does: it declares a side finished, so anything emitted after it has to belong to
+ * neither side. A removal that lands behind the new side's marker is a shape git never
+ * writes, and one only this parser understood.
+ */
+function gitOrdered(edits: AnnotatedEdit[]): AnnotatedEdit[] {
+  const out: AnnotatedEdit[] = [];
+  let run: AnnotatedEdit[] = [];
+  const flush = (): void => {
+    if (run.length === 0) return;
+    out.push(...run.filter((edit) => edit.kind === "delete"));
+    out.push(...run.filter((edit) => edit.kind !== "delete"));
+    run = [];
+  };
+  for (const edit of edits) {
+    if (edit.kind === "equal") {
+      flush();
+      out.push(edit);
+      continue;
+    }
+    run.push(edit);
+  }
+  flush();
+  return out;
+}
+
+function renderHunks(edits: LineEdit[], trailing: TrailingNewlineState, contextLines = DEFAULT_CONTEXT_LINES): string[] {
   const changeIndices = edits
     .map((edit, index) => (edit.kind === "equal" ? -1 : index))
     .filter((index) => index >= 0);
@@ -188,9 +252,22 @@ function renderHunks(edits: LineEdit[], contextLines = DEFAULT_CONTEXT_LINES): s
     const oldStart = oldCount === 0 ? first.old_line - 1 : first.old_line;
     const newStart = newCount === 0 ? first.new_line - 1 : first.new_line;
     output.push(`@@ -${formatRange(oldStart, oldCount)} +${formatRange(newStart, newCount)} @@`);
-    for (const edit of slice) {
+    // A run of changes is written the way git writes it: every removed line first, then every
+    // added one. Emitting them in the order the diff produced them put a removal *after* the
+    // marker that had already declared the new side finished, which is a shape git never
+    // writes - and one that only this parser understood.
+    for (const edit of gitOrdered(slice)) {
       const marker = edit.kind === "equal" ? " " : edit.kind === "delete" ? "-" : "+";
-      output.push(`${marker}${edit.line}`);
+      // The compared lines carry the newline that follows them; here it is a line break again.
+      output.push(`${marker}${edit.line.endsWith("\n") ? edit.line.slice(0, -1) : edit.line}`);
+      // Without the marker a reader cannot tell "a\nb" from "a\nb\n", so the diff would
+      // understate what changed. Emit it for whichever side ends without a newline. A line
+      // that is unchanged carries the same newline on both sides, so one marker covers it.
+      if (edit.kind !== "insert" && edit.old_line === trailing.oldLineCount && !trailing.oldEndsWithNewline) {
+        output.push(NO_NEWLINE_MARKER);
+      } else if (edit.kind !== "delete" && edit.new_line === trailing.newLineCount && !trailing.newEndsWithNewline) {
+        output.push(NO_NEWLINE_MARKER);
+      }
     }
   }
   return output;
@@ -201,8 +278,16 @@ function renderFileDiff(file: CanonicalDiffFile): string[] {
   const newPath = file.new_path ?? file.old_path ?? "unknown";
   const oldDecoded = decodeLines(file.old_bytes);
   const newDecoded = decodeLines(file.new_bytes);
-  const edits = diffLines(oldDecoded.lines, newDecoded.lines);
-  const hunks = renderHunks(edits);
+  const edits = diffLines(
+    withTrailingNewlines(oldDecoded.lines, oldDecoded.ends_with_newline),
+    withTrailingNewlines(newDecoded.lines, newDecoded.ends_with_newline),
+  );
+  const hunks = renderHunks(edits, {
+    oldLineCount: oldDecoded.lines.length,
+    newLineCount: newDecoded.lines.length,
+    oldEndsWithNewline: oldDecoded.ends_with_newline,
+    newEndsWithNewline: newDecoded.ends_with_newline,
+  });
   const output: string[] = [];
 
   if (file.action === "move") {

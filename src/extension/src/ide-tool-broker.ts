@@ -1,24 +1,29 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
+import { COMMON_EXCLUDE_GLOBS, excludeDirectoryNames } from "./find-files.js";
+import { boundedInteger, boundedNotes, describeValue } from "./bounded-integer.js";
+import { canonicalWorkspaceRoots, defaultWorkspaceRoot, isInsideAnyRoot, isInsideAnyWorkspaceRoot, isInsideRoot, workspaceRootHolding, workspaceRoots } from "./workspace-roots.js";
 import { getIdeToolDefinition } from "./ide-tool-definitions.js";
 import { invokeLspTool } from "./lsp-tool.js";
-
-const COMMON_EXCLUDES = new Set([".git", "node_modules", "dist", "build", "coverage", ".next", "target", "vendor"]);
+import { translate } from "./i18n.js";
+const t = translate;
 const MAX_CAPTURED_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_COMPLETED_STATES = 32;
 const DEFAULT_OUTPUT_BYTES = 32 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_IDLE_TERMINALS = 4;
 const MAX_TOTAL_TERMINALS = 8;
+
+/** Direct commands own no terminal, so the pool ceiling above never applies to them. */
+const MAX_CONCURRENT_DIRECT_COMMANDS = 8;
 const PTY_EXIT_DATA_FLUSH_MS = 100;
 const COMMAND_ECHO_TIMEOUT_MS = 3000;
 const MAX_ECHO_HUNT_BYTES = 1024 * 1024;
 const MANAGED_TERMINAL_NAME = /^AgentBridge · \d+$/;
-const CHAT_CAPTURE_COLUMNS = 1000;
-const CHAT_CAPTURE_INPUT_KEY = "__agentbridgeChatCapture";
 /** Shell kinds with a per-prompt hook that can emit the OSC 633 protocol marker. */
 const RUN_COMMAND_SHELLS: ReadonlySet<ShellChoice["kind"]> = new Set(["ps51", "pwsh", "bash", "zsh"]);
 
@@ -29,15 +34,30 @@ interface TerminalSlot {
   initialCwd: string;
   busyCommandId?: string;
   closed: boolean;
+  /**
+   * A slot whose shell never reported ready. Its terminal is left on screen so whatever the
+   * shell printed can be read, and the slot is never handed out again - but it is still a slot,
+   * so the terminal can be opened and the pool can reclaim it.
+   */
+  broken?: boolean;
   lastUsedAt: number;
+}
+
+/** Most worth keeping first: a working terminal before a broken one, then the most recently used. */
+function byLeastUseful(a: TerminalSlot, b: TerminalSlot): number {
+  return Number(Boolean(a.broken)) - Number(Boolean(b.broken)) || b.lastUsedAt - a.lastUsedAt;
 }
 
 interface CommandState {
   id: string;
-  terminal: vscode.Terminal;
+  /** PTY execution kind. Null for "direct" one-shot child processes, which own no terminal. */
+  terminal: vscode.Terminal | null;
   terminalId: string;
+  terminalName: string;
   terminalReused: boolean;
-  slot: TerminalSlot;
+  /** Terminal slot for PTY commands; absent for "direct" child processes. */
+  slot?: TerminalSlot;
+  execution: "pty" | "direct";
   command: string;
   cwd: string;
   startedAt: number;
@@ -58,6 +78,10 @@ interface CommandState {
   outputStartOffset: number;
   totalOutputBytes: number;
   ansiPending: string;
+  /** Temp script the command was bridged through, unlinked once the command finishes. */
+  tempScriptPath?: string;
+  /** Live child process for "direct" commands, kept so terminate() can kill it. */
+  child?: ChildProcess;
   done: Promise<void>;
   resolveDone(): void;
 }
@@ -93,22 +117,28 @@ const MANAGED_SHELL_WINDOWS_SETTING = "managedShell.windows";
 const MANAGED_SHELL_UNIX_SETTING = "managedShell.unix";
 
 /**
- * Evict oldest finished command states (Map insertion order = start order) until at most
- * `cap` finished entries remain. Running states — including in-flight background commands,
- * whose `status` stays "running" until they finish — are never evicted.
+ * Evict the oldest finished command states until at most `cap` finished entries remain.
+ * Running states — including in-flight background commands, whose `status` stays "running"
+ * until they finish — are never evicted.
+ *
+ * Eviction follows completion order, not Map insertion order. Insertion order is start
+ * order, and the two disagree whenever a long-running background command settles after a
+ * burst of short ones: pruning by start order would then evict that background command from
+ * inside its own finishState, so `run_command` would hand the agent a command_id that
+ * `get_command_output` no longer knows about. Completion order makes the command that just
+ * settled the newest finished entry and therefore the last one at risk.
  */
 export function pruneFinishedCommandStates(states: Map<string, CommandState>, cap: number): void {
-  let finished = 0;
-  for (const state of states.values()) {
-    if (state.status !== "running") finished++;
-  }
-  if (finished <= cap) return;
-  let excess = finished - cap;
+  const finished: Array<[string, number]> = [];
   for (const [id, state] of states) {
-    if (excess <= 0) break;
     if (state.status === "running") continue;
-    states.delete(id);
-    excess--;
+    finished.push([id, state.endedAt ?? state.startedAt]);
+  }
+  if (finished.length <= cap) return;
+  finished.sort((left, right) => left[1] - right[1]);
+  const excess = finished.length - cap;
+  for (let index = 0; index < excess; index++) {
+    states.delete(finished[index]![0]);
   }
 }
 
@@ -133,7 +163,11 @@ function lookupOnPathEnv(name: string): string | null {
   return null;
 }
 
-function inferShellKindFromPath(executable: string, fallback: ShellChoice["kind"]): ShellChoice["kind"] {
+/**
+ * Infer the shell family from a file name. The fallback only applies when the name carries no
+ * known shell stem, so a renamed PowerShell is treated as PowerShell rather than as bash.
+ */
+export function inferShellKindFromPath(executable: string, fallback: ShellChoice["kind"]): ShellChoice["kind"] {
   const base = path.basename(executable).toLowerCase();
   const stem = base.replace(/\.(exe|bat|cmd)$/i, "");
   if (stem === "pwsh") return "pwsh";
@@ -188,30 +222,45 @@ function describePosixShell(executable: string, kind: "bash" | "zsh" | "sh" | "f
   };
 }
 
+/**
+ * Describe a shell from its family. Kept separate from the resolvers so the mapping from a
+ * file name to a description has one definition, shared by every platform branch.
+ */
+export function describeShellChoice(kind: ShellChoice["kind"], executable: string): ShellChoice {
+  switch (kind) {
+    case "pwsh": return describePwshShell(executable);
+    case "ps51": return describePs51Shell(executable);
+    case "cmd": return describeCmdShell(executable);
+    default: return describePosixShell(executable, kind);
+  }
+}
+
 function resolveManagedShellChoice(): ShellChoice {
   const override = resolveOverrideManagedShell();
   if (override === "") {
     // defaults below
   } else if (process.platform === "win32") {
     if (!path.isAbsolute(override)) {
-      throw new Error(`managedShell.windows 需要绝对路径（例如 C:\\Program Files\\PowerShell\\7\\pwsh.exe），收到的值：${override}`);
+      throw new Error(t("managedShellWindowsNeedsAbsolutePath", override));
     }
     if (!fs.existsSync(override)) {
-      throw new Error(`managedShell.windows 指定的 shell 路径不存在：${override}`);
+      throw new Error(t("managedShellWindowsNotFound", override));
     }
+    // Git Bash and MSYS zsh are absolute .exe paths like any Windows shell, so the POSIX
+    // families have to be recognised here too: falling through to PowerShell would spawn them
+    // with -NoLogo -NoProfile -Command, which none of them understands.
     const kind = inferShellKindFromPath(override, "ps51");
-    switch (kind) {
-      case "pwsh": return describePwshShell(override);
-      case "cmd": return describeCmdShell(override);
-      default: return describePs51Shell(override);
+    if (kind === "pwsh" || kind === "ps51" || kind === "cmd" || kind === "bash" || kind === "zsh") {
+      return describeShellChoice(kind, override);
     }
+    throw new Error(t("managedShellWindowsUnsupported", override));
   } else {
     const resolved = path.isAbsolute(override) ? override : lookupOnPathEnv(override);
     if (resolved === null) {
-      throw new Error(`managedShell.unix 指定的 shell 未在 PATH 中找到：${override}`);
+      throw new Error(t("managedShellUnixNotOnPath", override));
     }
     if (path.isAbsolute(override) && !fs.existsSync(override)) {
-      throw new Error(`managedShell.unix 指定的 shell 路径不存在：${override}`);
+      throw new Error(t("managedShellUnixNotFound", override));
     }
     const kind = inferShellKindFromPath(resolved, "bash");
     if (kind === "bash" || kind === "zsh" || kind === "sh" || kind === "fish") {
@@ -226,13 +275,13 @@ function resolveManagedShellChoice(): ShellChoice {
     const windowsRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";
     const executable = path.join(windowsRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     if (!fs.existsSync(executable)) {
-      throw new Error(`AgentBridge 默认 Management Shell 未找到：${executable}。请在设置中指定一个可用的 shell（例如 C:\\Program Files\\PowerShell\\7\\pwsh.exe）。`);
+      throw new Error(t("managedShellWindowsDefaultMissing", executable));
     }
     return describePs51Shell(executable);
   }
   if (fs.existsSync("/bin/bash")) return describePosixShell("/bin/bash", "bash");
   if (fs.existsSync("/bin/sh")) return describePosixShell("/bin/sh", "sh");
-  throw new Error("AgentBridge 未在默认路径找到 /bin/bash 或 /bin/sh；请在设置中手动指定 managedShell.unix。");
+  throw new Error(t("managedShellUnixDefaultMissing"));
 }
 
 export function getManagedShellChoice(): ShellChoice {
@@ -273,23 +322,26 @@ export function managedShellOverrideWarning(): string | null {
 
 /**
  * Sanity check whether an absolute shell path is actually launchable with
- * -NoProfile -Command "exit 0" / -c "exit 0". Returns false on non-zero exit
- * or timeout error. Caller (panel) uses this before writing the config so
- * invalid paths never silently fall back at Bridge Start time.
+ * -NoProfile -Command "exit 0" (PowerShell), /c "exit 0" (cmd) or -c "exit 0"
+ * (POSIX shells). Returns false on non-zero exit or timeout error. Caller (panel)
+ * uses this before writing the config so invalid paths never silently fall back at
+ * Bridge Start time.
+ *
+ * The probe arguments follow the shell family, not the platform: on Windows a Git Bash
+ * bash.exe still has to be probed as bash, because PowerShell's -NoProfile/-Command pair
+ * is not a bash option and makes every otherwise valid bash path fail the check.
  */
 export function sanityCheckManagedShellPath(candidatePath: string): Promise<boolean> {
   return new Promise((resolve) => {
-    if (process.platform === "win32") {
-      const isCmd = /\.cmd$/i.test(candidatePath) || /cmd\.exe$/i.test(candidatePath);
-      const args = isCmd ? ["/c", "exit 0"] : ["-NoProfile", "-Command", "exit 0"];
-      const child = spawn(candidatePath, args, { windowsHide: true, timeout: 2000 });
-      child.on("error", () => resolve(false));
-      child.on("exit", (code) => resolve(code === 0));
-    } else {
-      const child = spawn(candidatePath, ["-c", "exit 0"], { timeout: 2000 });
-      child.on("error", () => resolve(false));
-      child.on("exit", (code) => resolve(code === 0));
-    }
+    const kind = inferShellKindFromPath(candidatePath, process.platform === "win32" ? "ps51" : "bash");
+    const args =
+      kind === "cmd" ? ["/c", "exit 0"]
+        : kind === "bash" || kind === "zsh" || kind === "sh" || kind === "fish" ? ["-c", "exit 0"]
+          : ["-NoProfile", "-Command", "exit 0"];
+    const options = process.platform === "win32" ? { windowsHide: true, timeout: 2000 } : { timeout: 2000 };
+    const child = spawn(candidatePath, args, options);
+    child.on("error", () => resolve(false));
+    child.on("exit", (code) => resolve(code === 0));
   });
 }
 
@@ -363,7 +415,7 @@ function managedShellSpec(protocolToken: string): ManagedShellSpec {
         "  $global:LASTEXITCODE = 0",
         "  $global:__AgentBridgePromptSequence++",
         "  $agentBridgeCwd = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path))",
-        `  [Console]::Write("${markerPrefix}$global:__AgentBridgePromptSequence;$agentBridgeExit;$agentBridgeCwd\u0007")`,
+        `  [Console]::Write("${markerPrefix}$global:__AgentBridgePromptSequence;$agentBridgeExit;$agentBridgeCwd;$PID\u0007")`,
         "  \"PS $($executionContext.SessionState.Path.CurrentLocation)> \"",
         "}",
       ].join("; ");
@@ -386,7 +438,7 @@ function managedShellSpec(protocolToken: string): ManagedShellSpec {
         "__agentbridge_ec=$?",
         "__agentbridge_seq=$((${__agentbridge_seq:-0}+1))",
         "__agentbridge_cwd=$(printf '%s' \"$PWD\" | base64 | tr -d '\\r\\n')",
-        `printf '\\033]633;AgentBridge;${protocolToken};%s;%s;%s\\007' \"$__agentbridge_seq\" \"$__agentbridge_ec\" \"$__agentbridge_cwd\"`,
+        `printf '\\033]633;AgentBridge;${protocolToken};%s;%s;%s;%s\\007' \"$__agentbridge_seq\" \"$__agentbridge_ec\" \"$__agentbridge_cwd\" \"$$\"`,
       ].join("; ");
       return {
         executable: choice.executable,
@@ -403,7 +455,7 @@ function managedShellSpec(protocolToken: string): ManagedShellSpec {
       // zsh has no PROMPT_COMMAND; the per-prompt hook is `precmd`, which must be defined
       // from a startup file. Point ZDOTDIR at a generated temp dir so zsh sources our
       // .zshrc (and only ours — user rc files under $ZDOTDIR are isolated automatically).
-      // The marker payload order (seq;ec;cwd) must match handleProtocolMarker's split().
+      // The marker payload order (seq;ec;cwd;pid) must match handleProtocolMarker's split().
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentbridge-zsh-"));
       const zshrc = [
         "PROMPT='$ '",
@@ -412,7 +464,7 @@ function managedShellSpec(protocolToken: string): ManagedShellSpec {
         "  __agentbridge_ec=$?",
         "  __agentbridge_seq=$((__agentbridge_seq + 1))",
         "  __agentbridge_cwd=$(printf '%s' \"$PWD\" | base64 | tr -d '\\r\\n')",
-        `  printf '\\033]633;AgentBridge;${protocolToken};%s;%s;%s\\007' \"$__agentbridge_seq\" \"$__agentbridge_ec\" \"$__agentbridge_cwd\"`,
+        `  printf '\\033]633;AgentBridge;${protocolToken};%s;%s;%s;%s\\007' \"$__agentbridge_seq\" \"$__agentbridge_ec\" \"$__agentbridge_cwd\" \"$$\"`,
         "}",
         "",
       ].join("\n");
@@ -451,7 +503,53 @@ function managedProcessEnvironment(): Record<string, string> {
   env.TERM = "xterm-256color";
   env.COLORTERM = "truecolor";
   env.AGENTBRIDGE_AGENT_TERMINAL = "1";
+  if (process.platform === "win32") {
+    // Prefer the bundled PSReadLine over the Windows in-box 2.0.0, whose negative
+    // cursor-position handling produces ConPTY rendering artifacts. ConsoleHost resolves
+    // PSReadLine through PSModulePath and the first entry wins; the vendor payload contains
+    // only PSReadLine, so nothing else is shadowed.
+    const vendorModules = bundledModulesDir();
+    if (vendorModules) env.PSModulePath = `${vendorModules};${env.PSModulePath ?? ""}`;
+  }
   return env;
+}
+
+let cachedBundledModulesDir: string | undefined | null;
+
+/**
+ * The PowerShell modules shipped under the extension's vendor/ directory. Resolved relative to
+ * the compiled bundle first (dist/..) and then relative to the installed extension layout.
+ * Returns undefined when the payload is absent, so the shell silently falls back to the
+ * in-box PSReadLine instead of failing to start.
+ */
+function bundledModulesDir(): string | undefined {
+  if (cachedBundledModulesDir === null) return undefined;
+  if (cachedBundledModulesDir) return cachedBundledModulesDir;
+  const candidates = [
+    path.join(__dirname, "..", "vendor"),
+    path.join(vscode.env.appRoot, "extensions", "agentbridge", "vendor"),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, "PSReadLine", "PSReadLine.psd1"))) {
+      cachedBundledModulesDir = dir;
+      return dir;
+    }
+  }
+  cachedBundledModulesDir = null;
+  return undefined;
+}
+
+/**
+ * Whether the text carries a raw control character (C0 or DEL), i.e. a keystroke rather than
+ * printable input. Those are never echoed back byte-for-byte, so they cannot anchor the echo
+ * gate.
+ */
+function hasControlCharacter(text: string): boolean {
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vscode.Disposable {
@@ -481,12 +579,12 @@ export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vsco
   private echoHuntingPromptLine = false;
   private echoTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
   private activePty: NodePtyProcess | undefined;
+  /** Pid of the shell this PTY spawned, used to tell its markers from a nested shell's. */
+  private shellPid: number | undefined;
   private activePtyDataSubscription: NodePtyDisposable | undefined;
   private activePtyExitSubscription: NodePtyDisposable | undefined;
   private activeCommand: {
     sequence: number;
-    started: boolean;
-    captureColumns?: number;
     finishing?: boolean;
     finishExitCode?: number | null;
     finishTimer?: ReturnType<typeof setTimeout>;
@@ -529,7 +627,7 @@ export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vsco
     this.rows = Math.max(1, dimensions.rows);
     if (!this.activePty) return;
     try {
-      this.activePty.resize(this.activeCommand?.captureColumns ?? this.cols, this.rows);
+      this.activePty.resize(this.cols, this.rows);
     } catch {
       // A PTY may exit between the dimensions event and resize().
     }
@@ -551,15 +649,25 @@ export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vsco
     // Interactive programs (REPLs, prompts) echo agent-typed input back into the PTY stream;
     // consume that echo so it never pollutes the captured tool result. handleInput() (user
     // keystrokes) stays ungated on purpose: its echo is the visible feedback in the view.
-    this.echoExpectation = text.replace(/[\r\n]+/g, "");
-    this.echoMatchIndex = 0;
-    this.echoHuntBytesRemaining = MAX_ECHO_HUNT_BYTES;
-    // Discard everything (bounded) until the echo anchor: a REPL may render its prompt
-    // (">>> ") plus stale redraw content in the same chunk that precedes the echo.
-    this.echoHuntDiscardAll = true;
-    this.echoHuntingPromptLine = false;
-    this.echoGateActive = true;
-    this.armEchoTimeout();
+    //
+    // A terminal never echoes a control character as the byte that was sent: Ctrl+C comes
+    // back as "^C" or an equivalent escape sequence, never as ETX. Gating on the raw byte
+    // therefore keeps the gate closed until the timeout while discarding everything the
+    // interrupt produced — and send_command_input is the documented cooperative interrupt,
+    // so the agent would conclude the command ignored it and escalate to terminate_command.
+    if (hasControlCharacter(text)) {
+      this.resetEchoGate();
+    } else {
+      this.echoExpectation = text.replace(/[\r\n]+/g, "");
+      this.echoMatchIndex = 0;
+      this.echoHuntBytesRemaining = MAX_ECHO_HUNT_BYTES;
+      // Discard everything (bounded) until the echo anchor: a REPL may render its prompt
+      // (">>> ") plus stale redraw content in the same chunk that precedes the echo.
+      this.echoHuntDiscardAll = true;
+      this.echoHuntingPromptLine = false;
+      this.echoGateActive = true;
+      this.armEchoTimeout();
+    }
     this.activePty.write(appendNewline ? `${text}\r` : text);
   }
 
@@ -574,21 +682,13 @@ export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vsco
       onOutput(text: string): void;
       onExit(code: number | null): void;
     },
-    captureColumns?: number,
   ): Promise<void> {
     await this.ensureStarted();
     if (this.disposed) throw new Error("The AgentBridge managed terminal is closed.");
     if (!this.activePty) throw new Error("The AgentBridge managed PTY shell is not running.");
     if (this.activeCommand) throw new Error("The AgentBridge managed terminal is already running a command.");
     const sequence = this.nextCommandSequence++;
-    this.activeCommand = { sequence, started: false, captureColumns, ...handlers };
-    if (captureColumns) {
-      try {
-        this.activePty.resize(captureColumns, this.rows);
-      } catch {
-        // The PTY may exit immediately before the command starts.
-      }
-    }
+    this.activeCommand = { sequence, ...handlers };
     this.writeDisplay(`${command.replace(/\r?\n/g, "\r\n")}\r\n`);
     const normalizedCommand = command.replace(/[\r\n]+/g, "");
     // Arm the echo gate BEFORE writing: every byte that arrives from the PTY after the write
@@ -597,10 +697,10 @@ export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vsco
     this.echoExpectation = normalizedCommand;
     this.echoMatchIndex = 0;
     this.echoHuntBytesRemaining = MAX_ECHO_HUNT_BYTES;
-    // Discard everything (bounded) until the echo anchor for every run: chat capture resizes
-    // the PTY (full-screen redraw), and a previous command's restore-resize redraw can be
-    // delivered late into the next command's gate window (background snapshots showed the
-    // previous commands' full history). Hunting discards that noise and keeps only the echo.
+    // Discard everything (bounded) until the echo anchor for every run: a resize redraws the
+    // whole screen, and a previous command's restore-resize redraw can be delivered late
+    // into the next command's gate window (background snapshots showed the previous commands'
+    // full history). Hunting discards that noise and keeps only the echo.
     this.echoHuntDiscardAll = true;
     this.echoHuntingPromptLine = false;
     this.echoGateActive = true;
@@ -634,13 +734,27 @@ export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vsco
     const shell = managedShellSpec(this.protocolToken);
     this.tempDir = shell.tempDir;
     const env = { ...managedProcessEnvironment(), ...shell.env };
-    const ptyProcess = this.loadNodePty().spawn(shell.executable, shell.args, {
-      name: process.platform === "win32" ? "cmd" : "xterm-256color",
-      cwd: this.initialCwd,
-      env,
-      cols: this.cols,
-      rows: this.rows,
-    });
+    let ptyProcess: ReturnType<NodePtyModule["spawn"]>;
+    try {
+      ptyProcess = this.loadNodePty().spawn(shell.executable, shell.args, {
+        name: process.platform === "win32" ? "cmd" : "xterm-256color",
+        cwd: this.initialCwd,
+        env,
+        cols: this.cols,
+        rows: this.rows,
+      });
+    } catch (error) {
+      if (this.tempDir) {
+        try {
+          fs.rmSync(this.tempDir, { recursive: true, force: true });
+        } catch {
+          // Best-effort cleanup of the zsh ZDOTDIR scratch dir.
+        }
+        this.tempDir = undefined;
+      }
+      throw error;
+    }
+    this.shellPid = ptyProcess.pid;
     this.activePty = ptyProcess;
 
     this.activePtyDataSubscription = ptyProcess.onData((data) => {
@@ -740,8 +854,8 @@ export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vsco
   /**
    * Consume the shell's rendering of the typed command or agent-sent input. PSReadLine,
    * Readline and tty drivers echo the text back into the PTY output, and ConPTY can deliver
-   * that rendering late, preceded by stale prompt text, full-screen redraws (chat capture
-   * resizes the PTY to CHAT_CAPTURE_COLUMNS before each command) and cooked-echo fragments
+   * that rendering late, preceded by stale prompt text, full-screen redraws (a PTY resize
+   * re-renders the whole screen) and cooked-echo fragments
    * (the classic "p<BS>python" race between the console echo and PSReadLine's redraw).
    *
    * The gate therefore does not require the echo to start at the first byte: it hunts for the
@@ -866,21 +980,22 @@ export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vsco
       this.echoTimeoutTimer = undefined;
       // The echo never arrived or could not be consumed; open the gate so output flows.
       this.echoGateActive = false;
-      const active = this.activeCommand;
-      if (active && !active.started) active.started = true;
     }, COMMAND_ECHO_TIMEOUT_MS);
   }
 
   private handleProtocolMarker(payload: string): void {
-    if (payload.startsWith("S;")) {
-      const sequence = Number.parseInt(payload.slice(2), 10);
-      if (this.activeCommand?.sequence === sequence) this.activeCommand.started = true;
-      return;
-    }
-    const [sequenceText, exitCodeText, cwdBase64] = payload.split(";", 3);
+    // Payload is <sequence>;<exit>;<cwd>;<pid>. The pid identifies the shell that emitted
+    // it: a nested or remote shell (bash inside ssh, docker exec) inherits the per-prompt
+    // hook and writes markers through the same PTY, and honouring those would end the outer
+    // command early and adopt the nested shell's cwd.
+    const [sequenceText, exitCodeText, cwdBase64, pidText] = payload.split(";", 4);
     const sequence = Number.parseInt(sequenceText, 10);
     const exitCode = Number.parseInt(exitCodeText, 10);
     if (!Number.isFinite(sequence) || !Number.isFinite(exitCode)) return;
+    if (!markerFromOwnShell(this.shellPid, pidText)) return;
+
+    const activeCommand = this.activeCommand;
+
     if (cwdBase64) {
       try {
         const cwd = Buffer.from(cwdBase64, "base64").toString("utf8");
@@ -898,7 +1013,6 @@ export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vsco
       return;
     }
 
-    const activeCommand = this.activeCommand;
     if (!activeCommand) return;
     if (activeCommand.finishing) return; // Ignore duplicate exit markers for the same command.
     activeCommand.finishing = true;
@@ -1003,9 +1117,310 @@ function asBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
-function asInteger(value: unknown, fallback: number, min: number, max: number): number {
-  if (!Number.isInteger(value)) return fallback;
-  return Math.min(max, Math.max(min, Number(value)));
+/** Commands above this length are always bridged through a temp script instead of being
+ * typed into the readline layer, where long fast pastes are provably lossy. */
+const TEMP_SCRIPT_MAX_INLINE_LENGTH = 1024;
+
+/**
+ * True when a marker was emitted by the shell this PTY spawned.
+ *
+ * Any shell started under a managed terminal inherits the per-prompt hook, so a nested or
+ * remote shell (bash inside ssh, docker exec) also writes markers through the same PTY.
+ * Those carry the nested process's pid, which never matches the shell we spawned — sequence
+ * numbers cannot serve here because a nested shell restarts its own counter and collides.
+ *
+ * Fails open when the shell pid is unknown: dropping every marker would hang each command
+ * outright, which is worse than the bug this guards against.
+ */
+export function markerFromOwnShell(shellPid: number | undefined, pidText: string | undefined): boolean {
+  // Zero is unknown too. The node-pty build VS Code ships reports pid 0 for a ConPTY session
+  // on Windows, and 0 is a finite number, so it passed this check as though it were the shell's
+  // pid: no marker can match 0, every one was dropped, the shell never reported ready, and each
+  // command waited out the eight-second first-prompt timeout while the managed terminal sat
+  // empty and was then disposed. A pid that cannot identify a process cannot be compared to
+  // one, so it takes the same route as a missing pid.
+  if (shellPid === undefined || !Number.isFinite(shellPid) || shellPid <= 0) return true;
+  const pid = Number.parseInt(pidText ?? "", 10);
+  // No pid means an older hook — for example a terminal VS Code restored from a previous
+  // session, or a shell started before this build. It cannot be identified either way, and
+  // dropping it would hang that command, so only a positively different process is rejected.
+  if (!Number.isFinite(pid)) return true;
+  return pid === shellPid;
+}
+
+/** Shells that need PowerShell syntax in a bridged script, whichever build they are. */
+export function isPowerShellKind(kind: ShellChoice["kind"]): boolean {
+  return kind === "ps51" || kind === "pwsh";
+}
+
+/**
+ * Write a command to a temp script so a single one-line command can invoke it. Multi-line
+ * input typed into a persistent PTY is unreliable: readline/PSReadLine continuation-mode
+ * buffering can drop lines or append later commands to an unfinished statement, and non-ASCII
+ * input can be mangled by the console code page. The file bridge preserves the payload
+ * byte-for-byte.
+ */
+/**
+ * Where a bridged script lives, and how it is created.
+ *
+ * The file used to sit at a predictable path in the shared temp directory — `os.tmpdir()`
+ * plus the command id, which is a timestamp and a counter — and was written without an
+ * exclusive flag. Anything on the machine that could guess the next id could put a symlink or
+ * a file there first and have the next command's text written through it, and the PowerShell
+ * branch set no mode at all, so the command (which can carry a secret) was readable by every
+ * other account on the machine. mkdtemp makes the directory itself unguessable and creates it
+ * exclusively, and the file inside is opened with "wx", so a name that is somehow already
+ * there is an error rather than a write through whatever is sitting on it.
+ */
+function writeExclusiveScript(fileName: string, content: string, mode: number): string {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agentbridge-run-"));
+    const scriptPath = path.join(directory, fileName);
+    try {
+      fs.writeFileSync(scriptPath, content, { encoding: "utf8", mode, flag: "wx" });
+      return scriptPath;
+    } catch (error) {
+      fs.rmSync(directory, { recursive: true, force: true });
+      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
+      lastError = error;
+    }
+  }
+  throw new Error(`could not create an exclusive temp script: ${String(lastError)}`);
+}
+
+export function writeTempScript(commandId: string, command: string, kind: ShellChoice["kind"]): string {
+  if (isPowerShellKind(kind)) {
+    // UTF-8 BOM: Windows PowerShell 5.1 decodes BOM-less files with the legacy ANSI code
+    // page. The encoding prelude keeps the child PowerShell's native output UTF-8. A
+    // param() block must stay the first statement, so when one is present the prelude is
+    // inserted right after the (quote-aware) matching close paren; without a scannable
+    // param block the payload keeps its original shape.
+    const prelude = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\r\n";
+    let content: string;
+    const insertAt = encodingPreludeInsertIndex(command);
+    if (insertAt >= 0) {
+      content = `\uFEFF${command.slice(0, insertAt)}\r\n${prelude}${command.slice(insertAt)}\r\n`;
+    } else if (leadingParamIndex(command) >= 0) {
+      // A param block is present but its closing paren could not be located, so there is no
+      // safe place to put the prelude. Keep the payload as written: param has to stay the
+      // first statement, and a script that only loses the output-encoding hint still runs.
+      content = `\uFEFF${command}\r\n`;
+    } else {
+      content = `\uFEFF${prelude}${command}\r\n`;
+    }
+    // powershell.exe -File only honors an explicit `exit` (or a thrown error): a script
+    // whose final statement is a failed native command would otherwise exit 0 and mask the
+    // failure. Mirror bash semantics: when the final statement failed ($?), propagate
+    // $LASTEXITCODE for native commands, else exit 1.
+    //
+    // $LASTEXITCODE becomes an int as soon as any native command has run, so testing
+    // `-is [int]` alone is not enough: a failed *cmdlet* would then inherit a stale 0 and
+    // exit 0, silently masking the failure. Require a non-zero code before trusting it.
+    const nativeExitGuard = "\r\nif (-not $?) { if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE } else { exit 1 } }\r\n";
+    // 0o600, not the default: a bridged command can carry a secret, and nothing but the shell
+    // that is about to run it needs to read the file.
+    return writeExclusiveScript(`agentbridge-${commandId}.ps1`, `${content}${nativeExitGuard}`, 0o600);
+  }
+  // 0o700 keeps the POSIX script executable by its owner only.
+  return writeExclusiveScript(`agentbridge-${commandId}.sh`, `${command}\n`, 0o700);
+}
+
+/**
+ * Where tool warnings are reported. The extension host's console cannot be read by the user,
+ * so activation points this at the AgentBridge output channel; until it does — and in tests —
+ * warnings fall back to the console so they are still captured somewhere.
+ */
+let reportWarning: (message: string) => void = (message) => console.warn(message);
+
+export function setIdeToolWarningSink(sink: ((message: string) => void) | undefined): void {
+  reportWarning = sink ?? ((message: string) => console.warn(message));
+}
+
+/**
+ * Removes a bridged temp script once its command has settled. Windows often still holds the
+ * file for a moment after the shell exits, so a single retry is worth it — and a failure is
+ * reported rather than dropped, because swallowing it is exactly how temp directories fill up
+ * with nothing left to explain why.
+ */
+export function removeTempScript(scriptPath: string): void {
+  const gone = (error: NodeJS.ErrnoException | null): boolean => !error || error.code === "ENOENT";
+  const directory = path.dirname(scriptPath);
+  // The script now sits in a directory mkdtemp made for it, so the file is not the only thing
+  // to take away. Only a directory this function's own writer made is removed: the prefix is
+  // what says so, and rm is given force so a path from an older build is simply left alone.
+  const removeDirectory = (): void => {
+    if (!path.basename(directory).startsWith("agentbridge-run-")) return;
+    fs.rm(directory, { recursive: true, force: true }, () => {});
+  };
+  fs.unlink(scriptPath, (error) => {
+    if (gone(error)) {
+      removeDirectory();
+      return;
+    }
+    setTimeout(() => {
+      fs.unlink(scriptPath, (retryError) => {
+        if (!gone(retryError)) {
+          // The file is still held, so this will most likely fail as well - but a directory
+          // left behind is what fills the temp directory up, and an attempt costs nothing: a
+          // lock released a moment later is one the rm can still take. The old code returned
+          // here and kept the directory for as long as the file was held, which is longer than
+          // the warning is interesting.
+          reportWarning(`[agentbridge] could not remove temp script ${scriptPath}: ${retryError?.message}`);
+        }
+        removeDirectory();
+      });
+    }, 250);
+  });
+}
+
+/**
+ * Char index of the `param` keyword that opens the script's parameter block, or -1 when the
+ * command has none. Comment lines and `#requires` directives may precede param without
+ * making it anything other than the first statement, so they are skipped: a script that
+ * opens with `#requires -Version 7` and then declares parameters still parses, and callers
+ * must not insert anything before that block. Block comments count the same way - `<# ... #>`
+ * followed by param still parses - and missing that case sent the prelude in front of param,
+ * which PowerShell rejects outright.
+ */
+export function leadingParamIndex(command: string): number {
+  let index = 0;
+  for (;;) {
+    while (index < command.length && /\s/.test(command[index]!)) index++;
+    if (command.startsWith("<#", index)) {
+      const close = command.indexOf("#>", index + 2);
+      index = close < 0 ? command.length : close + 2;
+      continue;
+    }
+    if (command[index] === "#") {
+      const nextLine = command.indexOf("\n", index);
+      index = nextLine < 0 ? command.length : nextLine + 1;
+      continue;
+    }
+    break;
+  }
+  return /^param\s*\(/i.test(command.slice(index)) ? index : -1;
+}
+
+/**
+ * Char index just after the leading param(...) block (quote-aware depth scan), or -1 when
+ * the command does not start with a scannable param block. PowerShell requires param() to
+ * be the first statement, so an encoding prelude can only be inserted after it.
+ */
+export function encodingPreludeInsertIndex(command: string): number {
+  const paramIndex = leadingParamIndex(command);
+  if (paramIndex < 0) return -1;
+  const open = command.indexOf("(", paramIndex + 5);
+  if (open < 0) return -1;
+  let depth = 0;
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = open; i < command.length; i++) {
+    const ch = command[i];
+    if (inSingle) {
+      if (ch === "'") {
+        if (command[i + 1] === "'") i++;
+        else inSingle = false;
+      }
+      continue;
+    }
+    if (inDouble) {
+      // PowerShell escapes with a backtick, not a backslash: a `" pair is a literal quote
+      // and must not end the string. Treating it as the closing quote makes the paren count
+      // below run into the rest of the block, and the prelude is then inserted mid-expression
+      // where the parser rejects it.
+      if (ch === "`") i++;
+      else if (ch === '"') {
+        if (command[i + 1] === '"') i++;
+        else inDouble = false;
+      }
+      continue;
+    }
+    if (ch === "`") {
+      i++;
+      continue;
+    }
+    if (ch === "#") {
+      const nextLine = command.indexOf("\n", i);
+      i = nextLine < 0 ? command.length : nextLine;
+      continue;
+    }
+    // Both here-string forms have to be consumed whole. A single-quoted one that is read as
+    // an ordinary string ends at the first apostrophe inside its body, so the parens after
+    // it are counted and the block closes in the wrong place — which silently splices the
+    // encoding prelude into the middle of a parameter default.
+    if (ch === "@" && command[i + 1] === '"') {
+      const closing = command.indexOf('\n"@', i + 2);
+      i = closing < 0 ? command.length : closing + 2;
+      continue;
+    }
+    if (ch === "@" && command[i + 1] === "'") {
+      const closing = command.indexOf("\n'@", i + 2);
+      i = closing < 0 ? command.length : closing + 2;
+      continue;
+    }
+    if (ch === "'") inSingle = true;
+    else if (ch === '"') inDouble = true;
+    else if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  // The depth scan could not pair the block (an unterminated here-string, say). A lone ")"
+  // in the first column is the conventional close of a multi-line param block and is still a
+  // safe insertion point, whereas guessing anywhere else would corrupt the script.
+  const closingLine = /^\)[^\S\r\n]*(\r?\n|$)/m.exec(command);
+  return closingLine ? closingLine.index + closingLine[0].length : -1;
+}
+
+/** Single-line invocation for a temp script. A PowerShell shell runs a child PowerShell
+ * (whichever build is configured) so `exit N` inside the payload cannot kill the persistent
+ * managed shell; the child's exit code lands in $LASTEXITCODE and is reported by the prompt
+ * marker. POSIX shells run the script directly. */
+/**
+ * The arguments a direct run hands its shell for one command.
+ *
+ * cmd takes /c where the POSIX shells take -c, and -c is not a switch cmd recognises at all:
+ * every direct command on a cmd-managed host was handed an argument the shell reported as an
+ * error. /d /s is the shape that neither runs an AutoRun entry nor re-quotes the command. The
+ * PowerShell families never reach this, because a direct run bridges them through a script.
+ */
+export function directCommandArgv(choice: ShellChoice, command: string): string[] {
+  if (choice.kind === "cmd") return ["/d", "/s", "/c", command];
+  return ["-c", command];
+}
+
+export function tempScriptCommand(scriptPath: string, choice: ShellChoice): string {
+  // Run the managed shell rather than a hard-coded one: a PowerShell 7 override must not
+  // fall back to Windows PowerShell 5.1, or operators the user opted into (&&, ??=) and
+  // zsh syntax would be interpreted by the wrong shell.
+  //
+  // Both sides are quoted because the managed shell can be pointed at an arbitrary path by
+  // workspace settings, and the temp directory can contain spaces or shell metacharacters.
+  // An unescaped quote would let either value break out of its quoting and run extra text.
+  if (isPowerShellKind(choice.kind)) {
+    return `& "${escapeForDoubleQuotes(choice.executable)}" -NoProfile -ExecutionPolicy Bypass -File "${escapeForDoubleQuotes(scriptPath)}"`;
+  }
+  return `'${escapeForSingleQuotes(choice.executable)}' '${escapeForSingleQuotes(scriptPath)}'`;
+}
+
+/** Backtick-escapes the characters that are special inside a PowerShell double-quoted string. */
+function escapeForDoubleQuotes(value: string): string {
+  return value.replace(/[`$"]/g, "`$&");
+}
+
+/** Ends and reopens a POSIX single-quoted string so an embedded quote cannot break out. */
+function escapeForSingleQuotes(value: string): string {
+  return value.replace(/'/g, `'\\''`);
+}
+
+/**
+ * True when the command must be bridged through a temp script rather than typed directly
+ * into the persistent shell's readline layer.
+ */
+export function needsTempScript(command: string): boolean {
+  return /\r|\n/.test(command) || /[^\x00-\x7F]/.test(command) || command.length > TEMP_SCRIPT_MAX_INLINE_LENGTH;
 }
 
 function stripAnsi(text: string): string {
@@ -1089,17 +1504,17 @@ function isInside(root: string, candidate: string): boolean {
 }
 
 function workspaceRoot(): string {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) throw new Error("No workspace folder is open.");
-  return folder.uri.fsPath;
+  // The folder a relative path falls back to. Which folder a path really belongs to is
+  // decided per path, in workspaceRootHolding - a window can hold several.
+  return defaultWorkspaceRoot();
 }
 
 function resolveWorkspacePath(relative = "."): { root: string; absolute: string; relative: string; uri: vscode.Uri } {
-  const root = workspaceRoot();
   const rel = normalizeRelativePath(relative);
   if (path.isAbsolute(rel)) throw new Error("Path must be workspace-relative.");
+  const root = workspaceRootHolding(rel);
   const absolute = path.resolve(root, rel);
-  if (!isInside(root, absolute)) throw new Error(`Path is outside the workspace: ${relative}`);
+  if (!isInsideAnyWorkspaceRoot(absolute)) throw new Error(`Path is outside the workspace: ${relative}`);
   const normalizedRelative = path.relative(root, absolute).replace(/\\/g, "/") || ".";
   return { root, absolute, relative: normalizedRelative, uri: vscode.Uri.file(absolute) };
 }
@@ -1110,7 +1525,10 @@ async function resolveExistingWorkspacePath(relative = "."): Promise<{ root: str
     fs.promises.realpath(lexical.root),
     fs.promises.realpath(lexical.absolute),
   ]);
-  if (!isInside(root, absolute)) throw new Error(`Path is outside the workspace: ${relative}`);
+  // A symlink can lead into another folder of the same window, which is still inside the
+  // workspace: only a target no folder contains is an escape. Both sides have been through
+  // realpath, or a short 8.3 path would look like one.
+  if (!isInsideAnyRoot(await canonicalWorkspaceRoots(), absolute)) throw new Error(`Path is outside the workspace: ${relative}`);
   return { root, absolute, relative: lexical.relative, uri: vscode.Uri.file(absolute) };
 }
 
@@ -1199,12 +1617,18 @@ export class TerminalCommandManager implements vscode.Disposable {
           slot.busyCommandId = undefined;
           this.slots.delete(slotId);
         }
+        // Collected first: finishState prunes finished states and can dispose idle terminals,
+        // so settling inside the scan would mutate the map being walked.
+        const orphaned: CommandState[] = [];
         for (const state of this.states.values()) {
-          if (state.terminal !== terminal || state.status !== "running") continue;
-          state.status = "killed";
-          state.exitCode = null;
-          state.endedAt = Date.now();
-          state.resolveDone();
+          if (!state.terminal || state.terminal !== terminal || state.status !== "running") continue;
+          orphaned.push(state);
+        }
+        for (const state of orphaned) {
+          // Settle through finishState rather than by hand: it also releases the command's
+          // bridged temp script and clears the slot's busy bookkeeping. Closing a terminal
+          // used to skip both and leave a script behind for every command it killed.
+          this.finishState(state, null, "killed");
         }
       }),
     );
@@ -1212,6 +1636,20 @@ export class TerminalCommandManager implements vscode.Disposable {
 
   dispose(): void {
     for (const disposable of this.disposables) disposable.dispose();
+    // Settle before tearing the shells down. The onDidCloseTerminal listener is already
+    // disposed above, so nothing else can resolve these commands: their done promise would
+    // stay pending and a foreground run_command awaiting it would sit for the whole timeout,
+    // then report "running" for a command that has already been killed and whose state is
+    // about to be cleared. finishState is also what unlinks a bridged temp script, so
+    // skipping it here leaks one script per in-flight command.
+    //
+    // Direct commands hold no terminal slot, so the terminal loop below never reaches them
+    // and their child process has to be killed here to avoid leaving an orphan behind.
+    for (const state of [...this.states.values()]) {
+      if (state.status !== "running") continue;
+      if (state.execution === "direct") state.child?.kill();
+      this.finishState(state, null, "killed");
+    }
     for (const slot of this.slots.values()) {
       if (!slot.closed) slot.terminal.dispose();
     }
@@ -1255,13 +1693,13 @@ export class TerminalCommandManager implements vscode.Disposable {
     }
 
     for (const group of byCwd.values()) {
-      group.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+      group.sort(byLeastUseful);
       for (const duplicate of group.slice(1)) this.disposeIdleSlot(duplicate);
     }
 
     const remaining = [...this.slots.values()]
       .filter((slot) => !slot.closed && !slot.busyCommandId)
-      .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+      .sort(byLeastUseful);
     for (const excess of remaining.slice(MAX_IDLE_TERMINALS)) this.disposeIdleSlot(excess);
   }
 
@@ -1270,7 +1708,7 @@ export class TerminalCommandManager implements vscode.Disposable {
     cwdInfo: { absolute: string; relative: string; uri: vscode.Uri } | undefined,
   ): Promise<{ slot: TerminalSlot; reused: boolean; effectiveCwd: string }> {
     const candidates = [...this.slots.values()]
-      .filter((slot) => !slot.closed && !slot.busyCommandId)
+      .filter((slot) => !slot.closed && !slot.broken && !slot.busyCommandId)
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
     for (const slot of candidates) {
       if (slot.closed || slot.busyCommandId) continue;
@@ -1285,10 +1723,15 @@ export class TerminalCommandManager implements vscode.Disposable {
     // busy/background slots grow without bound — a stuck command would otherwise earn a new
     // terminal for every follow-up run_command.
     if (this.slots.size >= MAX_TOTAL_TERMINALS) {
+      // A terminal whose shell never reported ready is the first thing to reclaim: it exists to
+      // be read, and the pool being full is the moment that stops being worth a slot.
+      const broken = [...this.slots.values()].find((slot) => slot.broken && !slot.busyCommandId);
       // Reaching this point with idle candidates means every one mismatched the requested cwd
       // (a matching candidate would have returned above); recycle the least recently used.
       const oldestIdle = candidates[candidates.length - 1];
-      if (oldestIdle) {
+      if (broken) {
+        this.disposeIdleSlot(broken);
+      } else if (oldestIdle) {
         this.disposeIdleSlot(oldestIdle);
       } else {
         const busyLines = [...this.slots.values()]
@@ -1347,17 +1790,27 @@ export class TerminalCommandManager implements vscode.Disposable {
       await pty.ensureStarted();
       return { slot, reused: false, effectiveCwd: this.currentSlotCwd(slot) };
     } catch (error) {
-      slot.closed = true;
+      // The terminal stays, and so does the shell behind it. Tearing both down here is how a
+      // shell that never reported ready became an empty pane and "no longer available" in the
+      // activity log at the same time, with nothing left to look at - and whatever the shell did
+      // print is the only evidence there is about why it never got there. The slot is kept as
+      // well, so the terminal can still be opened, and marked broken so that it is never handed
+      // out again: the next command starts a fresh terminal, and the pool reclaims this one when
+      // it needs the room.
+      slot.broken = true;
       slot.busyCommandId = undefined;
-      this.slots.delete(slot.id);
-      terminal.dispose();
-      throw error;
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)} ` +
+        `Its terminal (${slot.id}) was left open and is still running, and will not be reused. ` +
+        `Read that terminal before closing it, and pass execution="direct" to run the next command ` +
+        `without the prompt protocol.`,
+      );
     }
   }
 
   private displayCwd(absolute: string): string {
-    const root = workspaceRoot();
-    if (!isInside(root, absolute)) return absolute;
+    const root = workspaceRoots().find((candidate) => isInsideRoot(candidate, absolute));
+    if (!root) return absolute;
     return path.relative(root, absolute).replace(/\\/g, "/") || ".";
   }
 
@@ -1418,8 +1871,17 @@ export class TerminalCommandManager implements vscode.Disposable {
     state.exitCode = exitCode;
     state.status = status ?? (exitCode === 0 ? "completed" : "failed");
     state.endedAt = Date.now();
-    state.slot.lastUsedAt = state.endedAt;
-    if (state.slot.busyCommandId === state.id) state.slot.busyCommandId = undefined;
+    if (state.slot) {
+      state.slot.lastUsedAt = state.endedAt;
+      if (state.slot.busyCommandId === state.id) state.slot.busyCommandId = undefined;
+    }
+    // The bridged temp script has served its purpose once the command settles; leaving it
+    // behind would accumulate one file per multi-line command in the OS temp directory.
+    const tempScript = state.tempScriptPath;
+    if (tempScript) {
+      state.tempScriptPath = undefined;
+      removeTempScript(tempScript);
+    }
     state.resolveDone();
     this.pruneIdleTerminals();
     pruneFinishedCommandStates(this.states, MAX_COMPLETED_STATES);
@@ -1434,7 +1896,8 @@ export class TerminalCommandManager implements vscode.Disposable {
     return {
       command_id: state.id,
       terminal_id: state.terminalId,
-      terminal_name: state.terminal.name,
+      terminal_name: state.terminalName,
+      execution: state.execution,
       terminal_reused: state.terminalReused,
       status: state.status,
       exit_code: state.exitCode,
@@ -1486,7 +1949,8 @@ export class TerminalCommandManager implements vscode.Disposable {
     if (!RUN_COMMAND_SHELLS.has(shellChoice.kind)) {
       throw new Error(
         `Managed shell "${shellChoice.description}" does not support run_command. ` +
-        `Supported: PowerShell (Windows), bash (Linux), zsh (macOS). ` +
+        `Supported: PowerShell and cmd on Windows - Git Bash and MSYS zsh count as Windows ` +
+        `shells here - bash on Linux and zsh on macOS. ` +
         `Switch via the agentbridge.bridge.managedShell.* settings.`,
       );
     }
@@ -1494,12 +1958,45 @@ export class TerminalCommandManager implements vscode.Disposable {
     if (!command) throw new Error("command must be a non-empty string");
     const background = asBoolean(input.background, false);
     if (typeof input.background !== "boolean") throw new Error("background must be explicitly true or false");
-    const timeoutMs = asInteger(input.timeout_ms, 120_000, 1_000, 120_000);
+    const timeout = boundedInteger(input.timeout_ms, 120_000, 1_000, 120_000, "timeout_ms");
+    const timeoutMs = timeout.value;
     const cwdInfo = typeof input.cwd === "string" && input.cwd.trim()
       ? await resolveExistingWorkspacePath(input.cwd)
       : undefined;
+    const execution = asString(input.execution, "pty");
+    if (execution !== "pty" && execution !== "direct") {
+      throw new Error(`execution must be "pty" or "direct".`);
+    }
+    if (execution === "direct") {
+      if (background) {
+        throw new Error(`execution="direct" does not support background=true; use the default PTY mode for long-running or user-visible commands.`);
+      }
+      return this.runDirect(shellChoice, command, cwdInfo, timeoutMs, timeout.note);
+    }
     const id = `cmd_${Date.now()}_${this.nextCommandId++}`;
-    const { slot, reused, effectiveCwd } = await this.acquireTerminal(id, cwdInfo);
+    // Never type risky commands into the readline layer: multi-line input hits
+    // continuation-mode buffering (dropped lines, later commands appended to an unfinished
+    // statement), long single lines are provably lossy when PSReadLine consumes a fast
+    // ConPTY paste (whole payloads silently vanish), and non-ASCII input (CJK, emoji) can
+    // be mangled by the console code page. Bridge all of them through a temp script that a
+    // single ASCII one-line command executes instead.
+    let execCommand = command;
+    let tempScriptPath: string | undefined;
+    if (needsTempScript(command)) {
+      tempScriptPath = writeTempScript(id, command, shellChoice.kind);
+      execCommand = tempScriptCommand(tempScriptPath, shellChoice);
+    }
+    let acquired: { slot: TerminalSlot; reused: boolean; effectiveCwd: string };
+    try {
+      acquired = await this.acquireTerminal(id, cwdInfo);
+    } catch (error) {
+      // No command state owns the script yet, so a failed acquire — every slot busy, or the
+      // first prompt never arriving — would otherwise leave the file in the temp directory
+      // for good, one per abandoned multi-line command.
+      if (tempScriptPath) removeTempScript(tempScriptPath);
+      throw error;
+    }
+    const { slot, reused, effectiveCwd } = acquired;
     const displayCwd = cwdInfo?.relative ?? this.displayCwd(effectiveCwd);
     const terminal = slot.terminal;
     let resolveDone!: () => void;
@@ -1508,8 +2005,10 @@ export class TerminalCommandManager implements vscode.Disposable {
       id,
       terminal,
       terminalId: slot.id,
+      terminalName: terminal.name,
       terminalReused: reused,
       slot,
+      execution: "pty",
       command,
       cwd: displayCwd,
       startedAt: Date.now(),
@@ -1524,18 +2023,16 @@ export class TerminalCommandManager implements vscode.Disposable {
       outputStartOffset: 0,
       totalOutputBytes: 0,
       ansiPending: "",
+      tempScriptPath,
       done,
       resolveDone,
     };
     this.states.set(id, state);
     try {
-      const captureColumns = asBoolean(input[CHAT_CAPTURE_INPUT_KEY], false) && !background
-        ? CHAT_CAPTURE_COLUMNS
-        : undefined;
-      await slot.pty.run(command, {
+      await slot.pty.run(execCommand, {
         onOutput: (text) => this.appendOutput(state, text),
         onExit: (code) => this.finishState(state, code),
-      }, captureColumns);
+      });
     } catch (error) {
       this.finishState(state, null, "failed");
       throw error;
@@ -1563,12 +2060,167 @@ export class TerminalCommandManager implements vscode.Disposable {
       `command_id: ${id}`,
       `terminal_id: ${slot.id}`,
       `terminal_name: ${JSON.stringify(terminal.name)}`,
+      `timeout_ms: ${timeoutMs}`,
+      ...(timeout.note ? [timeout.note] : []),
+      `execution: pty`,
       `terminal_reused: ${reused}`,
       `command: ${JSON.stringify(command)}`,
       `status: ${snapshot.status}`,
       `exit_code: ${snapshot.exit_code ?? "null"}`,
       `cwd: ${JSON.stringify(displayCwd)}`,
       `background: ${background}`,
+      `script_bridge: ${tempScriptPath ? JSON.stringify(tempScriptPath) : "null"}`,
+      `hint: ${snapshot.status === "running" ? "still running; poll with get_command_output using next_offset" : "none"}`,
+      `duration_ms: ${snapshot.duration_ms}`,
+      `next_offset: ${snapshot.next_offset}`,
+      `total_output_bytes: ${snapshot.total_output_bytes}`,
+      `output_lost: ${snapshot.output_lost}`,
+      "--- OUTPUT BEGIN ---",
+      String(snapshot.output ?? ""),
+      "--- OUTPUT END ---",
+      "=== RUN_COMMAND END ===",
+    ].join("\n");
+  }
+
+  /**
+   * Execution mode "direct": run the command through a one-shot child process with piped
+   * stdio instead of the persistent PTY. The exit code comes straight from the child
+   * process, so it is trustworthy by construction: no prompt protocol, no echo gate, no
+   * continuation state, no terminal slot consumed, and nothing appears in a terminal view.
+   * stdin is closed, so interactive programs cannot be served here. On timeout the child
+   * keeps running and the command stays pollable via get_command_output, mirroring PTY
+   * semantics.
+   */
+  private async runDirect(
+    choice: ShellChoice,
+    command: string,
+    cwdInfo: { absolute: string; relative: string; uri: vscode.Uri } | undefined,
+    timeoutMs: number,
+    timeoutNote: string | null,
+  ): Promise<string> {
+    // Direct commands bypass the terminal pool, so a burst of them is bounded only by the
+    // machine; cap them the way PTY commands are, rather than letting them exhaust handles.
+    const runningDirect = [...this.states.values()]
+      .filter((state) => state.execution === "direct" && state.status === "running").length;
+    if (runningDirect >= MAX_CONCURRENT_DIRECT_COMMANDS) {
+      throw new Error(`Too many concurrent direct commands (${MAX_CONCURRENT_DIRECT_COMMANDS}). Wait for one to finish, or use the default PTY mode, which queues onto a managed terminal.`);
+    }
+
+    const id = `cmd_${Date.now()}_${this.nextCommandId++}`;
+    let file: string;
+    let args: string[];
+    let tempScriptPath: string | undefined;
+    // Resolve the working directory before writing anything: with no workspace open this
+    // throws, and a script already on disk would be left behind with no command state to
+    // own it. The PTY path guards its script the same way.
+    const cwd = cwdInfo?.absolute ?? resolveWorkspacePath(".").absolute;
+    if (isPowerShellKind(choice.kind)) {
+      // Always bridge through a temp script: it carries a UTF-8 BOM (correct non-ASCII
+      // decoding on PowerShell 5.1), sets UTF-8 output encoding, and removes every quoting
+      // pitfall a -Command one-liner would have.
+      tempScriptPath = writeTempScript(id, command, choice.kind);
+      file = choice.executable;
+      args = ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tempScriptPath];
+    } else {
+      file = choice.executable;
+      args = directCommandArgv(choice, command);
+    }
+    let resolveDone!: () => void;
+    const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+    const state: CommandState = {
+      id,
+      terminal: null,
+      terminalId: "direct",
+      terminalName: "direct",
+      terminalReused: false,
+      execution: "direct",
+      command,
+      cwd: cwdInfo?.relative ?? this.displayCwd(cwd),
+      startedAt: Date.now(),
+      background: false,
+      status: "running",
+      exitCode: null,
+      outputChunks: [],
+      outputChunkStarts: [],
+      outputChunkHead: 0,
+      outputHeadSkip: 0,
+      retainedOutputBytes: 0,
+      outputStartOffset: 0,
+      totalOutputBytes: 0,
+      ansiPending: "",
+      tempScriptPath,
+      done,
+      resolveDone,
+    };
+    this.states.set(id, state);
+    try {
+      const child = spawn(file, args, {
+        cwd,
+        env: managedProcessEnvironment(),
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      state.child = child;
+      const outDecoder = new StringDecoder("utf8");
+      const errDecoder = new StringDecoder("utf8");
+      child.stdout?.on("data", (chunk: Buffer) => this.appendOutput(state, outDecoder.write(chunk)));
+      child.stderr?.on("data", (chunk: Buffer) => this.appendOutput(state, errDecoder.write(chunk)));
+      let spawnFailed = false;
+      child.on("error", (error: Error) => {
+        spawnFailed = true;
+        this.appendOutput(state, `[agentbridge] failed to start the direct command: ${error.message}\n`);
+      });
+      child.on("close", (rawCode, signal) => {
+        // PowerShell reports negative exits (exit -1) as an unsigned 32-bit value through
+        // the process handle; normalize back into signed range for callers.
+        let code = typeof rawCode === "number" ? rawCode : null;
+        if (code !== null && code > 0x7fffffff) code -= 0x100000000;
+        const outRest = outDecoder.end();
+        if (outRest) this.appendOutput(state, outRest);
+        const errRest = errDecoder.end();
+        if (errRest) this.appendOutput(state, errRest);
+        // A process that never started has no exit code of its own. Windows still reports one
+        // through the handle — -4058 for a missing executable — which reads as the program's
+        // exit status when it is really the spawn failure already written to the output above.
+        if (spawnFailed) code = null;
+        // Termination by signal carries no exit code, so without the status this settles as
+        // "failed" even though the run was stopped deliberately — the caller asked for it and
+        // should see "killed".
+        this.finishState(state, code, signal ? "killed" : undefined);
+      });
+    } catch (error) {
+      this.finishState(state, null, "failed");
+      throw error;
+    }
+
+    // Clear the timer once the race is decided. A command that finishes quickly otherwise
+    // leaves it pending for the whole timeout, holding a handle in the extension host for
+    // no reason — one per direct command run.
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      done,
+      new Promise<void>((resolve) => {
+        timeoutHandle = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    const snapshot = this.readOutput(state, 0, 64 * 1024);
+    return [
+      "=== RUN_COMMAND BEGIN ===",
+      `command_id: ${id}`,
+      `terminal_id: ${state.terminalId}`,
+      `terminal_name: ${JSON.stringify(state.terminalName)}`,
+      `timeout_ms: ${timeoutMs}`,
+      ...(timeoutNote ? [timeoutNote] : []),
+      `execution: direct`,
+      `terminal_reused: false`,
+      `command: ${JSON.stringify(command)}`,
+      `status: ${snapshot.status}`,
+      `exit_code: ${snapshot.exit_code ?? "null"}`,
+      `cwd: ${JSON.stringify(state.cwd)}`,
+      `background: false`,
+      `script_bridge: ${tempScriptPath ? JSON.stringify(tempScriptPath) : "null"}`,
+      `hint: ${snapshot.status === "running" ? "still running; poll with get_command_output using next_offset" : "none"}`,
       `duration_ms: ${snapshot.duration_ms}`,
       `next_offset: ${snapshot.next_offset}`,
       `total_output_bytes: ${snapshot.total_output_bytes}`,
@@ -1584,12 +2236,19 @@ export class TerminalCommandManager implements vscode.Disposable {
     const id = asString(input.command_id);
     const state = this.states.get(id);
     if (!state) throw new Error(`Unknown command_id: ${id}. Only the ${MAX_COMPLETED_STATES} most recent finished commands are retained.`);
-    const offset = asInteger(input.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-    const maxBytes = asInteger(input.max_bytes, DEFAULT_OUTPUT_BYTES, 1, MAX_OUTPUT_BYTES);
+    const offsetBound = boundedInteger(input.offset, 0, 0, Number.MAX_SAFE_INTEGER, "offset");
+    const maxBytesBound = boundedInteger(input.max_bytes, DEFAULT_OUTPUT_BYTES, 1, MAX_OUTPUT_BYTES, "max_bytes");
+    const offset = offsetBound.value;
+    const maxBytes = maxBytesBound.value;
+    const adjusted = boundedNotes([offsetBound, maxBytesBound]);
     const snapshot = this.readOutput(state, offset, maxBytes);
     return [
       "=== COMMAND_OUTPUT BEGIN ===",
       `command_id: ${id}`,
+      `offset: ${offset}`,
+      `max_bytes: ${maxBytes}`,
+      ...(adjusted ? [adjusted] : []),
+      `execution: ${String(snapshot.execution)}`,
       `terminal_id: ${snapshot.terminal_id}`,
       `terminal_name: ${JSON.stringify(snapshot.terminal_name)}`,
       `status: ${snapshot.status}`,
@@ -1612,9 +2271,12 @@ export class TerminalCommandManager implements vscode.Disposable {
     const state = this.states.get(id);
     if (!state) throw new Error(`Unknown command_id: ${id}. Only the ${MAX_COMPLETED_STATES} most recent finished commands are retained.`);
     if (state.status !== "running") throw new Error(`Command ${id} is not running (status=${state.status}).`);
+    if (state.execution !== "pty") {
+      throw new Error(`Command ${id} runs in direct mode without a terminal; interactive input requires the default PTY execution mode.`);
+    }
     const text = asString(input.input);
     const appendNewline = asBoolean(input.append_newline, true);
-    state.slot.pty.sendInput(text, appendNewline);
+    state.slot?.pty.sendInput(text, appendNewline);
     return [
       "=== SEND_COMMAND_INPUT BEGIN ===",
       `command_id: ${id}`,
@@ -1635,14 +2297,31 @@ export class TerminalCommandManager implements vscode.Disposable {
         "=== TERMINATE_COMMAND BEGIN ===",
         `command_id: ${id}`,
         `terminal_id: ${state.terminalId}`,
-        `terminal_name: ${JSON.stringify(state.terminal.name)}`,
+        `terminal_name: ${JSON.stringify(state.terminalName)}`,
         `status: ${state.status}`,
         `exit_code: ${state.exitCode ?? "null"}`,
         "already_finished: true",
         "=== TERMINATE_COMMAND END ===",
       ].join("\n");
     }
-    const slot = state.slot;
+    // Direct commands own no terminal slot; killing the child process is the whole job.
+    if (state.execution === "direct") {
+      state.child?.kill();
+      // Settle it here: the child's close handler otherwise fires a moment later and records
+      // the state as "failed", contradicting the "killed" reported below, and this is the
+      // only path that releases a direct command's bridged temp script.
+      this.finishState(state, null, "killed");
+      return [
+        "=== TERMINATE_COMMAND BEGIN ===",
+        `command_id: ${id}`,
+        `terminal_id: ${state.terminalId}`,
+        `terminal_name: ${JSON.stringify(state.terminalName)}`,
+        "status: killed",
+        "terminal_closed: false",
+        "=== TERMINATE_COMMAND END ===",
+      ].join("\n");
+    }
+    const slot = state.slot!;
     // Retire the slot before anything else: finishState clears busyCommandId, and until the
     // terminal-close event lands (debounced by PTY_EXIT_DATA_FLUSH_MS) acquireTerminal could
     // otherwise hand the dying terminal to a new command.
@@ -1677,36 +2356,76 @@ export class TerminalCommandManager implements vscode.Disposable {
   }
 }
 
-async function listDirectory(input: Record<string, unknown>): Promise<string> {
+/**
+ * What a directory entry is, from the `FileType` a provider reported.
+ *
+ * `FileType` is a set of bits, not an enumeration of exclusive values: a link is reported as
+ * SymbolicLink combined with whatever it points at - File, or Directory - so comparing the
+ * whole number against one member reported an entry that is two things at once as none of
+ * them, and a symlink to a file or to a directory was listed as "unknown". The link bit is
+ * what a reader asked about, so it is answered first.
+ */
+export function fileTypeKind(type: number): "dir" | "file" | "symlink" | "unknown" {
+  if (type & vscode.FileType.SymbolicLink) return "symlink";
+  if (type & vscode.FileType.Directory) return "dir";
+  if (type & vscode.FileType.File) return "file";
+  return "unknown";
+}
+
+export async function listDirectory(input: Record<string, unknown>): Promise<string> {
+  const configuredExcludes = vscode.workspace.getConfiguration("agentbridge").get<unknown>("files.excludeGlobs");
+  const excluded = excludeDirectoryNames([
+    ...COMMON_EXCLUDE_GLOBS,
+    ...(Array.isArray(configuredExcludes)
+      ? configuredExcludes.filter((value): value is string => typeof value === "string")
+      : []),
+  ]);
   const scope = await resolveExistingWorkspacePath(asString(input.path, "."));
-  const depth = asInteger(input.depth, 1, 1, 2);
+  const depthBound = boundedInteger(input.depth, 1, 1, 2, "depth");
+  const depth = depthBound.value;
   const includeHidden = asBoolean(input.include_hidden, false);
   const noIgnore = asBoolean(input.no_ignore, false);
-  const maxEntries = asInteger(input.max_entries, 200, 1, 500);
+  const maxEntriesBound = boundedInteger(input.max_entries, 200, 1, 500, "max_entries");
+  const maxEntries = maxEntriesBound.value;
+  const adjusted = boundedNotes([depthBound, maxEntriesBound]);
   const entries: Array<{ type: "dir" | "file" | "symlink" | "unknown"; path: string }> = [];
   let truncated = false;
+  let entriesSeen = 0;
 
   const visit = async (uri: vscode.Uri, relative: string, level: number): Promise<void> => {
     if (truncated) return;
     const children = await vscode.workspace.fs.readDirectory(uri);
     children.sort((a, b) => {
-      const ad = a[1] === vscode.FileType.Directory ? 0 : 1;
-      const bd = b[1] === vscode.FileType.Directory ? 0 : 1;
+      const ad = a[1] & vscode.FileType.Directory ? 0 : 1;
+      const bd = b[1] & vscode.FileType.Directory ? 0 : 1;
       return ad - bd || a[0].localeCompare(b[0]);
     });
     for (const [name, type] of children) {
       if (!includeHidden && name.startsWith(".")) continue;
-      if (!noIgnore && COMMON_EXCLUDES.has(name)) continue;
+      // The names are lower-cased on purpose: the built-in excludes are noise reduction, so a
+      // "Vendor" entry is the same "vendor" find_files hides, not a directory the reader asked
+      // to see. no_ignore still brings any of them back.
+      if (!noIgnore && excluded.has(name.toLowerCase())) continue;
       const childRelative = relative === "." ? name : `${relative}/${name}`;
-      entries.push({
-        type: type === vscode.FileType.Directory ? "dir" : type === vscode.FileType.File ? "file" : type === vscode.FileType.SymbolicLink ? "symlink" : "unknown",
-        path: childRelative,
-      });
-      if (entries.length >= maxEntries) {
+      // Counted whether or not it fits: "truncated: true" on its own says the answer is short
+      // and not by how much, which is the difference between a directory that holds one more
+      // entry and one that holds four hundred. The directory being walked is finished so the
+      // count is a number and not a guess; deeper directories are not descended into once the
+      // answer is full, so a truncated count is what was seen rather than all there is.
+      entriesSeen += 1;
+      if (entries.length < maxEntries) {
+        entries.push({
+          type: fileTypeKind(type),
+          path: childRelative,
+        });
+      } else {
         truncated = true;
-        break;
       }
-      if (level < depth && type === vscode.FileType.Directory) {
+      if (truncated) continue;
+      // A symlink is not followed, so a link that points at a directory is still only a link
+      // here: descending into it could walk a cycle, and readDirectory reports its type with
+      // the Directory bit set as well.
+      if (level < depth && (type & vscode.FileType.Directory) !== 0 && (type & vscode.FileType.SymbolicLink) === 0) {
         await visit(vscode.Uri.joinPath(uri, name), childRelative, level + 1);
         if (truncated) break;
       }
@@ -1718,14 +2437,60 @@ async function listDirectory(input: Record<string, unknown>): Promise<string> {
     "=== LIST_DIRECTORY BEGIN ===",
     `path: ${JSON.stringify(scope.relative)}`,
     `depth: ${depth}`,
+    `max_entries: ${maxEntries}`,
     `include_hidden: ${includeHidden}`,
     `no_ignore: ${noIgnore}`,
+    ...(adjusted ? [adjusted] : []),
     `returned_entries: ${entries.length}`,
+    `entries_seen: ${entriesSeen}`,
     `truncated: ${truncated}`,
+    ...(truncated
+      ? [`NOTE: the listing stopped at max_entries; entries_seen is what the walk counted, and a directory below the one it stopped in was not descended into, so more may exist.`]
+      : []),
     "--- ENTRIES ---",
     ...entries.map((entry) => `${entry.type === "dir" ? "[DIR]" : entry.type === "file" ? "[FILE]" : entry.type === "symlink" ? "[LINK]" : "[OTHER]"} ${entry.path}`),
     "=== LIST_DIRECTORY END ===",
   ].join("\n");
+}
+
+/** The severities get_diagnostics accepts, in the order callers meet them. */
+export const DIAGNOSTIC_SEVERITIES = ["error", "warning", "information", "hint"] as const;
+
+/**
+ * Keep the severities a caller asked for, refusing a list that names none. Writing
+ * "errror" or "warn" used to be accepted and then matched nothing at all, so the tool
+ * returned an empty result that looked like a clean workspace.
+ */
+/** What a severity argument said: the names it recognises, and the ones it does not. */
+export interface SeverityFilter {
+  /** The severities to keep. Empty when nothing usable was named, which means no filter. */
+  known: Set<string>;
+  /** The entries that are not one of DIAGNOSTIC_SEVERITIES, in the order they arrived. */
+  ignored: string[];
+}
+
+/**
+ * Split a severity argument into the names it recognises and the ones it does not.
+ *
+ * A name that cannot match anything used to be refused outright, on the grounds that filtering
+ * every severity away answers "no diagnostics" for a directory that has some. That reasoning
+ * holds, but failing the call is not the only way to say it: the filter is simply not applied,
+ * and the report names the values it could not use and says that every severity is included.
+ * A caller that misspells one name still gets its diagnostics, with the mistake in front of it.
+ */
+export function normalizeSeverities(values: readonly unknown[]): SeverityFilter {
+  const known = new Set<string>();
+  const ignored: string[] = [];
+  for (const value of values) {
+    if (typeof value === "string" && (DIAGNOSTIC_SEVERITIES as readonly string[]).includes(value)) {
+      known.add(value);
+    } else {
+      // Shown the way boundedInteger shows a value it refused: one line, and safe to build
+      // even from a value that is long, carries line breaks, or cannot be printed at all.
+      ignored.push(describeValue(value));
+    }
+  }
+  return { known, ignored };
 }
 
 function severityName(severity: vscode.DiagnosticSeverity): "error" | "warning" | "information" | "hint" {
@@ -1743,26 +2508,90 @@ function diagnosticCode(code: vscode.Diagnostic["code"]): string | number | unde
   return code.value;
 }
 
-function getDiagnostics(input: Record<string, unknown>): string {
+/**
+ * How much of one diagnostic message a report carries. A type error that expands its type can
+ * run to tens of thousands of characters, and the report is cut at max_results entries, so an
+ * unbounded message is one diagnostic spending the whole budget by itself.
+ */
+const MAX_DIAGNOSTIC_MESSAGE_CHARS = 2_000;
+
+/**
+ * Shorten one diagnostic message, and keep it on one line.
+ *
+ * A TypeScript error that expands a type can be longer than the whole report is meant to be,
+ * so a single diagnostic used to be able to crowd every other one out of the answer it was
+ * sharing. Newlines go as well: a message is emitted as a run of lines that a caller reads
+ * positionally, and a diagnostic carrying its own line breaks reads as several entries.
+ */
+export function boundedDiagnosticMessage(message: string, maxChars = MAX_DIAGNOSTIC_MESSAGE_CHARS): string {
+  const flat = message.replace(/\s+/g, " ");
+  const length = countCodePoints(flat);
+  if (length <= maxChars) return flat;
+  return `${takeCodePoints(flat, maxChars)} ...[truncated ${length - maxChars} more characters]`;
+}
+
+/**
+ * The characters in a string, counted as a reader counts them.
+ *
+ * `.length` counts UTF-16 units, so a character written outside the first plane - an emoji, a
+ * rarer CJK extension, a mathematical symbol - counts twice. Here that decided whether a
+ * message was short enough at all, and by how much it was over.
+ */
+function countCodePoints(text: string): number {
+  let count = 0;
+  let index = 0;
+  while (index < text.length) {
+    index += (text.codePointAt(index) ?? 0) > 0xffff ? 2 : 1;
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * The first `count` characters of a string, cut between characters rather than through one.
+ *
+ * `slice` counts UTF-16 units too, so a cut that landed between the two halves of a surrogate
+ * pair left half a character at the end of the message: an unpaired surrogate, which is not
+ * text a caller can print or compare, and which a JSON writer answers with a replacement
+ * character or with an error instead.
+ */
+function takeCodePoints(text: string, count: number): string {
+  let end = 0;
+  for (let taken = 0; taken < count && end < text.length; taken += 1) {
+    end += (text.codePointAt(end) ?? 0) > 0xffff ? 2 : 1;
+  }
+  return text.slice(0, end);
+}
+
+export function getDiagnostics(input: Record<string, unknown>): string {
   const root = workspaceRoot();
   const scope = input.path === undefined ? undefined : resolveWorkspacePath(asString(input.path));
-  const severities = Array.isArray(input.severity) ? new Set(input.severity.filter((value): value is string => typeof value === "string")) : undefined;
-  const maxResults = asInteger(input.max_results, 100, 1, 500);
+  const filter = Array.isArray(input.severity) ? normalizeSeverities(input.severity) : undefined;
+  const severities = filter && filter.known.size > 0 ? filter.known : undefined;
+  const maxResultsBound = boundedInteger(input.max_results, 100, 1, 500, "max_results");
+  const maxResults = maxResultsBound.value;
+  const adjusted = boundedNotes([maxResultsBound]);
   const rows: Array<Record<string, unknown>> = [];
   let totalMatching = 0;
+  let documentsWithDiagnostics = 0;
+  // Both checks go through isInside rather than comparing strings: on Windows "SRC" and "src"
+  // name one directory, and a string compare answered "no diagnostics" about a directory that
+  // has some.
+  const inScope = (filePath: string): boolean =>
+    isInside(root, filePath) && (!scope || isInside(scope.absolute, filePath));
 
   for (const [uri, diagnostics] of vscode.languages.getDiagnostics()) {
-    if (uri.scheme !== "file" || !isInside(root, uri.fsPath)) continue;
-    if (scope) {
-      const scopePath = path.resolve(scope.absolute);
-      const candidate = path.resolve(uri.fsPath);
-      if (!(candidate === scopePath || candidate.startsWith(`${scopePath}${path.sep}`))) continue;
-    }
+    if (uri.scheme !== "file" || !inScope(uri.fsPath)) continue;
+    if (diagnostics.length > 0) documentsWithDiagnostics += 1;
     for (const diagnostic of diagnostics) {
       const severity = severityName(diagnostic.severity);
       if (severities && !severities.has(severity)) continue;
       totalMatching += 1;
-      if (rows.length >= maxResults) continue;
+      // Everything matching is collected and the answer is shortened after the sort, not
+      // during the walk: stopping here kept the first N diagnostics the provider happened to
+      // report, and a file full of hints reported first pushed the errors in a file reported
+      // later off the end - while total_matching still counted them and truncated still said
+      // so. The rows are small objects and the diagnostics are already in memory.
       rows.push({
         path: path.relative(root, uri.fsPath).replace(/\\/g, "/"),
         line: diagnostic.range.start.line + 1,
@@ -1772,7 +2601,7 @@ function getDiagnostics(input: Record<string, unknown>): string {
         severity,
         source: diagnostic.source ?? null,
         code: diagnosticCode(diagnostic.code) ?? null,
-        message: diagnostic.message,
+        message: boundedDiagnosticMessage(diagnostic.message),
       });
     }
   }
@@ -1785,12 +2614,35 @@ function getDiagnostics(input: Record<string, unknown>): string {
       || Number(a.column) - Number(b.column);
   });
   const returned = rows.slice(0, maxResults);
+  // What the editor is looking at in this scope. A zero result next to a zero here is the
+  // difference between "nothing is wrong" and "nothing has been looked at": diagnostics exist
+  // only for documents a provider has published them for, which in practice means the ones
+  // open in the editor, so a file with an error that was never opened reports nothing.
+  const openDocuments = (vscode.workspace.textDocuments ?? []).filter(
+    (document) => document.uri.scheme === "file" && inScope(document.uri.fsPath),
+  ).length;
   return [
     "=== GET_DIAGNOSTICS BEGIN ===",
     `scope: ${JSON.stringify(scope?.relative ?? ".")}`,
+    `max_results: ${maxResults}`,
+    ...(adjusted ? [adjusted] : []),
     `returned: ${returned.length}`,
     `total_matching: ${totalMatching}`,
     `truncated: ${totalMatching > returned.length}`,
+    `documents_with_diagnostics: ${documentsWithDiagnostics}`,
+    `open_documents: ${openDocuments}`,
+    ...(returned.length === 0
+      ? [`NOTE: no diagnostics were reported for this scope, which is not proof its files are clean - only documents a provider has published diagnostics for are counted, and ${openDocuments === 0 ? "no document in this scope is open in the editor" : `${openDocuments === 1 ? "1 document in this scope is" : `${openDocuments} documents in this scope are`} open in the editor`}.`]
+      : []),
+    ...(filter && filter.ignored.length > 0
+      ? [
+        `ignored_severity_values: ${JSON.stringify(filter.ignored)}`,
+        `severity_filter_applied: ${severities !== undefined}`,
+        ...(severities === undefined
+          ? [`NOTE: none of the severity values is one of ${DIAGNOSTIC_SEVERITIES.join(", ")}, so no severity filter was applied and every severity is included.`]
+          : [`NOTE: severity values that are not one of ${DIAGNOSTIC_SEVERITIES.join(", ")} were ignored; the rest were applied.`]),
+      ]
+      : []),
     "--- DIAGNOSTICS ---",
     ...returned.map((row, index) => [
       `--- DIAGNOSTIC ${index + 1} ---`,

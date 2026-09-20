@@ -251,15 +251,42 @@ export function cloudflaredPrecheckFailureKind(
   return "generic";
 }
 
+/**
+ * How many distinct messages one throttle remembers.
+ *
+ * A message that carries a timestamp or a request id is a new key every time it appears, so a
+ * long tunnel run used to keep one entry per line for as long as it lasted.
+ */
+export const THROTTLE_MAX_MESSAGES = 100;
+
 export function createRepeatedMessageThrottle(intervalMs: number): RepeatedMessageThrottle {
   const entries = new Map<string, { lastEmittedAt: number; suppressed: number }>();
+  // Counts that were pushed out of `entries` before a flush could report them, so that flushing
+  // still reports everything that was held back. Capped for the same reason the map is: without
+  // a bound this would be the same leak with a slower fuse.
+  let carried: RepeatedMessageEmission[] = [];
+
+  const evictOldest = (): void => {
+    for (const [message, entry] of entries) {
+      entries.delete(message);
+      if (entry.suppressed > 0) {
+        if (carried.length >= THROTTLE_MAX_MESSAGES) carried.shift();
+        carried.push({ message, suppressed: entry.suppressed });
+      }
+      return;
+    }
+  };
+
   return {
     report(message: string, now = Date.now()): RepeatedMessageEmission | undefined {
       const entry = entries.get(message);
       if (!entry) {
+        if (entries.size >= THROTTLE_MAX_MESSAGES) evictOldest();
         entries.set(message, { lastEmittedAt: now, suppressed: 0 });
         return { message, suppressed: 0 };
       }
+      entries.delete(message);
+      entries.set(message, entry);
       if (now - entry.lastEmittedAt < intervalMs) {
         entry.suppressed += 1;
         return undefined;
@@ -275,7 +302,10 @@ export function createRepeatedMessageThrottle(intervalMs: number): RepeatedMessa
         if (entry.suppressed > 0) emissions.push({ message, suppressed: entry.suppressed });
       }
       entries.clear();
-      return emissions;
+      if (carried.length === 0) return emissions;
+      const pending = carried;
+      carried = [];
+      return [...pending, ...emissions];
     },
   };
 }
