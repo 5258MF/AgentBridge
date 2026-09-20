@@ -10,7 +10,7 @@ function makeContext(): any {
   const subscriptions: Array<{ dispose(): void }> = [];
   return {
     extensionMode: 1,
-    extension: { packageJSON: { version: "0.1.10" } },
+    extension: { packageJSON: { version: "0.1.11" } },
     subscriptions: { push: (...items: Array<{ dispose(): void }>) => subscriptions.push(...items) },
     __subscriptions: subscriptions,
     secrets: {
@@ -70,4 +70,37 @@ test("deactivation cancels persistent auto-start before it can revive the dispos
     BridgeManager.prototype.start = originalStart;
     for (const disposable of context.__subscriptions.reverse()) disposable.dispose();
   }
+});
+
+function status() {
+  return { state: "stopped", tunnelProvider: "cloudflare", tunnelInstalled: true, tunnelVersion: "cloudflared 2024.1.0" };
+}
+
+async function runActivation(persistentMode: boolean): Promise<string[]> {
+  vscodeTest.reset();
+  vscodeTest.setConfig("agentbridge.bridge.persistentMode", persistentMode);
+  const context = makeContext();
+  const originalCheck = BridgeManager.prototype.checkTunnel;
+  const originalStart = BridgeManager.prototype.start;
+  const calls: string[] = [];
+  BridgeManager.prototype.checkTunnel = async function () { calls.push("checkTunnel"); return status() as any; };
+  BridgeManager.prototype.start = async function () { calls.push("start"); return status() as any; };
+  try {
+    activate(context);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return calls;
+  } finally {
+    BridgeManager.prototype.checkTunnel = originalCheck;
+    BridgeManager.prototype.start = originalStart;
+    await deactivate();
+    for (const disposable of context.__subscriptions.reverse()) disposable.dispose();
+  }
+}
+
+test("a window that does not start the Bridge still checks the tunnel", async () => {
+  assert.deepEqual(await runActivation(false), ["checkTunnel"], "the tunnel is checked; starting is left to the user");
+});
+
+test("persistent mode starts the Bridge and does not check the tunnel twice", async () => {
+  assert.deepEqual(await runActivation(true), ["start"], "start() performs its own check");
 });

@@ -117,6 +117,9 @@ Paste only the hostname assigned on the Domains page, such as `your-name.ngrok-f
 **Startup reports a domain or authorization error**  
 Confirm that the fixed domain and Authtoken belong to the same ngrok account, then inspect the `[ngrok]` lines in `AgentBridge: Show Output`. Current quotas and available domains depend on the plan shown in your ngrok dashboard.
 
+**Startup reports `ERR_NGROK_9009` (or "Pay-as-you-go")**  
+ngrok Free refuses to connect through an HTTP/S proxy. AgentBridge therefore starts ngrok with all `*_PROXY` variables removed, so this error usually means the proxy is configured somewhere AgentBridge does not control: check the ngrok config file (for example `%LOCALAPPDATA%\ngrok\ngrok.yml`) for a `proxy_url` entry and remove it, or switch the proxy client to TUN mode with the system proxy off. If you are on an ngrok Pay-as-you-go plan and want ngrok to reuse the proxy, enable `agentbridge.bridge.ngrokUseHttpProxy`.
+
 **The web client still shows the old tool list**  
 The client may have cached `tools/list`. For ChatGPT on the web, Refresh the Connector or Remove and re-add it; Stop + Start Bridge alone is not enough.
 

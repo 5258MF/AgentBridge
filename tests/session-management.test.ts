@@ -10,7 +10,7 @@ function makeContext(): any {
   const globalState = new Map<string, unknown>();
   return {
     extensionMode: 1,
-    extension: { packageJSON: { version: "0.1.10" } },
+    extension: { packageJSON: { version: "0.1.11" } },
     subscriptions: [],
     secrets: {
       get: async (key: string) => secrets.get(key),
@@ -73,11 +73,12 @@ test("webview classifies MCP sessions with mutually exclusive status and correct
   assert.match(sessionInfo(list.children[2]!), /^Connection open · 1 open streams · Last activity /);
   assert.match(sessionInfo(list.children[3]!), /^Idle · Last activity /);
 
-  const previousChildCount = list.children.length;
   addSession(manager, "processing-two", 1, 0);
   ((manager as any).sessions as Map<string, unknown>).delete("idle");
   harness.dispatchMessage({ type: "status", status: manager.getStatus(), persistentMode: false, quickTunnelCopied: false });
-  const refreshedHeader = harness.element("sessionList").children[previousChildCount]!;
+  // Re-rendered in place: the panel clears the list before rebuilding it, so the refreshed
+  // header is at the top again rather than appended past the old rows.
+  const refreshedHeader = harness.element("sessionList").children[0]!;
   assert.equal(refreshedHeader.children[0]?.children[1]?.disabled, true, "bulk clear must be disabled when there are no idle sessions");
   assert.match(view.webview.html, /agentbridge-session-list-heading[^}]*flex-wrap:\s*nowrap/);
   assert.match(view.webview.html, /agentbridge-session-list-summary[^}]*text-overflow:\s*ellipsis[^}]*white-space:\s*nowrap/);

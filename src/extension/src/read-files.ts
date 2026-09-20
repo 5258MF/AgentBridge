@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { open, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { estimateTokens, mapWithConcurrency } from "./file-tool-utils.js";
 
 export interface ReadFileRequest {
   path: string;
@@ -35,7 +36,10 @@ export const DEFAULT_READ_FILES_CONFIG: ReadFilesConfig = {
   maxLineChars: 4_000,
   maxTotalBytesPerCall: 256 * 1024,
   maxEstimatedTokensPerCall: 50_000,
-  veryLargeFileBytes: 2 * 1024 * 1024,
+  // Generated bundles, lockfiles and large config files routinely exceed 2 MB, and forcing an
+  // explicit line range for them adds work for the caller without saving anything: the bytes
+  // actually returned are capped by maxBytesPerFile and maxTotalBytesPerCall regardless.
+  veryLargeFileBytes: 8 * 1024 * 1024,
   binaryProbeBytes: 8 * 1024,
 };
 
@@ -115,10 +119,6 @@ class ReadToolError extends Error {
   ) {
     super(message);
   }
-}
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
 }
 
 function validateRange(request: ReadFileRequest): void {
@@ -379,6 +379,22 @@ async function readSingleFile(
     }
 
     const read = await readTextRange(safePath, request, config, signal);
+    // A range that starts past the last line returned empty content with end_line null,
+    // which looks exactly like an empty file or a range that simply matched nothing. The
+    // caller — usually a model — cannot tell its own line numbers were wrong.
+    // An empty file is the one exception: it has no line to start at, so 1 is how a caller
+    // asks for it and has to keep succeeding. Anything past that has nothing to point at,
+    // and `totalLines > 0` exempted the whole file, so start_line: 2 on an empty file came
+    // back as success with the 2 echoed back - a caller reading its own number back has no
+    // way to notice it is past the end.
+    const start = request.start_line ?? 1;
+    const pastTheEnd = start > read.totalLines && !(read.totalLines === 0 && start === 1);
+    if (request.start_line !== undefined && pastTheEnd) {
+      throw new ReadToolError(
+        "INVALID_LINE_RANGE",
+        `start_line ${request.start_line} is past the end of the file, which has ${read.totalLines} line${read.totalLines === 1 ? "" : "s"}.`,
+      );
+    }
     return {
       path: request.path,
       status: "success",
@@ -399,27 +415,6 @@ async function readSingleFile(
   } catch (error) {
     return normalizeError(request.path, error);
   }
-}
-
-async function mapWithConcurrency<T, R>(
-  values: readonly T[],
-  concurrency: number,
-  worker: (value: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(values.length);
-  let next = 0;
-
-  const runners = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
-    while (true) {
-      const index = next;
-      next += 1;
-      if (index >= values.length) return;
-      results[index] = await worker(values[index]!, index);
-    }
-  });
-
-  await Promise.all(runners);
-  return results;
 }
 
 function applyBatchBudget(results: ReadFileResult[], config: ReadFilesConfig): ReadFileResult[] {
@@ -589,6 +584,11 @@ export interface ReadImageFileResult {
 
 export const READ_IMAGE_FILE_SIZE_LIMIT = 5 * 1024 * 1024;
 
+/** The ceiling a caller may move: how large an image `read_image_file` will decode. */
+export interface ReadImageFileConfig {
+  maxBytes?: number;
+}
+
 export const IMAGE_MIME_BY_EXT: Readonly<Record<string, string>> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -611,9 +611,10 @@ function formatBytes(n: number): string {
 
 export async function readImageFile(
   input: ReadImageFileInput,
-  context: { workspaceRoots: string[]; signal?: AbortSignal },
+  context: { workspaceRoots: string[]; signal?: AbortSignal; config?: ReadImageFileConfig },
 ): Promise<ReadImageFileResult> {
   const requestedPath = input.path;
+  const sizeLimit = context.config?.maxBytes ?? READ_IMAGE_FILE_SIZE_LIMIT;
   if (typeof requestedPath !== "string" || requestedPath.length === 0) {
     return { status: "error", path: "", error: { code: "IO_ERROR", message: "Path must be a non-empty string." } };
   }
@@ -644,13 +645,13 @@ export async function readImageFile(
   if (!stats.isFile()) {
     return { status: "error", path: requestedPath, error: { code: "NOT_A_FILE", message: "Path is not a regular file (directories, sockets and devices are not supported)." } };
   }
-  if (stats.size > READ_IMAGE_FILE_SIZE_LIMIT) {
+  if (stats.size > sizeLimit) {
     return {
       status: "error",
       path: requestedPath,
       error: {
         code: "IMAGE_TOO_LARGE",
-        message: `Image is ${formatBytes(stats.size)}, which exceeds the ${formatBytes(READ_IMAGE_FILE_SIZE_LIMIT)} hard limit. Downsample the file out-of-band and retry.`,
+        message: `Image is ${formatBytes(stats.size)}, which exceeds the ${formatBytes(sizeLimit)} limit. Downsample the file out-of-band and retry.`,
       },
     };
   }
@@ -678,6 +679,20 @@ export async function readImageFile(
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "EACCES" || code === "EPERM") return { status: "error", path: requestedPath, error: { code: "PERMISSION_DENIED", message: "Permission denied while reading the file." } };
     return { status: "error", path: requestedPath, error: { code: "IO_ERROR", message: `readFile failed: ${(err as Error).message ?? String(err)}` } };
+  }
+
+  // The size the stat reported and the size that was read are two different facts: a file can
+  // grow between them, and the ceiling is about what this call is willing to hold in memory.
+  // Checking only the first let a file that grew across that gap be decoded in full.
+  if (buffer.byteLength > sizeLimit) {
+    return {
+      status: "error",
+      path: requestedPath,
+      error: {
+        code: "IMAGE_TOO_LARGE",
+        message: `Image is ${formatBytes(buffer.byteLength)}, which exceeds the ${formatBytes(sizeLimit)} limit. Downsample the file out-of-band and retry.`,
+      },
+    };
   }
 
   if (context.signal?.aborted) {

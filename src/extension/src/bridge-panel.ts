@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { invalidateManagedShellCache, sanityCheckManagedShellPath } from "./ide-tool-broker.js";
-import { BridgeStartCancelledError, normalizeTrustedBrowserOrigin, type BridgeManager, type BridgeStatus } from "./bridge-server.js";
+import { BridgeStartCancelledError, DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT, normalizeTrustedBrowserOrigin, type BridgeManager, type BridgeStatus } from "./bridge-server.js";
 import { createTranslator, detectLang, enMessages, readLanguagePreference, translate, zhMessages } from "./i18n.js";
 
 const POLL_INTERVAL_MS = 1500;
@@ -32,6 +32,86 @@ function readConfiguredTrustedBrowserOrigins(): string[] {
     if (normalized && !origins.includes(normalized)) origins.push(normalized);
   }
   return origins;
+}
+
+/** Quick-open shortcuts, capped like the webview form that edits them. */
+const QUICK_LINK_MAX_NAME_LENGTH = 40;
+const QUICK_LINK_MAX_URL_LENGTH = 500;
+const QUICK_LINK_MAX_COUNT = 16;
+
+export interface QuickLink {
+  readonly name: string;
+  readonly url: string;
+}
+
+export function isValidQuickLinkUrl(value: string): boolean {
+  return /^https?:\/\/\S+$/i.test(value);
+}
+
+/**
+ * Whether a URL this panel was asked to open may be handed to the operating system.
+ *
+ * `openExternal` opens whatever it is given, and a webview message can carry any string, so
+ * the scheme is checked here and not only where a link is saved: a `file:`, `vscode:` or
+ * `javascript:` URI would reach the user as a click on a link and is not one. The scheme is
+ * compared in the lower case `URL` reports it in, so `HTTPS://` is the same link.
+ */
+export function isOpenableExternalUrl(value: string): boolean {
+  try {
+    const scheme = new URL(value).protocol;
+    return scheme === "http:" || scheme === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A shortcut is typed by hand, so a bare host such as `example.com` is read as `https://`. A
+ * value that carries a scheme of its own is handed to the validator untouched, which keeps a
+ * mistyped `htps://example.com` an error rather than one scheme glued behind another.
+ *
+ * A colon in front of the path is a port, a scheme, or the credentials of an address, and only
+ * the port is all digits: `example.com:8080` is a host to put a scheme in front of,
+ * `javascript:alert(1)` is a scheme that must be judged as it stands, and `user:pass@host` is a
+ * host with credentials in front of it, which is an ordinary web address once it has a scheme.
+ * Reading every colon as a port turned the second into `https://javascript:alert(1)`, which the
+ * validator then accepted as an https address; reading every colon that is not a port as a
+ * scheme turned the third into an address that was refused.
+ *
+ * The three are told apart by the `@` and by brackets rather than by a list of schemes. A head
+ * written as an IPv6 literal - `[::1]`, `[::1]:8080` - owns every colon inside the brackets. A
+ * head that carries an `@` after the colon is credentials, because a scheme is followed by an
+ * opaque part that is not a host. The one address this reads the other way is a scheme of its
+ * own that happens to hold an `@`, such as `mailto:me@example.com`, which becomes
+ * `https://mailto:me@example.com` and is at worst a host with a strange userinfo: this field is
+ * for web addresses, and a mailto link never passed the validator either way.
+ */
+export function normalizeQuickLinkUrl(value: string): string {
+  const text = value.trim();
+  if (!text) return text;
+  const head = text.split(/[/?#]/, 1)[0] ?? text;
+  const colon = head.lastIndexOf(":");
+  if (colon < 0) return `https://${text}`;
+  const port = head.slice(colon + 1);
+  if (/^\d+$/.test(port)) return `https://${text}`;
+  if (head.startsWith("[") && head.endsWith("]")) return `https://${text}`;
+  return head.indexOf("@") > colon ? `https://${text}` : text;
+}
+
+/** Keep only well-formed entries: a hand-edited settings.json must not break the panel. */
+export function readConfiguredQuickLinks(): QuickLink[] {
+  const configured = vscode.workspace.getConfiguration("agentbridge.bridge").get<unknown>("quickLinks", []);
+  if (!Array.isArray(configured)) return [];
+  const links: QuickLink[] = [];
+  for (const value of configured) {
+    if (!value || typeof value !== "object") continue;
+    const record = value as { name?: unknown; url?: unknown };
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    const url = typeof record.url === "string" ? normalizeQuickLinkUrl(record.url) : "";
+    if (!name || !isValidQuickLinkUrl(url)) continue;
+    links.push({ name: name.slice(0, QUICK_LINK_MAX_NAME_LENGTH), url: url.slice(0, QUICK_LINK_MAX_URL_LENGTH) });
+  }
+  return links.slice(0, QUICK_LINK_MAX_COUNT);
 }
 
 function cloudflaredCommandRow(command: string): string {
@@ -73,7 +153,26 @@ interface PanelMessage {
   [key: string]: unknown;
 }
 
-const BUSY_PANEL_MESSAGE_TYPES = new Set([
+/**
+ * The parts of a panel a rebuilt document cannot know on its own.
+ *
+ * Changing the language replaces the whole HTML, which drops everything the reader set up by
+ * hand - which tab is open, whether the advanced section is expanded. Both are carried across
+ * the rebuild so a language change restyles the panel instead of rearranging it.
+ */
+interface PanelUiState {
+  advancedOpen: boolean;
+  activeTab: "config" | "session";
+}
+
+/**
+ * Messages the host answers with an operation-finished reply.
+ *
+ * The webview disables its controls while one of these is in flight and re-enables them when
+ * the reply arrives, so a type that sets the panel busy but is missing here leaves the panel
+ * dead until it is reloaded. The set is exported so a test can hold it against the webview.
+ */
+export const BUSY_PANEL_MESSAGE_TYPES = new Set([
   "start",
   "stop",
   "setProvider",
@@ -86,10 +185,13 @@ const BUSY_PANEL_MESSAGE_TYPES = new Set([
   "setTrustedBrowserOrigins",
 ]);
 
+/** The one busy operation the host answers with a message of its own. */
+export const INSTALL_CLOUDFLARED_MESSAGE_TYPE = "installCloudflared";
+
 export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
-  private keepAdvancedOpenOnLanguageChange = false;
+  private pendingLanguageUiState: PanelUiState | undefined;
   private namedTunnelInputDirty = false;
   private trustedBrowserOriginsInputDirty = false;
   private pendingLanguageRefresh = false;
@@ -117,7 +219,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.renderHtml();
     webviewView.webview.onDidReceiveMessage((message: PanelMessage) => {
       void this.handleMessage(message, webviewView.webview).then(() => {
-        if (message.type !== "installCloudflared" && message.type !== "checkPublicHealth" && message.type !== "clearIdleSessions" && message.type !== "clearActivityHistory" && this.view === webviewView) {
+        if (message.type !== INSTALL_CLOUDFLARED_MESSAGE_TYPE && message.type !== "checkPublicHealth" && message.type !== "clearIdleSessions" && message.type !== "clearActivityHistory" && this.view === webviewView) {
           const operationFinished = BUSY_PANEL_MESSAGE_TYPES.has(message.type);
           this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? true : undefined);
         }
@@ -125,7 +227,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         if (!(error instanceof BridgeStartCancelledError)) {
           void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
         }
-        if (message.type !== "installCloudflared" && message.type !== "checkPublicHealth" && this.view === webviewView) {
+        if (message.type !== INSTALL_CLOUDFLARED_MESSAGE_TYPE && message.type !== "checkPublicHealth" && this.view === webviewView) {
           const operationFinished = BUSY_PANEL_MESSAGE_TYPES.has(message.type);
           this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? false : undefined);
         }
@@ -133,6 +235,9 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     });
     const configurationSubscription = vscode.workspace.onDidChangeConfiguration((event) => {
       if (this.view !== webviewView) return;
+      if (event.affectsConfiguration("agentbridge.bridge.quickLinks")) {
+        void webviewView.webview.postMessage({ type: "quickLinksChanged", links: readConfiguredQuickLinks() });
+      }
       if (event.affectsConfiguration("agentbridge.bridge.trustedBrowserOrigins")) {
         const revision = ++this.trustedBrowserOriginsConfigRevision;
         if (this.trustedBrowserOriginsInputDirty) {
@@ -147,15 +252,16 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         }
       }
       if (!event.affectsConfiguration("agentbridge.language")) return;
-      const advancedOpen = this.keepAdvancedOpenOnLanguageChange;
-      this.keepAdvancedOpenOnLanguageChange = false;
       if (this.namedTunnelInputDirty || this.trustedBrowserOriginsInputDirty) {
+        // Hold on to the state the panel sent: the rebuild waits for the edits to be saved.
         this.pendingLanguageRefresh = true;
         return;
       }
       this.pendingLanguageRefresh = false;
       this.pendingTrustedBrowserOriginsRefresh = false;
-      webviewView.webview.html = this.renderHtml(advancedOpen);
+      const uiState = this.pendingLanguageUiState;
+      this.pendingLanguageUiState = undefined;
+      webviewView.webview.html = this.renderHtml(uiState);
     });
     if (webviewView.visible) this.startPolling();
     webviewView.onDidChangeVisibility(() => {
@@ -180,7 +286,9 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     if (this.pendingLanguageRefresh && !this.namedTunnelInputDirty && !this.trustedBrowserOriginsInputDirty) {
       this.pendingLanguageRefresh = false;
       this.pendingTrustedBrowserOriginsRefresh = false;
-      sourceWebview.html = this.renderHtml();
+      const uiState = this.pendingLanguageUiState;
+      this.pendingLanguageUiState = undefined;
+      sourceWebview.html = this.renderHtml(uiState);
       return;
     }
     if (this.pendingTrustedBrowserOriginsRefresh && !this.trustedBrowserOriginsInputDirty) {
@@ -371,14 +479,25 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       case "openExternal": {
         const url = message.url;
         if (typeof url === "string" && url) {
+          // The webview sits on the other side of a trust boundary: a message can carry any
+          // string, and openExternal hands what it is given to the operating system. Only
+          // http and https are ever meant to be opened from here, so anything else is refused
+          // rather than passed on - a file: or vscode: URI would read to the user as a click
+          // on a link and is not one. The panel validates what it saves; a handler that is a
+          // boundary has to hold it as well.
+          if (!isOpenableExternalUrl(url)) {
+            void vscode.window.showWarningMessage(t("openExternalBlocked", url));
+            return;
+          }
           const mode = vscode.workspace.getConfiguration("agentbridge.bridge").get<"auto" | "all" | "external">("openInternalBrowser", "auto");
           let isEmbeddedHost = false;
           try {
             const hostname = new URL(url).hostname.toLowerCase();
-            const embeddedDomains = ["chatgpt.com", "arena.ai", "workbuddy.cn", "trae.cn", "qwenwork.cn"];
+            const embeddedDomains = ["chatgpt.com", "arena.ai", "workbuddy.cn", "trae.cn", "qwenwork.cn", "manus.im"];
             isEmbeddedHost = embeddedDomains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
           } catch {
-            // Malformed or non-HTTP URLs retain the external-browser fallback.
+            // Unreachable for a URL that passed the scheme check; kept so a host name that
+            // cannot be read falls through to the external browser rather than failing.
           }
           const useSimpleBrowser = mode === "all" || (mode === "auto" && isEmbeddedHost);
           if (useSimpleBrowser) {
@@ -439,7 +558,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       }
       case "disconnectSession": {
         const sid = message.sessionId;
-        if (typeof sid !== "string" || !sid) throw new Error("sessionId must be a string.");
+        if (typeof sid !== "string" || !sid) throw new Error(t("sessionIdRequired"));
         await this.bridgeReady;
         this.bridge.destroySession(sid);
         return;
@@ -457,7 +576,11 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
           persistentMode,
           quickTunnelCopied,
         });
-        void vscode.window.showInformationMessage(t("idleSessionsCleared", clearedCount));
+        // Nothing was cleared, so there is nothing worth interrupting for — a "cleared 0
+        // sessions" toast is noise. The panel still refreshes from the message above.
+        if (clearedCount > 0) {
+          void vscode.window.showInformationMessage(t("idleSessionsCleared", clearedCount));
+        }
         return;
       }
       case "clearActivityHistory": {
@@ -491,11 +614,14 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         const v = message.value;
         if (v !== "auto" && v !== "zh-CN" && v !== "en") throw new Error("Invalid AgentBridge language value.");
         if (readLanguagePreference() === v) return;
-        this.keepAdvancedOpenOnLanguageChange = message.advancedOpen === true;
+        this.pendingLanguageUiState = {
+          advancedOpen: message.advancedOpen === true,
+          activeTab: message.activeTab === "session" ? "session" : "config",
+        };
         try {
           await vscode.workspace.getConfiguration("agentbridge").update("language", v, vscode.ConfigurationTarget.Global);
         } catch (error) {
-          this.keepAdvancedOpenOnLanguageChange = false;
+          this.pendingLanguageUiState = undefined;
           throw error;
         }
         return;
@@ -526,6 +652,57 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
           // The originating Webview may have been disposed while the setting was saved.
         }
         this.flushDeferredConfigurationRefresh(sourceWebview);
+        return;
+      }
+      case "addQuickLink": {
+        const name = typeof message.name === "string" ? message.name.trim().slice(0, QUICK_LINK_MAX_NAME_LENGTH) : "";
+        const url = typeof message.url === "string" ? normalizeQuickLinkUrl(message.url).slice(0, QUICK_LINK_MAX_URL_LENGTH) : "";
+        if (!name || !isValidQuickLinkUrl(url)) throw new Error(t("quickLinksInvalid"));
+        const links = readConfiguredQuickLinks();
+        if (links.length >= QUICK_LINK_MAX_COUNT || links.some((link) => link.url.toLowerCase() === url.toLowerCase())) {
+          throw new Error(t("quickLinksInvalid"));
+        }
+        await vscode.workspace.getConfiguration("agentbridge.bridge").update(
+          "quickLinks",
+          [...links, { name, url }],
+          vscode.ConfigurationTarget.Global,
+        );
+        return;
+      }
+      case "removeQuickLink": {
+        const name = typeof message.name === "string" ? message.name : "";
+        const url = typeof message.url === "string" ? message.url : "";
+        const links = readConfiguredQuickLinks();
+        const next = links.filter((link) => link.url !== url || link.name !== name);
+        if (next.length === links.length) return;
+        await vscode.workspace.getConfiguration("agentbridge.bridge").update(
+          "quickLinks",
+          next,
+          vscode.ConfigurationTarget.Global,
+        );
+        return;
+      }
+      case "updateQuickLink": {
+        const name = typeof message.name === "string" ? message.name : "";
+        const url = typeof message.url === "string" ? message.url : "";
+        const newName = typeof message.newName === "string" ? message.newName.trim().slice(0, QUICK_LINK_MAX_NAME_LENGTH) : "";
+        const newUrl = typeof message.newUrl === "string" ? normalizeQuickLinkUrl(message.newUrl).slice(0, QUICK_LINK_MAX_URL_LENGTH) : "";
+        if (!newName || !isValidQuickLinkUrl(newUrl)) throw new Error(t("quickLinksInvalid"));
+        const links = readConfiguredQuickLinks();
+        const index = links.findIndex((link) => link.url === url && link.name === name);
+        if (index < 0) return;
+        // The entry being edited is allowed to keep its own address; only another entry
+        // holding the same one is a duplicate.
+        if (links.some((link, position) => position !== index && link.url.toLowerCase() === newUrl.toLowerCase())) {
+          throw new Error(t("quickLinksInvalid"));
+        }
+        const next = [...links];
+        next[index] = { name: newName, url: newUrl };
+        await vscode.workspace.getConfiguration("agentbridge.bridge").update(
+          "quickLinks",
+          next,
+          vscode.ConfigurationTarget.Global,
+        );
         return;
       }
       case "configureManagedShell": {
@@ -565,12 +742,21 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
-private renderHtml(advancedOpen = false): string {
+  private renderHtml(uiState: PanelUiState = { advancedOpen: false, activeTab: "config" }): string {
+    const advancedOpen = uiState.advancedOpen;
+    const isSessionTab = uiState.activeTab === "session";
     const lang = detectLang();
     const languagePreference = readLanguagePreference();
     const trustedBrowserOrigins = readConfiguredTrustedBrowserOrigins();
     const t = createTranslator(lang);
     const dict = lang === "zh" ? zhMessages : enMessages;
+    // The document below is built here and nowhere else: nothing in it comes from a file, a
+    // tool result or a URL without going through escapeHtml or JSON.stringify first, and the
+    // webview never assigns to innerHTML - text arrives through textContent and through
+    // elements built with createElement. That is what "unsafe-inline" is trading on: the
+    // script and the style cannot be moved out, because a WebviewView is handed no resource
+    // root to load them from (localResourceRoots is empty) and both are generated with the
+    // document they belong to.
     return /* html */ `<!DOCTYPE html>
  <html lang="${lang === "zh" ? "zh-CN" : "en"}">
  <head>
@@ -580,6 +766,8 @@ private renderHtml(advancedOpen = false): string {
    window.__AB_I18N__ = ${JSON.stringify(dict).replace(/</g, "\\u003c")};
    window.__AB_CAN_AUTO_INSTALL_CLOUDFLARED__ = ${JSON.stringify(CAN_AUTO_INSTALL_CLOUDFLARED)};
    window.__AB_TRUSTED_BROWSER_ORIGINS_REVISION__ = ${JSON.stringify(this.trustedBrowserOriginsConfigRevision)};
+   window.__AB_QUICK_LINKS__ = ${JSON.stringify(readConfiguredQuickLinks()).replace(/</g, "\\u003c")};
+   window.__AB_DEFAULT_NAMED_PORT__ = ${JSON.stringify(DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT)};
  </script>
  <style>
   html { height: 100%; margin: 0; padding: 0; }
@@ -598,6 +786,19 @@ private renderHtml(advancedOpen = false): string {
   .agentbridge-more-sites { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   .agentbridge-more-sites[hidden] { display: none; }
   .agentbridge-more-sites > button { width: auto; min-width: 140px; }
+  .agentbridge-quick-link-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .agentbridge-quick-link-form .agentbridge-input { flex: 1 1 160px; min-width: 0; width: auto; }
+  .agentbridge-quick-link-form button { flex: 0 0 auto; }
+  .agentbridge-quick-link-editing { margin-top: 6px; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.4; }
+  .agentbridge-quick-link-message { min-height: 16px; margin-top: 6px; color: var(--vscode-errorForeground); font-size: 11px; line-height: 1.4; }
+  .agentbridge-quick-link-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .agentbridge-quick-link-list.empty { color: var(--vscode-descriptionForeground); font-size: 12px; }
+  .agentbridge-quick-link-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; background: var(--vscode-editor-background); }
+  .agentbridge-quick-link-text { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
+  .agentbridge-quick-link-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .agentbridge-quick-link-url-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .agentbridge-quick-link-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+  .agentbridge-quick-link-actions > button { width: auto; min-width: 0; }
   .agentbridge-connection-card, .agentbridge-advanced-card { padding: 0; }
   .agentbridge-connection-card > summary, .agentbridge-advanced-card > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; cursor: pointer; list-style-position: inside; }
   .agentbridge-connection-card > summary::marker, .agentbridge-advanced-card > summary::marker { color: var(--vscode-descriptionForeground); }
@@ -861,10 +1062,10 @@ private renderHtml(advancedOpen = false): string {
 </head>
 <body>
   <div class="agentbridge-tabs" id="agentbridgeTabs" role="tablist">
-    <button class="agentbridge-tab active" id="tabConfig" role="tab" aria-selected="true" tabindex="0" type="button">${t("tabConfig")}</button>
-    <button class="agentbridge-tab" id="tabSession" role="tab" aria-selected="false" tabindex="-1" type="button">${t("tabSession")}</button>
+    <button class="agentbridge-tab${isSessionTab ? "" : " active"}" id="tabConfig" role="tab" aria-selected="${String(!isSessionTab)}" tabindex="${isSessionTab ? "-1" : "0"}" type="button">${t("tabConfig")}</button>
+    <button class="agentbridge-tab${isSessionTab ? " active" : ""}" id="tabSession" role="tab" aria-selected="${String(isSessionTab)}" tabindex="${isSessionTab ? "0" : "-1"}" type="button">${t("tabSession")}</button>
   </div>
-  <div id="configSection">
+  <div id="configSection"${isSessionTab ? ' style="display:none;"' : ""}>
   <div class="agentbridge-card agentbridge-hero">
     <div class="agentbridge-card-header">
       <h2>AgentBridge</h2>
@@ -898,11 +1099,33 @@ private renderHtml(advancedOpen = false): string {
       <button class="secondary" id="openWorkBuddyButton">${t("openWorkBuddy")}</button>
       <button class="secondary" id="openTraeButton">${t("openTrae")}</button>
       <button class="secondary" id="openQwenButton">${t("openQwen")}</button>
+      <button class="secondary" id="openManusButton">${t("openManus")}</button>
     </div>
+    <div class="agentbridge-more-sites" id="quickLinksGroup" hidden></div>
     <div class="agentbridge-security-note">
       <span>⚠</span><span>${t("securityNote")}</span>
     </div>
   </div>
+
+  <details class="agentbridge-card agentbridge-connection-card" id="quickOpenCard">
+    <summary>
+      <div class="agentbridge-connection-summary-main">
+        <h3>${t("quickOpen")}</h3>
+      </div>
+    </summary>
+    <div class="agentbridge-connection-body">
+      <p class="agentbridge-help">${t("quickOpenHelp")}</p>
+      <div class="agentbridge-quick-link-form">
+        <input class="agentbridge-input agentbridge-quick-link-name-input" id="quickLinkNameInput" type="text" spellcheck="false" placeholder="${t("quickLinkNamePlaceholder")}" aria-label="${t("quickLinkNamePlaceholder")}">
+        <input class="agentbridge-input agentbridge-quick-link-url-input" id="quickLinkUrlInput" type="text" spellcheck="false" placeholder="${t("quickLinkUrlPlaceholder")}" aria-label="${t("quickLinkUrlPlaceholder")}">
+        <button class="secondary" id="quickLinkAddButton" type="button">＋ ${t("quickLinkAdd")}</button>
+        <button class="secondary" id="quickLinkCancelButton" type="button" hidden>${t("quickLinkCancel")}</button>
+      </div>
+      <div class="agentbridge-quick-link-editing" id="quickLinkEditHint" hidden></div>
+      <div class="agentbridge-quick-link-message" id="quickLinkMessage"></div>
+      <div class="agentbridge-quick-link-list" id="quickLinkList"></div>
+    </div>
+  </details>
 
   <details class="agentbridge-card agentbridge-connection-card" id="connectionCard">
     <summary>
@@ -1000,6 +1223,11 @@ private renderHtml(advancedOpen = false): string {
           <button class="primary" id="saveNamedTunnelButton" disabled>${t("saveNamedTunnel")}</button>
           <button class="secondary" id="clearNamedTunnelTokenButton" disabled>${t("clearToken")}</button>
         </div>
+        <div class="agentbridge-controls" id="clearTokenConfirm" hidden>
+          <span class="agentbridge-help">${t("confirmClearToken")}</span>
+          <button class="secondary" id="clearTokenConfirmButton">${t("clearToken")}</button>
+          <button class="secondary" id="clearTokenCancelButton">${t("cancel")}</button>
+        </div>
       </div>
 
       <div class="agentbridge-tunnel-panel" id="tunnelSetupPanel">
@@ -1039,7 +1267,7 @@ private renderHtml(advancedOpen = false): string {
             </div>
             <div class="agentbridge-setup-step">
               <h4>${t("addPublishedRoute")}</h4>
-              <p class="agentbridge-help">${t("publishedRouteHelp")}</p>
+              <p class="agentbridge-help">${escapeHtml(t("publishedRouteHelp"))}</p>
             </div>
             <div class="agentbridge-setup-step">
               <h4>${t("checkDnsRecords")}</h4>
@@ -1058,7 +1286,7 @@ private renderHtml(advancedOpen = false): string {
             </div>
             <div class="agentbridge-setup-step">
               <h4>${t("addAuthtoken")}</h4>
-              <div class="agentbridge-command-row"><code>ngrok config add-authtoken &lt;YOUR_AUTHTOKEN&gt;</code><button class="secondary" data-copy="ngrok config add-authtoken <YOUR_AUTHTOKEN>">${t("copy")}</button></div>
+              <div class="agentbridge-command-row"><code>ngrok config add-authtoken &lt;YOUR_AUTHTOKEN&gt;</code><button class="secondary" data-copy="ngrok config add-authtoken &lt;YOUR_AUTHTOKEN&gt;">${t("copy")}</button></div>
             </div>
             <div class="agentbridge-setup-step">
               <h4>${t("verifyNgrok")}</h4>
@@ -1095,6 +1323,7 @@ private renderHtml(advancedOpen = false): string {
           <option value="en"${languagePreference === "en" ? " selected" : ""}>${t("languageEnglish")}</option>
         </select>
         <div class="agentbridge-help">${t("interfaceLanguageHelp")}</div>
+        <div class="agentbridge-help" id="languageStatus" hidden></div>
       </div>
       <div class="agentbridge-static-row" style="margin-top:12px;">
         <div class="agentbridge-label">${t("transportProtocol")}</div>
@@ -1167,7 +1396,7 @@ private renderHtml(advancedOpen = false): string {
   </details>
   </div>
 
-  <div class="agentbridge-session-view" id="sessionSection" style="display:none">
+  <div class="agentbridge-session-view" id="sessionSection"${isSessionTab ? "" : ' style="display:none"'}>
     <div class="agentbridge-session-todos-region" id="todosRegion"></div>
     <div class="agentbridge-session-history-toolbar">
       <span class="agentbridge-session-history-title">${t("activityHistory")}</span>
@@ -1222,6 +1451,7 @@ private renderHtml(advancedOpen = false): string {
   let namedTunnelInputDirty = false;
   let trustedBrowserOriginsInputDirty = false;
   let trustedBrowserOriginsSavePending = false;
+  let pendingClearToken = false;
   let pendingTrustedBrowserOriginsChange = null;
   let languageChanging = false;
   const currentLanguagePreference = $('languageSelect').value;
@@ -1232,6 +1462,7 @@ private renderHtml(advancedOpen = false): string {
   let lastRevision = -1;
   let todoExpanded = false;
   let footerCollapsed = false;
+  let quickLinks = Array.isArray(window.__AB_QUICK_LINKS__) ? window.__AB_QUICK_LINKS__ : [];
   const expandedToolActivities = new Set();
   const sessionScroll = $('sessionSection').querySelector('.agentbridge-session-scroll');
   const timelineEl = $('timeline');
@@ -1239,6 +1470,7 @@ private renderHtml(advancedOpen = false): string {
   function setNamedTunnelInputDirty(dirty) {
     if (namedTunnelInputDirty === dirty) return;
     namedTunnelInputDirty = dirty;
+    if (!dirty) setLanguageStatus('');
     vscode.postMessage({ type: 'namedTunnelDirtyChanged', dirty });
   }
 
@@ -1253,8 +1485,27 @@ private renderHtml(advancedOpen = false): string {
   function setTrustedBrowserOriginsInputDirty(dirty) {
     if (trustedBrowserOriginsInputDirty === dirty) return;
     trustedBrowserOriginsInputDirty = dirty;
+    if (!dirty) setLanguageStatus('');
     vscode.postMessage({ type: 'trustedBrowserOriginsDirtyChanged', dirty });
     if (!dirty && !trustedBrowserOriginsSavePending) applyPendingTrustedBrowserOriginsChange();
+  }
+
+  // A webview has no working window.alert: calling it does nothing and shows nothing, so a
+  // refused language change was silent - the select snapped back and gave no reason. The
+  // reason goes into a line of its own under the select instead.
+  function setLanguageStatus(message) {
+    const node = $('languageStatus');
+    node.textContent = message || '';
+    node.toggleAttribute('hidden', !message);
+  }
+
+  // The same for window.confirm: it answers undefined, so the dialog always said no and the
+  // clear button looked dead. Clearing the token asks in place, the way deleting a quick link
+  // does - one press arms the question, the next one answers it.
+  function renderClearTokenConfirm() {
+    const armed = pendingClearToken && !!lastStatus && lastStatus.namedTunnelTokenConfigured === true;
+    $('clearNamedTunnelTokenButton').toggleAttribute('hidden', armed);
+    $('clearTokenConfirm').toggleAttribute('hidden', !armed);
   }
 
   function trustedBrowserOriginsSnapshot(origins, revision) {
@@ -1336,32 +1587,48 @@ private renderHtml(advancedOpen = false): string {
   }
 
   function openResource(item) {
-    vscode.postMessage({ type: 'openResource', value: { path: item.path, line: item.line, column: item.column, folder: item.folder } });
+    // The host identifies a directory by the item's kind; there is no "folder" field on it,
+    // so reading one sent every directory to showTextDocument, which cannot open a folder.
+    vscode.postMessage({ type: 'openResource', value: { path: item.path, line: item.line, column: item.column, folder: item.kind === 'folder' } });
   }
 
-  function renderTodos(todos) {
+  function renderTodos(todos, activities) {
     const region = $('todosRegion');
     region.textContent = '';
     if (!todos || todos.length === 0) return;
+    // Progress is not a field of a todo. The host keeps one as an id, a title and a status,
+    // and report_progress files it as an activity that carries the todo's id, so the newest
+    // such activity per todo is where the phase, message and percent live.
+    const latestProgress = new Map();
+    for (const activity of activities || []) {
+      if (activity.status === 'progress' && activity.todoId) latestProgress.set(activity.todoId, activity);
+    }
     const details = el('details', 'agentbridge-todos');
     details.open = todoExpanded;
     const summary = el('summary', 'agentbridge-todos-summary');
     summary.appendChild(el('span', 'agentbridge-todo-icon', '☑'));
     summary.appendChild(el('strong', null, t('todosTitle')));
-    const count = todos.filter((t) => t.status === 'completed').length;
+    const count = todos.filter((todo) => todo.status === 'completed').length;
     summary.appendChild(el('span', 'agentbridge-todos-count', count + ' / ' + todos.length));
     details.appendChild(summary);
     const body = el('div', 'agentbridge-todos-body');
     for (const todo of todos) {
-      const row = el('div', 'agentbridge-todo ' + todo.status);
+      // The rules for the row being worked on are written ".agentbridge-todo.in-progress"
+      // while the status the host sends is "in_progress", so the row built from the raw
+      // status was the one row those rules - the highlight, the spinner colour, the percent
+      // colour - never reached.
+      const row = el('div', 'agentbridge-todo ' + todo.status.replace(/_/g, '-'));
       row.appendChild(el('span', 'agentbridge-todo-icon', todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '◌' : '○'));
       row.appendChild(el('span', 'agentbridge-todo-title', todo.title));
       if (todo.status === 'in_progress') {
-        const progress = el('span', 'agentbridge-todo-progress');
-        if (todo.phase) progress.appendChild(el('span', 'phase', todo.phase));
-        if (todo.message) progress.appendChild(el('span', 'message', todo.message));
-        if (todo.percent != null) progress.appendChild(el('span', 'percent', Math.round(todo.percent) + '%'));
-        row.appendChild(progress);
+        const reported = latestProgress.get(todo.id);
+        if (reported) {
+          const progress = el('span', 'agentbridge-todo-progress');
+          if (reported.phase) progress.appendChild(el('span', 'phase', reported.phase));
+          if (reported.message) progress.appendChild(el('span', 'message', reported.message));
+          if (reported.percent != null) progress.appendChild(el('span', 'percent', Math.round(reported.percent) + '%'));
+          row.appendChild(progress);
+        }
       }
       body.appendChild(row);
     }
@@ -1418,6 +1685,24 @@ private renderHtml(advancedOpen = false): string {
     if (items.length > 40) container.appendChild(el('div', 'agentbridge-tool-more', '+ ' + (items.length - 40) + ' more'));
   }
 
+  function diffPreviewToUnified(file) {
+    // The host sends each file as a list of hunks, not as a diff string, and openDiff needs
+    // a real unified diff to render. Rebuilding it here keeps the button's payload in the
+    // same shape the host's own snippet parser expects.
+    const lines = ['--- ' + (file.oldPath || file.path), '+++ ' + (file.newPath || file.path)];
+    for (const hunk of (file.hunks || [])) {
+      lines.push('@@ -' + hunk.oldStart + ' +' + hunk.newStart + ' @@');
+      for (const line of (hunk.lines || [])) {
+        const marker = line.kind === 'add' ? '+' : line.kind === 'delete' ? '-' : ' ';
+        lines.push(marker + line.text);
+      }
+      if (hunk.truncated) lines.push('... <diff truncated>');
+    }
+    // The backslash is doubled because this script is itself a template literal: a single
+    // one would reach the webview as a real newline and break the source.
+    return lines.join('\\n');
+  }
+
   function renderMiniDiff(diffPreview, container) {
     if (!diffPreview) return;
     const mini = el('div', 'agentbridge-mini-diff');
@@ -1431,23 +1716,21 @@ private renderHtml(advancedOpen = false): string {
       header.appendChild(fileButton);
       const openButton = el('button', 'agentbridge-mini-diff-open', '⇄');
       openButton.title = t('openFullDiff');
-      openButton.addEventListener('click', () => vscode.postMessage({ type: 'openDiff', value: { diff: file.diff, path: file.path } }));
+      openButton.addEventListener('click', () => vscode.postMessage({ type: 'openDiff', value: { diff: diffPreviewToUnified(file), path: file.path } }));
       header.appendChild(openButton);
       fileCard.appendChild(header);
       const code = el('div', 'agentbridge-mini-diff-code');
-      const hunks = (file.diff || '').split('\\n');
-      for (const line of hunks) {
-        let cls = 'context';
-        let marker = '';
-        let text = line;
-        if (line.startsWith('+')) { cls = 'add'; marker = '+'; }
-        else if (line.startsWith('-')) { cls = 'delete'; marker = '-'; }
-        else if (line.startsWith('@@')) { cls = 'context'; marker = '@@'; text = line.slice(2).trim(); }
-        const row = el('div', 'agentbridge-mini-diff-line ' + cls);
-        row.appendChild(el('span', 'agentbridge-mini-diff-line-number', ''));
-        row.appendChild(el('span', 'agentbridge-mini-diff-marker', marker));
-        row.appendChild(el('span', 'agentbridge-mini-diff-text', text));
-        code.appendChild(row);
+      for (const hunk of (file.hunks || [])) {
+        for (const line of (hunk.lines || [])) {
+          const cls = line.kind === 'add' ? 'add' : line.kind === 'delete' ? 'delete' : 'context';
+          const marker = line.kind === 'add' ? '+' : line.kind === 'delete' ? '-' : '';
+          const row = el('div', 'agentbridge-mini-diff-line ' + cls);
+          row.appendChild(el('span', 'agentbridge-mini-diff-line-number', String(line.oldLine || line.newLine || '')));
+          row.appendChild(el('span', 'agentbridge-mini-diff-marker', marker));
+          row.appendChild(el('span', 'agentbridge-mini-diff-text', line.text));
+          code.appendChild(row);
+        }
+        if (hunk.truncated) code.appendChild(el('div', 'agentbridge-mini-diff-truncated', '...'));
       }
       fileCard.appendChild(code);
       mini.appendChild(fileCard);
@@ -1735,7 +2018,7 @@ private renderHtml(advancedOpen = false): string {
     }
     lastRevision = status.revision;
     const wasNearBottom = isNearBottom();
-    renderTodos(status.todos);
+    renderTodos(status.todos, status.activities);
     renderTimeline(status.activities);
     renderSessionStatus(status);
     if (sessionScroll.scrollHeight > sessionScroll.clientHeight && wasNearBottom) {
@@ -1938,7 +2221,7 @@ private renderHtml(advancedOpen = false): string {
         $('namedDomainInput').value = status.configuredNamedDomain || '';
       }
       if (document.activeElement !== $('namedPortInput')) {
-        $('namedPortInput').value = String(status.namedTunnelLocalPort || 48271);
+        $('namedPortInput').value = String(status.namedTunnelLocalPort || window.__AB_DEFAULT_NAMED_PORT__);
       }
     }
     $('namedTokenStatus').textContent = status.namedTunnelTokenConfigured ? t('tokenSaved') : t('tokenNotSaved');
@@ -1974,7 +2257,7 @@ private renderHtml(advancedOpen = false): string {
   }
 
   function updateNamedTunnelOriginPreview() {
-    const port = Number($('namedPortInput').value) || (lastStatus && lastStatus.namedTunnelLocalPort) || 48271;
+    const port = Number($('namedPortInput').value) || (lastStatus && lastStatus.namedTunnelLocalPort) || window.__AB_DEFAULT_NAMED_PORT__;
     $('namedOriginValue').value = 'http://127.0.0.1:' + port;
     $('namedOriginValue').title = $('namedOriginValue').value;
   }
@@ -2008,6 +2291,7 @@ private renderHtml(advancedOpen = false): string {
     $('copyOriginButton').disabled = !statusLoaded || !$('namedOriginValue').value;
     $('saveNamedTunnelButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed || !$('namedDomainInput').value.trim() || !Number.isInteger(Number($('namedPortInput').value));
     $('clearNamedTunnelTokenButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed || lastStatus.namedTunnelTokenConfigured !== true;
+    renderClearTokenConfirm();
     $('checkButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
     $('checkPublicHealthButton').disabled = !statusLoaded || busy || !running || lastStatus.publicHealthAvailable !== true || publicHealthCheckPending || lastStatus.publicHealthChecking === true;
     $('installCloudflaredButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !canAutoInstallCloudflared || !(isQuick || isNamed) || lastStatus.tunnelInstalled !== false || lastStatus.cloudflaredInstallerAvailability !== 'available';
@@ -2139,11 +2423,24 @@ private renderHtml(advancedOpen = false): string {
     if (!lastStatus) return;
     vscode.postMessage({ type: 'copy', text: $('namedOriginValue').value });
   });
-  $('openChatGptButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://chatgpt.com/' }));
-  $('openArenaButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://arena.ai/agent' }));
-  $('openWorkBuddyButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://www.workbuddy.cn/app' }));
-  $('openTraeButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://work.trae.cn' }));
-  $('openQwenButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: 'https://qwenwork.cn/app/chat' }));
+  // Every button that opens something says where it goes on hover. The label only names the
+  // site, and the address is what a reader wants to check before clicking - it is the one
+  // thing the closed build showed that this row did not.
+  const openSiteUrls = {
+    openChatGptButton: 'https://chatgpt.com/',
+    openArenaButton: 'https://arena.ai/agent',
+    openWorkBuddyButton: 'https://www.workbuddy.cn/app',
+    openTraeButton: 'https://work.trae.cn',
+    openQwenButton: 'https://qwenwork.cn/app/chat',
+    openManusButton: 'https://manus.im/app',
+  };
+  for (const id of Object.keys(openSiteUrls)) {
+    const url = openSiteUrls[id];
+    const button = $(id);
+    if (!button) continue;
+    button.title = url;
+    button.addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: url }));
+  }
   $('moreSitesButton').addEventListener('click', () => {
     const group = $('moreSitesGroup');
     const expanded = group.hasAttribute('hidden');
@@ -2151,6 +2448,249 @@ private renderHtml(advancedOpen = false): string {
     $('moreSitesButton').setAttribute('aria-expanded', String(expanded));
     $('moreSitesButton').textContent = expanded ? t('moreSitesOpen') : t('moreSites');
   });
+
+  // Quick open: shortcuts from agentbridge.bridge.quickLinks, rendered as buttons above the
+  // cards and managed in the card below. Mirrors the webview-side validation ShunCode uses.
+  // Kept free of backslashes on purpose: the build checks the raw text of this template,
+  // where an escaped slash inside a regex literal would look like the end of the regex.
+  function isValidQuickLinkUrl(value) {
+    if (typeof value !== 'string') return false;
+    const text = value.trim();
+    const scheme = text.slice(0, 8).toLowerCase() === 'https://' ? 'https://'
+      : text.slice(0, 7).toLowerCase() === 'http://' ? 'http://' : '';
+    if (!scheme) return false;
+    const rest = text.slice(scheme.length);
+    if (!rest.length) return false;
+    // Whitespace is asked about the way the host asks: the host reads a regular expression,
+    // and \S refuses every whitespace character, not only the ASCII ones. Testing charCode
+    // here used to let U+00A0 through, so an address that looked fine in the form was thrown
+    // out by the host at save time - the panel and the setting disagreeing about one string.
+    // No regular expression here on purpose: this template is checked as raw text, where an
+    // escaped slash inside one would read as the end of the literal.
+    for (let index = 0; index < rest.length; index += 1) {
+      const probe = 'x' + rest.charAt(index);
+      if (probe.trim() === 'x') return false;
+    }
+    return true;
+  }
+
+  // A shortcut typed without a scheme is read as https, matching the host: a colon in front of
+  // the path is a port when what follows it is digits, and otherwise a scheme of its own -
+  // javascript:alert(1) is judged as it stands - or the credentials of an address, which an
+  // "@" after the colon gives away, or an IPv6 literal, whose head is written in brackets and
+  // owns every colon inside them. example.com:8080, user:pass@host and [::1] gain a scheme;
+  // javascript:alert(1) does not. Written with charAt and indexOf rather than a regex so the
+  // raw text of this template keeps no escaped slashes in it.
+  function normalizeQuickLinkUrl(value) {
+    if (typeof value !== 'string') return '';
+    const text = value.trim();
+    if (!text) return text;
+    let end = text.length;
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text.charAt(i);
+      if (ch === '/' || ch === '?' || ch === '#') { end = i; break; }
+    }
+    const head = text.slice(0, end);
+    const colon = head.lastIndexOf(':');
+    if (colon < 0) return 'https://' + text;
+    const after = head.slice(colon + 1);
+    let digits = after.length > 0;
+    for (let i = 0; i < after.length; i += 1) {
+      const code = after.charCodeAt(i);
+      if (code < 48 || code > 57) { digits = false; break; }
+    }
+    if (digits) return 'https://' + text;
+    if (head.charAt(0) === '[' && head.charAt(head.length - 1) === ']') return 'https://' + text;
+    return head.indexOf('@') > colon ? 'https://' + text : text;
+  }
+
+  function renderQuickLinkButtons() {
+    const group = $('quickLinksGroup');
+    group.textContent = '';
+    const usable = quickLinks.filter((link) => link && isValidQuickLinkUrl(link.url));
+    for (const link of usable) {
+      const button = document.createElement('button');
+      button.className = 'secondary';
+      button.type = 'button';
+      button.textContent = link.name;
+      button.title = link.url;
+      button.addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: link.url }));
+      group.appendChild(button);
+    }
+    group.toggleAttribute('hidden', usable.length === 0);
+  }
+
+  function renderQuickLinkMessage(message) {
+    $('quickLinkMessage').textContent = message || '';
+  }
+
+  // A row asking to be deleted confirms in place. The webview has no working window.confirm -
+  // it is a no-op that answers undefined, so the old dialog silently said no and the button
+  // appeared to do nothing at all.
+  let pendingDelete = null;
+  // The form doubles as an editor: set when it is changing an existing entry rather than
+  // adding one. Declared up here because rendering a row reads it.
+  let editingQuickLink = null;
+
+  function sameLink(a, b) {
+    return !!a && !!b && a.name === b.name && a.url === b.url;
+  }
+
+  function renderQuickLinkList() {
+    const list = $('quickLinkList');
+    list.textContent = '';
+    if (!quickLinks.length) {
+      list.className = 'agentbridge-quick-link-list empty';
+      list.textContent = t('quickLinksEmpty');
+      return;
+    }
+    list.className = 'agentbridge-quick-link-list';
+    for (const link of quickLinks) {
+      const row = document.createElement('div');
+      row.className = 'agentbridge-quick-link-row';
+      const text = document.createElement('div');
+      text.className = 'agentbridge-quick-link-text';
+      const name = document.createElement('span');
+      name.className = 'agentbridge-quick-link-name-text';
+      name.textContent = link.name;
+      const url = document.createElement('span');
+      url.className = 'agentbridge-quick-link-url-text';
+      url.textContent = link.url;
+      text.appendChild(name);
+      text.appendChild(url);
+      const actions = document.createElement('div');
+      actions.className = 'agentbridge-quick-link-actions';
+      const openButton = document.createElement('button');
+      openButton.className = 'secondary';
+      openButton.type = 'button';
+      openButton.textContent = t('quickLinkOpen');
+      openButton.title = link.url;
+      openButton.addEventListener('click', () => vscode.postMessage({ type: 'openExternal', url: link.url }));
+      actions.appendChild(openButton);
+      if (sameLink(pendingDelete, link)) {
+        const detail = t('quickLinkDeleteConfirm', link.name) + ' ' + t('quickLinkDeleteConfirmDetail');
+        const confirmButton = document.createElement('button');
+        confirmButton.className = 'secondary';
+        confirmButton.type = 'button';
+        confirmButton.textContent = t('quickLinkConfirmDelete');
+        confirmButton.title = detail;
+        confirmButton.addEventListener('click', () => {
+          pendingDelete = null;
+          vscode.postMessage({ type: 'removeQuickLink', name: link.name, url: link.url });
+        });
+        const cancelButton = document.createElement('button');
+        cancelButton.className = 'secondary';
+        cancelButton.type = 'button';
+        cancelButton.textContent = t('quickLinkCancel');
+        cancelButton.addEventListener('click', () => {
+          pendingDelete = null;
+          renderQuickLinkList();
+        });
+        actions.appendChild(confirmButton);
+        actions.appendChild(cancelButton);
+      } else {
+        const editButton = document.createElement('button');
+        editButton.className = 'secondary';
+        editButton.type = 'button';
+        editButton.textContent = t('quickLinkEdit');
+        editButton.addEventListener('click', () => startEditingQuickLink(link));
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'secondary';
+        deleteButton.type = 'button';
+        deleteButton.textContent = t('quickLinkDelete');
+        deleteButton.addEventListener('click', () => {
+          pendingDelete = { name: link.name, url: link.url };
+          renderQuickLinkList();
+        });
+        actions.appendChild(editButton);
+        actions.appendChild(deleteButton);
+      }
+      row.appendChild(text);
+      row.appendChild(actions);
+      list.appendChild(row);
+    }
+  }
+
+  function applyQuickLinks(links) {
+    quickLinks = Array.isArray(links) ? links.filter((link) => link && typeof link.name === 'string' && isValidQuickLinkUrl(link.url)) : [];
+    renderQuickLinkButtons();
+    renderQuickLinkList();
+  }
+
+  let quickLinkAddPending = false;
+  function startEditingQuickLink(link) {
+    editingQuickLink = { name: link.name, url: link.url };
+    pendingDelete = null;
+    $('quickLinkNameInput').value = link.name;
+    $('quickLinkUrlInput').value = link.url;
+    renderQuickLinkMessage('');
+    setQuickLinkFormMode();
+    renderQuickLinkList();
+    $('quickLinkNameInput').focus();
+  }
+
+  function cancelQuickLinkEdit() {
+    editingQuickLink = null;
+    $('quickLinkNameInput').value = '';
+    $('quickLinkUrlInput').value = '';
+    renderQuickLinkMessage('');
+    setQuickLinkFormMode();
+  }
+
+  function setQuickLinkFormMode() {
+    $('quickLinkAddButton').textContent = editingQuickLink ? t('quickLinkSave') : '＋ ' + t('quickLinkAdd');
+    $('quickLinkCancelButton').toggleAttribute('hidden', !editingQuickLink);
+    const hint = $('quickLinkEditHint');
+    hint.textContent = editingQuickLink ? t('quickLinkEditing', editingQuickLink.name) : '';
+    hint.toggleAttribute('hidden', !editingQuickLink);
+  }
+
+  function submitQuickLink() {
+    const nameInput = $('quickLinkNameInput');
+    const urlInput = $('quickLinkUrlInput');
+    const name = nameInput.value.trim().slice(0, 40);
+    const url = normalizeQuickLinkUrl(urlInput.value).slice(0, 500);
+    // Show the assumed scheme before it is saved, so the form states where the shortcut will go.
+    urlInput.value = url;
+    if (!name) {
+      renderQuickLinkMessage(t('quickLinkNameRequired'));
+      nameInput.focus();
+      return;
+    }
+    if (!isValidQuickLinkUrl(url)) {
+      renderQuickLinkMessage(t('quickLinkUrlInvalid'));
+      urlInput.focus();
+      return;
+    }
+    // The entry being edited may keep its own address; only another entry holding it is a clash.
+    if (quickLinks.some((link) => link.url.toLowerCase() === url.toLowerCase()
+      && (!editingQuickLink || link.url !== editingQuickLink.url))) {
+      renderQuickLinkMessage(t('quickLinkUrlDuplicate'));
+      urlInput.focus();
+      return;
+    }
+    // Inputs clear when the host echoes the new list back, so a failed save keeps the draft.
+    quickLinkAddPending = true;
+    renderQuickLinkMessage('');
+    if (editingQuickLink) {
+      vscode.postMessage({ type: 'updateQuickLink', name: editingQuickLink.name, url: editingQuickLink.url, newName: name, newUrl: url });
+    } else {
+      vscode.postMessage({ type: 'addQuickLink', name, url });
+    }
+  }
+
+  $('quickLinkAddButton').addEventListener('click', submitQuickLink);
+  $('quickLinkCancelButton').addEventListener('click', cancelQuickLinkEdit);
+  for (const input of ['quickLinkNameInput', 'quickLinkUrlInput']) {
+    $(input).addEventListener('input', () => renderQuickLinkMessage(''));
+    $(input).addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submitQuickLink();
+      }
+    });
+  }
+  applyQuickLinks(quickLinks);
   $('copyPromptButton').addEventListener('click', () => vscode.postMessage({ type: 'copyPrompt' }));
   $('checkButton').addEventListener('click', () => {
     if (!lastStatus || busy || lastStatus.tunnelChecking || lastStatus.cloudflaredInstalling || lastStatus.state === 'running' || lastStatus.state === 'starting') return;
@@ -2233,12 +2773,12 @@ private renderHtml(advancedOpen = false): string {
     const nextLanguage = select.value;
     if (namedTunnelInputDirty) {
       select.value = currentLanguagePreference;
-      window.alert(t('saveNamedTunnelBeforeLanguageChange'));
+      setLanguageStatus(t('saveNamedTunnelBeforeLanguageChange'));
       return;
     }
     if (trustedBrowserOriginsInputDirty) {
       select.value = currentLanguagePreference;
-      window.alert(t('saveTrustedBrowserOriginsBeforeLanguageChange'));
+      setLanguageStatus(t('saveTrustedBrowserOriginsBeforeLanguageChange'));
       return;
     }
     if (select.disabled || busy || installingCloudflared || (lastStatus && lastStatus.tunnelChecking === true)) {
@@ -2247,7 +2787,8 @@ private renderHtml(advancedOpen = false): string {
     }
     languageChanging = true;
     updateControls();
-    vscode.postMessage({ type: 'setLanguage', value: nextLanguage, advancedOpen: $('advancedCard').open });
+    const activeTab = $('tabSession').classList.contains('active') ? 'session' : 'config';
+    vscode.postMessage({ type: 'setLanguage', value: nextLanguage, advancedOpen: $('advancedCard').open, activeTab });
   });
   $('trustedBrowserOriginsSaveButton').addEventListener('click', () => {
     if (busy) return;
@@ -2289,11 +2830,20 @@ private renderHtml(advancedOpen = false): string {
   $('saveNamedTunnelButton').addEventListener('click', saveNamedTunnel);
   $('clearNamedTunnelTokenButton').addEventListener('click', () => {
     if (busy || !lastStatus || !lastStatus.namedTunnelTokenConfigured) return;
-    if (window.confirm(t('confirmClearToken'))) {
-      busy = true;
-      updateControls();
-      vscode.postMessage({ type: 'clearNamedTunnelToken' });
-    }
+    pendingClearToken = true;
+    renderClearTokenConfirm();
+  });
+  $('clearTokenConfirmButton').addEventListener('click', () => {
+    if (busy || !lastStatus || !lastStatus.namedTunnelTokenConfigured) return;
+    pendingClearToken = false;
+    renderClearTokenConfirm();
+    busy = true;
+    updateControls();
+    vscode.postMessage({ type: 'clearNamedTunnelToken' });
+  });
+  $('clearTokenCancelButton').addEventListener('click', () => {
+    pendingClearToken = false;
+    renderClearTokenConfirm();
   });
   document.querySelectorAll('.agentbridge-command-row button[data-copy]').forEach((button) => {
     button.addEventListener('click', () => vscode.postMessage({ type: 'copy', text: button.getAttribute('data-copy') }));
@@ -2384,6 +2934,19 @@ private renderHtml(advancedOpen = false): string {
         } else {
           applyTrustedBrowserOriginsSnapshot(snapshot, false);
         }
+      }
+    } else if (message && message.type === 'quickLinksChanged' && Array.isArray(message.links)) {
+      applyQuickLinks(message.links);
+      if (quickLinkAddPending) {
+        quickLinkAddPending = false;
+        // Saving an edit leaves the form too: the host has the entry now, and a form still
+        // holding it would save twice.
+        editingQuickLink = null;
+        pendingDelete = null;
+        $('quickLinkNameInput').value = '';
+        $('quickLinkUrlInput').value = '';
+        renderQuickLinkMessage('');
+        setQuickLinkFormMode();
       }
     } else if (message && message.type === 'operationFinished') {
       if (message.operation === 'configureNamedTunnel' && message.succeeded === true) {

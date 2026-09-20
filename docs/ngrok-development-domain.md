@@ -117,6 +117,9 @@ curl.exe -i -X POST "https://your-name.ngrok-free.dev/mcp/<routeToken>" -H "Cont
 **启动时报域名或授权错误**  
 确认固定域名和 Authtoken 属于同一个 ngrok 账号，并查看 `AgentBridge: Show Output` 中的 `[ngrok]` 日志。套餐额度和可用域名以 ngrok dashboard 当前显示为准。
 
+**启动时报 `ERR_NGROK_9009`（或提示 Pay-as-you-go）**  
+ngrok 免费版拒绝通过 HTTP/S 代理连接。AgentBridge 因此会在启动 ngrok 前剥除全部 `*_PROXY` 变量，所以出现该错误通常意味着代理配置在 AgentBridge 控制不到的地方：检查 ngrok 配置文件（例如 `%LOCALAPPDATA%\ngrok\ngrok.yml`）中的 `proxy_url` 条目并删除，或把代理客户端切换为 TUN 模式并关闭系统代理。若你使用 ngrok Pay-as-you-go 套餐并希望 ngrok 复用该代理，可开启 `agentbridge.bridge.ngrokUseHttpProxy`。
+
 **网页端仍看不到最新工具**  
 客户端可能缓存了 `tools/list`。ChatGPT 网页版需要在 Connector 设置中 Refresh，或 Remove 后重新 Add；仅 Stop + Start Bridge 不够。
 

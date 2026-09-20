@@ -161,6 +161,12 @@
           "scope": "application",
           "description": "Reserved ngrok HTTPS hostname used by the Bridge, for example your-name.ngrok-free.dev. Stored as an application-wide user setting so a workspace cannot override the Bridge's public identity."
         },
+        "agentbridge.bridge.ngrokUseHttpProxy": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Let the ngrok tunnel process connect through the resolved HTTP proxy. Off by default because ngrok Free rejects HTTP proxies with ERR_NGROK_9009, so inherited *_PROXY variables are stripped. Enable only on an ngrok Pay-as-you-go plan."
+        },
         "agentbridge.bridge.cloudflareNamedDomain": {
           "type": "string",
           "default": "",
@@ -195,13 +201,37 @@
             "external"
           ],
           "enumDescriptions": [
-            "ChatGPT and arena.ai open inside the VS Code Simple Browser; other external links jump to the OS default browser.",
+            "ChatGPT, arena.ai, workbuddy.cn, trae.cn, qwenwork.cn, and manus.im open inside the VS Code Simple Browser; other external links jump to the OS default browser.",
             "Every external link opens inside the VS Code Simple Browser, including Cloudflare/ngrok dashboards. OAuth login flows may be blocked by iframe X-Frame-Options restrictions.",
             "Every external link jumps to the OS default browser. Equivalent to the pre-stage-14 behavior."
           ],
           "default": "auto",
           "scope": "machine-overridable",
           "description": "Decides how external URL links clicked in the AgentBridge panel (ChatGPT/Arena buttons, Cloudflare/ngrok dashboard buttons, etc.) are opened."
+        },
+        "agentbridge.bridge.quickLinks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "url": {
+                "type": "string",
+                "maxLength": 500
+              }
+            },
+            "required": [
+              "name",
+              "url"
+            ],
+            "additionalProperties": false
+          },
+          "default": [],
+          "scope": "application",
+          "description": "Quick-open shortcuts shown as buttons at the top of the AgentBridge panel and opened like the other site buttons. Each entry needs a name and an http(s) URL; duplicate addresses are ignored."
         },
         "agentbridge.bridge.tunnelProvider": {
           "type": "string",
@@ -241,6 +271,37 @@
           "scope": "application",
           "description": "Automatically start the Bridge after the extension activates."
         },
+        "agentbridge.bridge.startupTimeoutMs": {
+          "type": "integer",
+          "default": 20000,
+          "minimum": 5000,
+          "maximum": 120000,
+          "scope": "application",
+          "description": "How long to wait for the public Bridge health endpoint to become reachable while starting a tunnel, in milliseconds. Raise it on slow networks; deterministic failures (DNS, refused/reset connections, TLS interception) still abort early instead of waiting the full timeout."
+        },
+        "agentbridge.files.veryLargeFileBytes": {
+          "type": "integer",
+          "default": 8388608,
+          "minimum": 262144,
+          "maximum": 134217728,
+          "scope": "application",
+          "description": "Size in bytes above which read_files requires an explicit start_line/end_line instead of reading a file whole. Generated bundles, lockfiles and large configs routinely exceed the previous 2 MB default, and the bytes actually returned stay capped independently."
+        },
+        "agentbridge.files.imageMaxBytes": {
+          "type": "integer",
+          "default": 5242880,
+          "minimum": 262144,
+          "maximum": 134217728,
+          "scope": "application",
+          "description": "Size in bytes above which read_image_file refuses to decode an image. The image is handed to the model as base64, so this is also a ceiling on what one call puts into a conversation; the default is 5 MB."
+        },
+        "agentbridge.files.excludeGlobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "scope": "application",
+          "description": "Extra glob patterns to exclude from find_files and search_files, added to the built-in excludes (.git, node_modules, dist, build, coverage and similar) rather than replacing them. Uses ripgrep glob syntax, for example **/generated/**."
+        },
         "agentbridge.bridge.readOnlyMode": {
           "type": "boolean",
           "default": false,
@@ -265,14 +326,15 @@
   "scripts": {
     "build": "node build.mjs",
     "build:watch": "node build.mjs --watch",
-    "test": "node tests/run-tests.mjs"
+    "test": "node tests/run-tests.mjs",
+    "package": "node build.mjs && vsce package --no-dependencies"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@vscode/ripgrep": "^1.0.4"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^20.19.0",
     "@types/vscode": "^1.95.0",
     "@vscode/vsce": "3.9.2",
     "esbuild": "^0.28.2",

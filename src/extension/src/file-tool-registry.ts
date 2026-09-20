@@ -11,7 +11,7 @@ export const APPLY_PATCH_TOOL = {
     "Use this as the primary workspace edit tool. Prefer one apply_patch call containing related file edits instead of many small write calls.",
     "Patch syntax starts with '*** Begin Patch' and ends with '*** End Patch'. Supported directives are '*** Update File:', optional immediate '*** Move to:', '*** Add File:', and '*** Delete File:'. Update hunks start with '@@' and use unchanged lines prefixed by one space, removed lines prefixed by '-', and added lines prefixed by '+'.",
     "Update hunk old/context lines must match exactly and uniquely. If context is stale or ambiguous the patch fails without partial application; re-read the file and regenerate the patch.",
-    "When read_files has returned version hashes for files you are modifying, pass them in expected_versions keyed by file path. A mismatch returns STALE_FILE instead of editing a file that changed after it was read.",
+    "Every file you update or delete must carry an expected_versions entry holding the sha256 version read_files returned for it: a mismatch returns STALE_FILE and a missing entry returns MISSING_EXPECTED_VERSION, so an edit is never applied over content you have not read. Files you only add need no version.",
     "Returns the actual unified diff produced by the applied workspace changes.",
   ].join(" "),
   inputSchema: {
@@ -20,12 +20,12 @@ export const APPLY_PATCH_TOOL = {
       patch: {
         type: "string",
         minLength: 1,
-        description: "Structured patch text using *** Begin Patch / *** End Patch and Add/Update/Delete/Move directives.",
+        description: "Structured patch text using *** Begin Patch / *** End Patch. Sections are *** Add File: <path>, *** Update File: <path> (with @@ hunks) and *** Delete File: <path>; a rename is an *** Update File: <path> followed on the next line by *** Move to: <new path>, not a directive of its own. A path may appear once.",
       },
       expected_versions: {
         type: "object",
         additionalProperties: { type: "string", pattern: "^sha256:" },
-        description: "Optional map from existing file paths to sha256:... versions previously returned by read_files. Strongly recommended whenever those versions are available.",
+        description: "Map from file path to the sha256:... version read_files returned. Required for every '*** Update File:' and '*** Delete File:' target; omitted for files the patch only adds.",
       },
     },
     required: ["patch"],
@@ -87,7 +87,7 @@ export const READ_IMAGE_FILE_TOOL = {
     "Use this to inspect or reason about screenshots, charts, UI designs, exported diagrams, error dialogs, or other raster images.",
     "Supported MIME types: image/png, image/jpeg, image/gif, image/webp, image/bmp.",
     "SVG is XML text — use read_files for SVG, not this tool.",
-    "Hard file-size limit: 5 MB. Larger images must be reduced before reading.",
+    `Hard file-size limit: 5 MB by default (the agentbridge.files.imageMaxBytes setting). Larger images must be reduced before reading.`,
     "Returns a short text summary (path, MIME, size) followed by one image content item for clients that support image input.",
     "Paths are workspace-relative; absolute paths are accepted only when they resolve inside the workspace.",
   ].join(" "),
@@ -114,6 +114,7 @@ export const FIND_FILES_TOOL = {
     "Patterns are evaluated within path, which defaults to the workspace root. Results are files only, never directories.",
     "By default matching is case-insensitive, ignored/common generated directories and hidden paths are skipped, and results are sorted by modification time newest first.",
     "Use exclude for additional path globs, include_hidden/no_ignore only when those files are intentionally needed, and sort='path_asc' when deterministic path order matters.",
+    "Every result names the filters that were in force, because ignored and hidden paths are skipped by default. An empty result is not proof the file is absent, and neither is a non-empty one: retry with no_ignore=true and/or include_hidden=true before writing the file from scratch.",
     "Results are hard-bounded: at most 5000 candidate paths are collected internally before sorting, and by default only 100 paths are returned (hard maximum 500). If truncated=true, narrow path/patterns before increasing max_results.",
   ].join(" "),
   inputSchema: {
@@ -152,7 +153,7 @@ export const FIND_FILES_TOOL = {
         type: "integer",
         minimum: 1,
         maximum: 500,
-        description: "Maximum file paths returned. Defaults to 100; hard maximum 500.",
+        description: "Maximum file paths returned. Defaults to 100; hard maximum 500. A value outside the range is brought into it, and the answer names what was used.",
       },
       sort: {
         type: "string",
@@ -175,7 +176,7 @@ export const SEARCH_FILES_TOOL = {
     "Use path to narrow the directory/file scope and include/exclude glob arrays to filter files.",
     "context_lines returns nearby lines for disambiguation; keep it small because search is for locating code, not reading whole files.",
     "Results are hard-bounded by per-file/global/output budgets. If truncated=true, narrow the query and search again.",
-    "By default ignored/common generated directories and hidden paths are skipped.",
+    "By default ignored/common generated directories and hidden paths are skipped, and every result names the filters that were in force: an empty result is not proof the text is absent, and neither is a non-empty one. Retry with no_ignore=true and/or include_hidden=true before concluding otherwise.",
   ].join(" "),
   inputSchema: {
     type: "object",
@@ -211,19 +212,19 @@ export const SEARCH_FILES_TOOL = {
         type: "integer",
         minimum: 0,
         maximum: 5,
-        description: "Surrounding lines on each side of each match. Defaults to 1, maximum 5.",
+        description: "Surrounding lines on each side of each match. Defaults to 1, maximum 5. A value outside the range is brought into it, and the answer names what was used.",
       },
       max_results: {
         type: "integer",
         minimum: 1,
         maximum: 500,
-        description: "Maximum matches returned across the call. Defaults to 100; hard maximum 500.",
+        description: "Maximum matches returned across the call. Defaults to 100; hard maximum 500. A value outside the range is brought into it, and the answer names what was used.",
       },
       max_matches_per_file: {
         type: "integer",
         minimum: 1,
         maximum: 100,
-        description: "Maximum matches returned from one file. Defaults to 20; hard maximum 100.",
+        description: "Maximum matches returned from one file. Defaults to 20; hard maximum 100. A value outside the range is brought into it, and the answer names what was used.",
       },
       no_ignore: {
         type: "boolean",
@@ -246,6 +247,12 @@ export type FileToolName = (typeof FILE_TOOL_DEFINITIONS)[number]["name"];
 export interface FileToolInvocationContext {
   workspaceRoots: string[];
   signal?: AbortSignal;
+  /** Extra globs for find_files and search_files, added to the built-in excludes. */
+  excludeGlobs?: readonly string[];
+  /** read_files implicit-read ceiling; left unset to keep the built-in default. */
+  veryLargeFileBytes?: number;
+  /** read_image_file size ceiling; left unset to keep the built-in default. */
+  imageMaxBytes?: number;
 }
 
 export interface FileToolImagePayload {
@@ -258,6 +265,8 @@ export interface FileToolInvocationResult {
   text: string;
   structuredContent: unknown;
   images?: FileToolImagePayload[];
+  /** Set when the call itself failed. A per-file status inside a successful answer is not this. */
+  isError?: boolean;
 }
 
 function parseApplyPatchInput(value: unknown): ApplyPatchInput {
@@ -328,9 +337,10 @@ function parseFindFilesInput(value: unknown): FindFilesInput {
   for (const key of ["case_sensitive", "no_ignore", "include_hidden"] as const) {
     if (row[key] !== undefined && typeof row[key] !== "boolean") throw new Error(`INVALID_ARGUMENT: ${key} must be a boolean when provided.`);
   }
-  if (row.max_results !== undefined && !Number.isInteger(row.max_results)) {
-    throw new Error("INVALID_ARGUMENT: max_results must be an integer when provided.");
-  }
+  // max_results is not checked for being an integer here: boundedInteger answers a value that
+  // is not one with the default and says so, which is what every other tool does, and refusing
+  // it here would make the two file tools the only ones that answer a mistyped number with an
+  // error instead of with the number they used.
   if (row.sort !== undefined && row.sort !== "modified_desc" && row.sort !== "path_asc") {
     throw new Error("INVALID_ARGUMENT: sort must be 'modified_desc' or 'path_asc'.");
   }
@@ -371,12 +381,10 @@ function parseSearchFilesInput(value: unknown): SearchFilesInput {
       throw new Error(`INVALID_ARGUMENT: ${key} must be an array of non-empty strings when provided.`);
     }
   }
-  for (const key of ["context_lines", "max_results", "max_matches_per_file"] as const) {
-    if (row[key] !== undefined && !Number.isInteger(row[key])) {
-      throw new Error(`INVALID_ARGUMENT: ${key} must be an integer when provided.`);
-    }
-  }
-
+  // These three are not checked for being integers, either: boundedInteger answers a value that
+  // is not one with the default and says so, which is what every other tool does, and refusing
+  // it here would make the file tools the only ones that answer a mistyped number with an error
+  // instead of with the number they used.
   return {
     pattern: row.pattern,
     path: row.path as string | undefined,
@@ -422,6 +430,7 @@ export async function invokeFileTool(
     const result = await findFiles(parseFindFilesInput(args), {
       workspaceRoots: context.workspaceRoots,
       signal: context.signal,
+      config: { extraExcludes: context.excludeGlobs },
     });
     return { text: formatFindFilesForModel(result), structuredContent: result };
   }
@@ -430,6 +439,11 @@ export async function invokeFileTool(
     const result = await readFiles(parseReadFilesInput(args), {
       workspaceRoots: context.workspaceRoots,
       signal: context.signal,
+      // Only override when the caller actually supplied a value: spreading an undefined
+      // ceiling into the defaults would silently disable the limit.
+      config: context.veryLargeFileBytes === undefined
+        ? undefined
+        : { veryLargeFileBytes: context.veryLargeFileBytes },
     });
     return { text: formatReadFilesForModel(result), structuredContent: result };
   }
@@ -438,6 +452,7 @@ export async function invokeFileTool(
     const result = await readImageFile(parseReadImageFileInput(args), {
       workspaceRoots: context.workspaceRoots,
       signal: context.signal,
+      config: context.imageMaxBytes === undefined ? undefined : { maxBytes: context.imageMaxBytes },
     });
     if (result.status === "success" && result.success) {
       return {
@@ -446,9 +461,14 @@ export async function invokeFileTool(
         images: [{ base64: result.success.base64, mimeType: result.success.mimeType, sizeBytes: result.success.sizeBytes }],
       };
     }
+    // One file, one answer: there is no other file in the call to succeed alongside it, so a
+    // failure here is the call failing and not one row of a report. Saying so in the text
+    // alone let a caller that trusts isError read "ERROR ..." and carry on as if it had the
+    // image.
     return {
       text: formatReadImageFileForModel(result),
       structuredContent: { status: "error", path: result.path, error: result.error },
+      isError: true,
     };
   }
 
@@ -456,6 +476,7 @@ export async function invokeFileTool(
     const result = await searchFiles(parseSearchFilesInput(args), {
       workspaceRoots: context.workspaceRoots,
       signal: context.signal,
+      config: { extraExcludes: context.excludeGlobs },
     });
     return { text: formatSearchFilesForModel(result), structuredContent: result };
   }
