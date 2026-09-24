@@ -20,15 +20,17 @@ Published to the [Visual Studio Marketplace](https://marketplace.visualstudio.co
 
 ## Features
 
-- **14 MCP tools** spanning:
+- **15 MCP tools** spanning:
   - **File system** — `read_files`, `apply_patch`, `search_files`, `find_files`, `list_directory`, `read_image_file`
   - **Terminal** — `run_command`, `get_command_output`, `send_command_input`, `terminate_command`
   - **LSP / diagnostics** — `get_diagnostics`, `lsp`
+  - **Skills** — `load_skill`
   - **Bridge state** — `set_todos`, `report_progress`
 - **3 tunnel providers** — Cloudflare Quick Tunnel (default, zero-config), Cloudflare Named Tunnel (stable hostname), ngrok (reserved domain).
 - **Cross-platform cloudflared detection and installation** — one-click Winget installation on Windows and Homebrew installation on macOS; Linux checks PATH, `/usr/bin`, and `/usr/local/bin` while keeping installation manual through Cloudflare's official instructions.
 - **Managed shell support matrix** — PowerShell 5.1 / PowerShell 7+ (Windows), bash (Linux) and zsh (macOS) fully support `run_command` via per-prompt protocol hooks; cmd, sh and fish are rejected up front with a clear error instead of timing out. The syntax hint shown to the AI updates automatically when you switch shells.
 - **Vision-capable `read_image_file`** — returns MCP `ImageContent` blocks so vision-capable clients see pixels natively. PNG / JPEG / GIF / WebP / BMP are detected from the file bytes; large images are downscaled to a 2000 px long edge and at most 4.5 MB of base64 (GIF and BMP become PNG), and images that already fit are sent unchanged. No file-size limit; images above 64 megapixels are rejected. SVG stays text via `read_files`.
+- **Local Agent Skills** — folders with a `SKILL.md` in `.agents/skills` of each workspace folder or in `~/.agents/skills` (the location shared by opencode, DeepSeek Harness, and other agents). As in those harnesses, only each skill's name and description reach the AI up front, listed in the `load_skill` tool description; `load_skill` then loads the instructions, and the skill's other files, when a task matches. The list is rescanned on every new connection. Turn it off with `agentbridge.bridge.skillsEnabled`.
 - **External link routing** — `agentbridge.bridge.openInternalBrowser` (`auto` / `all` / `external`) controls whether ChatGPT / Arena open inside VS Code's Simple Browser or in the OS default browser. Default `auto` matches the original in-editor experience.
 - **Bridge panel** — Activity Bar view with tunnel provider radio, status hero, continuous public-endpoint health, persistent toggle, sessions timeline with mini diffs, and an advanced card covering interface language, managed shell, link routing, copy-MCP-prompt, and reset routeToken.
 - **Auto-start** — flip `agentbridge.bridge.persistentMode` to bring the Bridge up on extension activation.
@@ -127,6 +129,7 @@ The interface-language override is `agentbridge.language`; Bridge and tunnel set
 | `managedShell.unix` | string | `""` | `machine-overridable` | Absolute path or PATH-resolvable name (e.g. `/bin/zsh` or `bash`); empty = `/bin/bash` default (or `/bin/sh` when bash is unavailable) |
 | `openInternalBrowser` | enum | `auto` | `machine-overridable` | `auto` / `all` / `external`; controls whether external links open in VS Code Simple Browser or OS default browser |
 | `persistentMode` | boolean | `false` | `application` | Start the Bridge automatically on extension activation |
+| `skillsEnabled` | boolean | `true` | `application` | Offer the skills in `.agents/skills` (workspace folders) and `~/.agents/skills` through `load_skill`; when off, `load_skill` fails with `SKILLS_DISABLED` |
 
 Interface language, managed shell, and link-routing controls also live on the Bridge panel's **advanced** card.
 

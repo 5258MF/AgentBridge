@@ -2,9 +2,9 @@
 
 <!-- Generated from the tool definitions by `npm run tool-catalog`. Do not edit by hand: tests/tool-catalog.test.ts fails when this file is stale. -->
 
-This is exactly what MCP clients receive from `tools/list`. In `run_command`, `${RUNTIME_SHELL_DESCRIPTION}` and `${RUNTIME_SHELL_SYNTAX_HINT}` are replaced at runtime with the configured managed shell.
+This is exactly what MCP clients receive from `tools/list`. In `run_command`, `${RUNTIME_SHELL_DESCRIPTION}` and `${RUNTIME_SHELL_SYNTAX_HINT}` are replaced at runtime with the configured managed shell. In `load_skill`, `${RUNTIME_SKILL_CATALOG}` is replaced with the skills found on this machine.
 
-14 tools, listed in both Plan and Build mode. In Plan mode (read-only), 3 are blocked at call time and `run_command` only runs allowlisted read-only commands.
+15 tools, listed in both Plan and Build mode. In Plan mode (read-only), 3 are blocked at call time and `run_command` only runs allowlisted read-only commands.
 
 | Tool | Plan mode | Required parameters |
 |---|---|---|
@@ -20,6 +20,7 @@ This is exactly what MCP clients receive from `tools/list`. In `run_command`, `$
 | [`terminate_command`](#terminate_command) | blocked | `command_id` |
 | [`get_diagnostics`](#get_diagnostics) | available | (none) |
 | [`lsp`](#lsp) | available | `operation` |
+| [`load_skill`](#load_skill) | available | (none) |
 | [`set_todos`](#set_todos) | available | `todos` |
 | [`report_progress`](#report_progress) | available | `message` |
 
@@ -268,6 +269,26 @@ Navigate code by symbols using the language services running in VS Code.
 | `query` | string | no |  |  | Symbol query. Required for workspace_symbols. |
 | `include_declaration` | boolean | no | `true` |  | For references, include the symbol declaration/definition when present. |
 | `max_results` | integer | no |  | min 1; max 500 | Maximum returned semantic results. Operation-specific defaults are used when omitted. |
+
+<a id="load_skill"></a>
+## `load_skill`
+
+```text
+Load an Agent Skill: task-specific instructions kept in a SKILL.md file on this machine.
+
+- When the task matches a skill listed below, load it before starting and follow its instructions.
+- Returns the SKILL.md instructions, the skill directory, and the other files in it. Relative paths in a skill are relative to that directory.
+- Pass file to read another text file of the skill, such as a reference document; run its scripts with run_command.
+- Omit name to list the skills again, including ones added after this list was sent.
+- Skills come from .agents/skills in each workspace folder and from ~/.agents/skills; a workspace skill wins over a user skill with the same name.
+
+${RUNTIME_SKILL_CATALOG}
+```
+
+| Parameter | Type | Required | Default | Constraints | Description |
+|---|---|---|---|---|---|
+| `name` | string | no |  | min length 1; max length 64 | Skill name from the list. Omit to list all skills. |
+| `file` | string | no |  | min length 1 | Optional path of another file inside the skill, relative to the skill directory, e.g. references/api.md. Requires name. |
 
 <a id="set_todos"></a>
 ## `set_todos`

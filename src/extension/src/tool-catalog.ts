@@ -88,7 +88,7 @@ export function renderToolCatalog(tools: readonly CatalogTool[], options: Catalo
     "",
     "<!-- Generated from the tool definitions by `npm run tool-catalog`. Do not edit by hand: tests/tool-catalog.test.ts fails when this file is stale. -->",
     "",
-    "This is exactly what MCP clients receive from `tools/list`. In `run_command`, `${RUNTIME_SHELL_DESCRIPTION}` and `${RUNTIME_SHELL_SYNTAX_HINT}` are replaced at runtime with the configured managed shell.",
+    "This is exactly what MCP clients receive from `tools/list`. In `run_command`, `${RUNTIME_SHELL_DESCRIPTION}` and `${RUNTIME_SHELL_SYNTAX_HINT}` are replaced at runtime with the configured managed shell. In `load_skill`, `${RUNTIME_SKILL_CATALOG}` is replaced with the skills found on this machine.",
     "",
     `${tools.length} tools, listed in both Plan and Build mode. In Plan mode (read-only), ${tools.filter((tool) => options.readOnlyBlocked.has(tool.name)).length} are blocked at call time and ${tools.filter((tool) => options.planRestricted.has(tool.name)).map((tool) => `\`${tool.name}\``).join(", ")} only runs allowlisted read-only commands.`,
     "",

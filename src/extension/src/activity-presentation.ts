@@ -446,5 +446,23 @@ export function bridgePresentation(
     return { kind: "lsp", title: `LSP · ${operation}`, subtitle: resultSummary, items, input: undefined, output: isError ? output : hoverOutput };
   }
 
+  if (toolName === "load_skill") {
+    const name = typeof args.name === "string" && args.name.trim() ? args.name.trim() : undefined;
+    const file = typeof args.file === "string" && args.file.trim() ? args.file.trim() : undefined;
+    const source = typeof structured.source === "string" ? structured.source : undefined;
+    // Only workspace skills can be opened from the panel; user skills live outside the workspace.
+    const workspacePath = typeof structured.workspacePath === "string" ? structured.workspacePath : undefined;
+    const listed = Array.isArray(structured.skills) ? structured.skills.length : undefined;
+    return {
+      kind: "files",
+      title: !name ? "Listed skills" : file ? `Read skill file ${name}/${file}` : `Loaded skill ${name}`,
+      subtitle: isError ? "Skill load failed" : !name ? (listed !== undefined ? `${listed} skill${listed === 1 ? "" : "s"}` : undefined) : source,
+      files: workspacePath && !file ? [workspacePath] : undefined,
+      items: workspacePath && !file ? [{ kind: "file", path: workspacePath }] : undefined,
+      input: undefined,
+      output: isError ? output : undefined,
+    };
+  }
+
   return { kind: "generic", title: toolName, input, output };
 }

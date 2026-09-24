@@ -2,6 +2,7 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { isIPv4 } from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
@@ -14,6 +15,7 @@ import { getManagedShellChoice } from "./ide-tool-broker.js";
 import { managedShellExecutable, managedShellOverrideWarning } from "./ide-tool-broker.js";
 import type { IdeToolBroker } from "./ide-tool-broker.js";
 import { translate } from "./i18n.js";
+import { discoverSkills, LOAD_SKILL_TOOL, loadSkill, parseLoadSkillInput, renderLoadSkillDescription } from "./skills.js";
 import { formatSetTodosResult } from "./todo-format.js";
 import { formatToolError, ToolError } from "./tool-errors.js";
 import { asRecord, bridgePresentation, type BridgeActivity, type BridgeActivityPresentation, type BridgeTodo } from "./activity-presentation.js";
@@ -408,6 +410,8 @@ export class BridgeManager implements vscode.Disposable {
   private namedTunnelLocalPort = DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT;
   private routeToken = "";
   private readOnlyMode = false;
+  /** Home directory whose .agents/skills holds user skills; tests point it at a temp folder. */
+  private skillsHomeDir: string | undefined = os.homedir();
   private readonly sessions = new Map<string, McpSession>();
   private pendingInitializations = 0;
   private httpServer: HttpServer | undefined;
@@ -2677,20 +2681,7 @@ export class BridgeManager implements vscode.Disposable {
       },
     });
 
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const shell = getManagedShellChoice();
-      return {
-        // The same list in Plan and Build mode; see setReadOnlyMode.
-        tools: BRIDGE_TOOL_DEFINITIONS
-          .map((tool) => ({
-            name: tool.name,
-            description: tool.description
-              .replace("${RUNTIME_SHELL_DESCRIPTION}", shell.description)
-              .replace("${RUNTIME_SHELL_SYNTAX_HINT}", shell.syntaxHint),
-            inputSchema: tool.inputSchema,
-          })),
-      };
-    });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: await this.listToolsForClient() }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const toolName = request.params.name;
@@ -2708,6 +2699,45 @@ export class BridgeManager implements vscode.Disposable {
     };
 
     return { transport, server };
+  }
+
+  /**
+   * The tools/list result: the same tools in Plan and Build mode (see setReadOnlyMode), with the
+   * managed shell filled into run_command and the skills found right now into load_skill.
+   */
+  private async listToolsForClient(): Promise<Array<{ name: string; description: string; inputSchema: object }>> {
+    const shell = getManagedShellChoice();
+    const skillsEnabled = this.skillsEnabled();
+    let skillsDescription: string;
+    try {
+      const { skills, warnings } = skillsEnabled ? await discoverSkills(this.skillDiscoveryOptions()) : { skills: [], warnings: [] };
+      for (const warning of warnings) this.output.appendLine(`[bridge-skills] ${warning}`);
+      skillsDescription = renderLoadSkillDescription(skills, skillsEnabled);
+    } catch (error) {
+      this.output.appendLine(`[bridge-skills] discovery failed: ${error instanceof Error ? error.message : String(error)}`);
+      skillsDescription = renderLoadSkillDescription([], skillsEnabled);
+    }
+    return BRIDGE_TOOL_DEFINITIONS.map((tool) => ({
+      name: tool.name,
+      description: tool.name === LOAD_SKILL_TOOL.name
+        ? skillsDescription
+        : tool.description
+          .replace("${RUNTIME_SHELL_DESCRIPTION}", shell.description)
+          .replace("${RUNTIME_SHELL_SYNTAX_HINT}", shell.syntaxHint),
+      inputSchema: tool.inputSchema,
+    }));
+  }
+
+  private skillsEnabled(): boolean {
+    return vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("skillsEnabled", true) !== false;
+  }
+
+  /** Skill roots: .agents/skills in every workspace folder (none open is fine), then ~/.agents/skills. */
+  private skillDiscoveryOptions(): { workspaceRoots: string[]; homeDir?: string } {
+    return {
+      workspaceRoots: vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [],
+      homeDir: this.skillsHomeDir,
+    };
   }
 
   /**
@@ -2812,6 +2842,18 @@ export class BridgeManager implements vscode.Disposable {
           content,
           structuredContent: result.structuredContent as Record<string, unknown>,
         };
+      }
+
+      if (toolName === LOAD_SKILL_TOOL.name) {
+        const result = await loadSkill(parseLoadSkillInput(args), { ...this.skillDiscoveryOptions(), enabled: this.skillsEnabled() });
+        this.finishActivity(
+          activityId,
+          "completed",
+          Date.now() - startedAt,
+          undefined,
+          bridgePresentation(toolName, args, result.text, result.structuredContent),
+        );
+        return { content: [{ type: "text" as const, text: result.text }], structuredContent: result.structuredContent };
       }
 
       if (BRIDGE_EXCLUDED_TOOL_NAMES.has(toolName)) {

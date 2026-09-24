@@ -1,8 +1,10 @@
 // Model-facing text owned by the bridge server: MCP server instructions, Plan mode guidance and
 // notices, the READ_ONLY_MODE block errors, and the set_todos/report_progress tool definitions.
+// load_skill is defined in skills.ts.
 import { FILE_TOOL_DEFINITIONS } from "./file-tool-registry.js";
 import { BRIDGE_EXCLUDED_TOOL_NAMES, IDE_TOOL_DEFINITIONS } from "./ide-tool-definitions.js";
 import { checkPlanModeCommand, PLAN_MODE_COMMAND_SUMMARY } from "./plan-mode-commands.js";
+import { LOAD_SKILL_TOOL } from "./skills.js";
 import { formatToolError, ToolError } from "./tool-errors.js";
 
 export const MAX_TODOS = 24;
@@ -35,6 +37,7 @@ const INSTRUCTION_LINES: readonly InstructionLine[] = [
   { text: "- get_diagnostics after edits", readOnlyText: "- get_diagnostics to inspect current errors and warnings" },
   { text: "- run_command for builds and tests", readOnlyText: "- run_command for allowlisted read-only commands, tests, and builds" },
   { text: "- terminate_command for a hard stop when cooperative Ctrl+C does not stop a command", requires: ["terminate_command"] },
+  { text: "- load_skill to load a skill whose description matches the task" },
   { text: "- set_todos to maintain the complete task list for multi-step work" },
   { text: "- report_progress to report transient progress for the current task" },
   { text: "" },
@@ -50,6 +53,7 @@ const INSTRUCTION_LINES: readonly InstructionLine[] = [
   { text: "- Send an empty todo list when the task state should be cleared." },
   { text: "" },
   { text: "Tool guidance:" },
+  { text: "- Before starting a task, check the skills listed in the load_skill description; if one matches, load it and follow it." },
   { text: "- Prefer semantic navigation over broad text search when locating code symbols." },
   { text: "- Do not assume an empty LSP result means a symbol does not exist." },
   { text: "- Use search_files for exact text and lsp for symbols, definitions, references, and type information." },
@@ -125,6 +129,7 @@ export const BRIDGE_TOOL_DEFINITIONS = [
       description: tool.description,
       inputSchema: tool.inputSchema,
     })),
+  LOAD_SKILL_TOOL,
   SET_TODOS_TOOL,
   REPORT_PROGRESS_TOOL,
 ] as const;
