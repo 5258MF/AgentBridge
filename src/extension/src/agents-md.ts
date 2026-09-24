@@ -13,6 +13,8 @@
  * An MCP server cannot add to the client's system prompt. The baseline goes into the server
  * instructions and, because some clients never show those to the model, also in front of the
  * session's first tool result. Directory files ride on the tool result that reached them.
+ * Changes: like DeepSeek Harness, a file that changes, disappears, or newly appears after it was
+ * sent is reported in front of the next tool result (detectAgentsChanges).
  * Reads are synchronous: a handful of small files, and the session instructions are built
  * synchronously.
  */
@@ -49,7 +51,7 @@ export function agentsFileKey(file: string): string {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-function readAgentsFile(file: string): string | undefined {
+export function readAgentsFile(file: string): string | undefined {
   try {
     const stat = fs.statSync(file);
     if (!stat.isFile() || stat.size > MAX_SOURCE_BYTES) return undefined;
@@ -118,28 +120,13 @@ function isStrictlyInside(parent: string, child: string): boolean {
  * in `sent` yet, broad to specific. Paths may be absolute or relative to a workspace folder; a
  * relative path is resolved against the first folder where its parent directory exists.
  */
-export function directoryAgentsFiles(touched: readonly string[], workspaceRoots: readonly string[], sent: ReadonlySet<string>): AgentsFile[] {
+export function directoryAgentsFiles(touched: readonly string[], workspaceRoots: readonly string[], sent: { has(key: string): boolean }): AgentsFile[] {
   const files: AgentsFile[] = [];
   const seen = new Set<string>();
-  const roots = workspaceRoots.map((root) => path.resolve(root));
   for (const raw of touched) {
-    if (!raw) continue;
-    let absolute: string | undefined;
-    let root: string | undefined;
-    if (path.isAbsolute(raw)) {
-      absolute = path.resolve(raw);
-      root = roots.find((candidate) => isStrictlyInside(candidate, absolute!));
-    } else {
-      for (const candidate of roots) {
-        const resolved = path.resolve(candidate, raw);
-        if (isStrictlyInside(candidate, resolved) && exists(path.dirname(resolved))) {
-          absolute = resolved;
-          root = candidate;
-          break;
-        }
-      }
-    }
-    if (!absolute || !root) continue;
+    const resolved = resolveTouchedPath(raw, workspaceRoots);
+    if (!resolved) continue;
+    const { absolute, root } = resolved;
     const chain: string[] = [];
     for (let dir = path.dirname(absolute); isStrictlyInside(root, dir); dir = path.dirname(dir)) chain.unshift(dir);
     for (const dir of chain) {
@@ -152,6 +139,71 @@ export function directoryAgentsFiles(touched: readonly string[], workspaceRoots:
     }
   }
   return files;
+}
+
+/**
+ * A path from a tool result (absolute, or relative to a workspace folder) as an absolute path
+ * inside a workspace folder. A relative path goes to the first folder where its parent exists.
+ */
+export function resolveTouchedPath(raw: string, workspaceRoots: readonly string[]): { absolute: string; root: string } | undefined {
+  if (!raw) return undefined;
+  const roots = workspaceRoots.map((root) => path.resolve(root));
+  if (path.isAbsolute(raw)) {
+    const absolute = path.resolve(raw);
+    const root = roots.find((candidate) => isStrictlyInside(candidate, absolute));
+    return root ? { absolute, root } : undefined;
+  }
+  for (const root of roots) {
+    const absolute = path.resolve(root, raw);
+    if (isStrictlyInside(root, absolute) && exists(path.dirname(absolute))) return { absolute, root };
+  }
+  return undefined;
+}
+
+export interface AgentsChanges {
+  /** Files that are new or whose content differs from what was sent, broad to specific. */
+  readonly updated: AgentsFile[];
+  /** Absolute paths of sent files that were deleted or emptied. */
+  readonly removed: string[];
+}
+
+/**
+ * Compare what a session was sent with the files on disk now. `current` is a fresh baseline
+ * discovery; directory files that were sent are re-read from their paths.
+ */
+export function detectAgentsChanges(sent: ReadonlyMap<string, AgentsFile>, current: readonly AgentsFile[]): AgentsChanges {
+  const updated: AgentsFile[] = [];
+  const removed: string[] = [];
+  const currentKeys = new Set<string>();
+  for (const file of current) {
+    const key = agentsFileKey(file.path);
+    currentKeys.add(key);
+    if (sent.get(key)?.content !== file.content) updated.push(file);
+  }
+  for (const [key, previous] of sent) {
+    if (currentKeys.has(key)) continue;
+    const content = previous.scope === "directory" ? readAgentsFile(previous.path) : undefined;
+    if (content === undefined) removed.push(previous.path);
+    else if (content !== previous.content) updated.push({ ...previous, content });
+  }
+  return { updated, removed };
+}
+
+/** Record files as sent (whether or not the budget let them into the rendered text). */
+export function markAgentsSent(sent: Map<string, AgentsFile>, files: readonly AgentsFile[]): void {
+  for (const file of files) sent.set(agentsFileKey(file.path), file);
+}
+
+const UPDATE_HEADER = "[AgentBridge] AGENTS.md changed since it was sent to you. The current text below replaces the earlier version; follow it from now on.";
+
+/** The notice for detected changes, or undefined when nothing changed. */
+export function renderAgentsChanges(changes: AgentsChanges, maxBytes = MAX_AGENTS_MD_BYTES): string | undefined {
+  const removedLine = changes.removed.length
+    ? `No longer applies (deleted or emptied), so ignore its earlier instructions: ${changes.removed.join(", ")}.`
+    : "";
+  if (!changes.updated.length) return removedLine ? `${UPDATE_HEADER}\n\n${removedLine}` : undefined;
+  const rendered = renderAgentsFiles(changes.updated, "update", maxBytes - (removedLine ? Buffer.byteLength(removedLine, "utf8") + 2 : 0));
+  return rendered ? `${rendered.text}${removedLine ? `\n\n${removedLine}` : ""}` : undefined;
 }
 
 const BASELINE_HEADER = "AGENTS.md instructions for this workspace. Follow them. When they conflict, a file in a deeper directory wins for files under it, and the user's direct requests win over all of them.";
@@ -172,9 +224,9 @@ export interface RenderedAgentsFiles {
  * are dropped first, then the most specific remaining file is truncated. Returns undefined when
  * there is nothing to send.
  */
-export function renderAgentsFiles(files: readonly AgentsFile[], kind: "baseline" | "directory", maxBytes = MAX_AGENTS_MD_BYTES): RenderedAgentsFiles | undefined {
+export function renderAgentsFiles(files: readonly AgentsFile[], kind: "baseline" | "directory" | "update", maxBytes = MAX_AGENTS_MD_BYTES): RenderedAgentsFiles | undefined {
   if (!files.length) return undefined;
-  const header = kind === "baseline" ? BASELINE_HEADER : DIRECTORY_HEADER;
+  const header = kind === "baseline" ? BASELINE_HEADER : kind === "directory" ? DIRECTORY_HEADER : UPDATE_HEADER;
   const bytes = (text: string) => Buffer.byteLength(text, "utf8");
   let kept = [...files];
   const omitted: AgentsFile[] = [];

@@ -15,7 +15,19 @@ import { getManagedShellChoice } from "./ide-tool-broker.js";
 import { managedShellExecutable, managedShellOverrideWarning } from "./ide-tool-broker.js";
 import type { IdeToolBroker } from "./ide-tool-broker.js";
 import { translate } from "./i18n.js";
-import { agentsFileKey, directoryAgentsFiles, discoverAgentsFiles, renderAgentsFiles } from "./agents-md.js";
+import {
+  AGENTS_FILE_NAME,
+  type AgentsFile,
+  agentsFileKey,
+  detectAgentsChanges,
+  directoryAgentsFiles,
+  discoverAgentsFiles,
+  markAgentsSent,
+  readAgentsFile,
+  renderAgentsChanges,
+  renderAgentsFiles,
+  resolveTouchedPath,
+} from "./agents-md.js";
 import { discoverSkills, LOAD_SKILL_TOOL, loadSkill, parseLoadSkillInput, renderLoadSkillDescription } from "./skills.js";
 import { formatSetTodosResult } from "./todo-format.js";
 import { formatToolError, ToolError } from "./tool-errors.js";
@@ -25,9 +37,11 @@ import {
   BRIDGE_TOOL_DEFINITIONS,
   buildReadOnlySessionNotice,
   buildReadOnlyTransitionNotice,
+  buildRepeatCallReminder,
   buildServerInstructions,
   MAX_TODOS,
   planModeBlockError,
+  REPEAT_REMINDER_COUNTS,
   REPORT_PROGRESS_TOOL,
   SET_TODOS_TOOL,
 } from "./server-instructions.js";
@@ -343,8 +357,11 @@ interface McpSession {
   firstCallReminderPending?: boolean;
   /** True until the first tool call, which repeats the AGENTS.md baseline in its result. */
   agentsMdBaselinePending?: boolean;
-  /** AGENTS.md files already delivered to this session (agentsFileKey). */
-  agentsMdSent?: Set<string>;
+  /** AGENTS.md files already delivered to this session, by agentsFileKey, with the text sent. */
+  agentsMdSent?: Map<string, AgentsFile>;
+  /** Tool name and arguments of the previous call, and how many identical calls in a row. */
+  lastCallSignature?: string;
+  repeatCount?: number;
 }
 
 
@@ -2679,7 +2696,7 @@ export class BridgeManager implements vscode.Disposable {
           toldReadOnly: instructionsReadOnly,
           firstCallReminderPending: instructionsReadOnly,
           agentsMdBaselinePending: true,
-          agentsMdSent: new Set(),
+          agentsMdSent: new Map(),
         });
         this.revision += 1;
         this.output.appendLine(`[bridge] new MCP session: ${sid}`);
@@ -2749,27 +2766,37 @@ export class BridgeManager implements vscode.Disposable {
   /**
    * The AGENTS.md baseline owed to a session's first tool call, read afresh so edits since
    * initialize are included. Clients may never show the server instructions to the model, so the
-   * first result repeats them. Marks the delivered files as sent.
+   * first result repeats them. Every discovered file counts as sent, including any the budget
+   * left out, so later change detection does not resend them.
    */
-  private takeAgentsBaseline(sessionId: string | undefined): string | undefined {
-    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+  private takeAgentsBaseline(session: McpSession | undefined): string | undefined {
     if (!session?.agentsMdBaselinePending) return undefined;
     session.agentsMdBaselinePending = false;
-    const rendered = renderAgentsFiles(discoverAgentsFiles(this.agentsDiscoveryOptions()), "baseline");
-    if (!rendered) return undefined;
-    session.agentsMdSent ??= new Set();
-    for (const file of rendered.included) session.agentsMdSent.add(agentsFileKey(file.path));
-    return `[AgentBridge] ${rendered.text}`;
+    const files = discoverAgentsFiles(this.agentsDiscoveryOptions());
+    session.agentsMdSent ??= new Map();
+    markAgentsSent(session.agentsMdSent, files);
+    const rendered = renderAgentsFiles(files, "baseline");
+    return rendered ? `[AgentBridge] ${rendered.text}` : undefined;
   }
 
   /**
-   * AGENTS.md files in subfolders reached for the first time by a successful read_files or
-   * apply_patch call, rendered for the end of that result. Marks them as sent.
+   * AGENTS.md files that changed, disappeared, or newly appeared since this session was sent
+   * them, as DeepSeek Harness reports them. Checked on every tool call after the first; a few
+   * small file reads.
    */
-  private takeDirectoryAgentsNotice(toolName: string, structuredContent: Record<string, unknown> | undefined, sessionId: string | undefined): string | undefined {
-    if (toolName !== "read_files" && toolName !== "apply_patch") return undefined;
-    const session = sessionId ? this.sessions.get(sessionId) : undefined;
-    if (!session || !structuredContent || !Array.isArray(structuredContent.files)) return undefined;
+  private takeAgentsChanges(session: McpSession | undefined): string | undefined {
+    if (!session || session.agentsMdBaselinePending) return undefined;
+    session.agentsMdSent ??= new Map();
+    const changes = detectAgentsChanges(session.agentsMdSent, discoverAgentsFiles(this.agentsDiscoveryOptions()));
+    markAgentsSent(session.agentsMdSent, changes.updated);
+    for (const removed of changes.removed) session.agentsMdSent.delete(agentsFileKey(removed));
+    return renderAgentsChanges(changes);
+  }
+
+  /** Workspace-relative or absolute paths a successful read_files or apply_patch result touched. */
+  private touchedPaths(toolName: string, structuredContent: Record<string, unknown> | undefined): string[] {
+    if (toolName !== "read_files" && toolName !== "apply_patch") return [];
+    if (!structuredContent || !Array.isArray(structuredContent.files)) return [];
     const touched: string[] = [];
     for (const item of structuredContent.files as Array<Record<string, unknown>>) {
       if (!item || typeof item !== "object" || (toolName === "read_files" && item.status !== "success")) continue;
@@ -2777,38 +2804,99 @@ export class BridgeManager implements vscode.Disposable {
         if (typeof item[key] === "string") touched.push(item[key] as string);
       }
     }
-    if (!touched.length) return undefined;
-    session.agentsMdSent ??= new Set();
-    let roots: string[];
+    return touched;
+  }
+
+  private workspaceRootsOrEmpty(): string[] {
     try {
-      roots = this.workspaceRoots();
+      return this.workspaceRoots();
     } catch {
-      return undefined;
+      return [];
     }
-    const rendered = renderAgentsFiles(directoryAgentsFiles(touched, roots, session.agentsMdSent), "directory");
-    if (!rendered) return undefined;
-    for (const file of rendered.included) session.agentsMdSent.add(agentsFileKey(file.path));
-    return rendered.text;
   }
 
   /**
-   * Run a tool call and, when read-only mode changed since this session was last told,
-   * prefix the result with a one-time notice. Tool results are the only per-turn channel an
-   * MCP server has: instructions are fixed at initialize and many clients ignore list_changed.
+   * After the model itself edits an AGENTS.md it was sent, record the new text silently: it
+   * already knows, and echoing its own edit back as a change would only add noise.
+   */
+  private syncAgentsEditsByModel(session: McpSession | undefined, touched: readonly string[]): void {
+    if (!session?.agentsMdSent) return;
+    const roots = this.workspaceRootsOrEmpty();
+    for (const raw of touched) {
+      if (path.basename(raw) !== AGENTS_FILE_NAME) continue;
+      const resolved = resolveTouchedPath(raw, roots);
+      if (!resolved) continue;
+      const key = agentsFileKey(resolved.absolute);
+      const previous = session.agentsMdSent.get(key);
+      if (!previous) continue;
+      const content = readAgentsFile(resolved.absolute);
+      if (content === undefined) session.agentsMdSent.delete(key);
+      else session.agentsMdSent.set(key, { ...previous, content });
+    }
+  }
+
+  /**
+   * AGENTS.md files in subfolders reached for the first time by a successful read_files or
+   * apply_patch call, rendered for the end of that result. Marks them as sent.
+   */
+  private takeDirectoryAgentsNotice(session: McpSession | undefined, touched: readonly string[]): string | undefined {
+    if (!session || !touched.length) return undefined;
+    const roots = this.workspaceRootsOrEmpty();
+    if (!roots.length) return undefined;
+    session.agentsMdSent ??= new Map();
+    const files = directoryAgentsFiles(touched, roots, session.agentsMdSent);
+    markAgentsSent(session.agentsMdSent, files);
+    return renderAgentsFiles(files, "directory")?.text;
+  }
+
+  /**
+   * Count identical consecutive calls and return the reminder owed at REPEAT_REMINDER_COUNTS.
+   * Waiting on a running command with get_command_output is a legitimate repeat and is exempt.
+   */
+  private takeRepeatReminder(session: McpSession | undefined, toolName: string, args: Record<string, unknown>, resultText: string): string | undefined {
+    if (!session) return undefined;
+    const signature = `${toolName}\u0000${stableJson(args)}`;
+    if (session.lastCallSignature === signature) session.repeatCount = (session.repeatCount ?? 1) + 1;
+    else {
+      session.lastCallSignature = signature;
+      session.repeatCount = 1;
+    }
+    if (toolName === "get_command_output" && /^status: running$/m.test(resultText)) return undefined;
+    return REPEAT_REMINDER_COUNTS.includes(session.repeatCount) ? buildRepeatCallReminder(toolName, session.repeatCount) : undefined;
+  }
+
+  /**
+   * Run a tool call and attach what the session is owed. Tool results are the only per-turn
+   * channel an MCP server has: instructions are fixed at initialize and many clients ignore
+   * list_changed. In front of the result: the AGENTS.md baseline (first call) or AGENTS.md
+   * changes (later calls), then a Plan/Build mode notice. After it: AGENTS.md files from
+   * subfolders the call reached, then a repeated-call reminder.
    */
   private async handleToolCall(
     toolName: string,
     args: Record<string, unknown>,
     extra: { signal?: AbortSignal; sessionId?: string },
   ): Promise<{ content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean; structuredContent?: Record<string, unknown> }> {
+    const session = extra.sessionId ? this.sessions.get(extra.sessionId) : undefined;
     const modeNotice = this.takeReadOnlyTransitionNotice(extra.sessionId);
-    const agentsBaseline = this.takeAgentsBaseline(extra.sessionId);
+    const agentsNotice = this.takeAgentsBaseline(session) ?? this.takeAgentsChanges(session);
     let result = await this.executeToolCall(toolName, args, extra);
-    const directoryAgents = result.isError ? undefined : this.takeDirectoryAgentsNotice(toolName, result.structuredContent, extra.sessionId);
-    if (directoryAgents) result = { ...result, content: [...result.content, { type: "text" as const, text: directoryAgents }] };
+
+    const trailing: string[] = [];
+    if (!result.isError) {
+      const touched = this.touchedPaths(toolName, result.structuredContent);
+      if (toolName === "apply_patch") this.syncAgentsEditsByModel(session, touched);
+      const directoryAgents = this.takeDirectoryAgentsNotice(session, touched);
+      if (directoryAgents) trailing.push(directoryAgents);
+    }
+    const firstText = result.content.find((item) => item.type === "text");
+    const repeat = this.takeRepeatReminder(session, toolName, args, firstText?.type === "text" ? firstText.text : "");
+    if (repeat) trailing.push(repeat);
+    if (trailing.length) result = { ...result, content: [...result.content, ...trailing.map((text) => ({ type: "text" as const, text }))] };
+
     // The mode notice already ends with "The result of this call follows."
-    const notice = agentsBaseline
-      ? `${agentsBaseline}\n\n${modeNotice ?? "The result of this call follows."}`
+    const notice = agentsNotice
+      ? `${agentsNotice}\n\n${modeNotice ?? "The result of this call follows."}`
       : modeNotice;
     if (!notice) return result;
     const [first, ...rest] = result.content;
@@ -3207,5 +3295,15 @@ export class BridgeManager implements vscode.Disposable {
     this.disposed = true;
     void this.stopResources(true);
   }
+}
+
+/** JSON with object keys sorted, so identical arguments in a different key order compare equal. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().filter((key) => record[key] !== undefined).map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 

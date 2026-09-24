@@ -233,3 +233,16 @@ export function planModeBlockError(toolName: string, args: Record<string, unknow
   }
   return undefined;
 }
+
+/**
+ * Repeat counts at which a run of identical consecutive calls earns a reminder, as in the
+ * repeat-tool-reminder guard of DeepSeek Harness (3, 5, 8). An MCP server does not see the user's
+ * messages, so a run ends at the next call with a different tool or different arguments instead
+ * of at the next user message.
+ */
+export const REPEAT_REMINDER_COUNTS: readonly number[] = [3, 5, 8];
+
+/** Advisory note appended to the result of the count-th identical consecutive call; the call itself runs normally. */
+export function buildRepeatCallReminder(toolName: string, count: number): string {
+  return `[AgentBridge notice] You have now called ${toolName} ${count} times in a row with identical arguments. Check whether the previous results changed. If they did not, repeating the call will not help: change your approach, or stop and tell the user what is blocking you.`;
+}

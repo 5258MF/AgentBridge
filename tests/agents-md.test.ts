@@ -5,10 +5,13 @@ import path from "node:path";
 import test from "node:test";
 import {
   agentsFileKey,
+  detectAgentsChanges,
   directoryAgentsFiles,
   discoverAgentsFiles,
+  markAgentsSent,
   MAX_AGENTS_MD_BYTES,
   projectDirectories,
+  renderAgentsChanges,
   renderAgentsFiles,
 } from "../src/extension/src/agents-md.js";
 import { BridgeManager } from "../src/extension/src/bridge-server.js";
@@ -125,7 +128,7 @@ function makeManager(home: string): BridgeManager {
 }
 
 function session(): Record<string, unknown> {
-  return { lastActivity: Date.now(), activeRequests: 0, activeStreams: 0, toldReadOnly: false, firstCallReminderPending: false, agentsMdBaselinePending: true, agentsMdSent: new Set() };
+  return { lastActivity: Date.now(), activeRequests: 0, activeStreams: 0, toldReadOnly: false, firstCallReminderPending: false, agentsMdBaselinePending: true, agentsMdSent: new Map() };
 }
 
 test("server instructions end with the AGENTS.md baseline", async () => {
@@ -196,6 +199,110 @@ test("first tool result repeats the baseline; a subfolder AGENTS.md rides once o
     assert.ok(plannedText.startsWith("[AgentBridge] AGENTS.md instructions"));
     assert.match(plannedText, /--- END AGENTS\.md ---\n\n\[AgentBridge notice\] This connection is in Plan mode/);
     assert.equal(plannedText.match(/The result of this call follows\./g)?.length, 1);
+  } finally {
+    workspace.workspaceFolders = originalFolders;
+  }
+});
+
+test("change detection: edited, new, deleted, and emptied files", () => {
+  const { ws, home, repo } = fixture();
+  write(path.join(ws, "pkg", "AGENTS.md"), "pkg rules");
+  const sent = new Map();
+  markAgentsSent(sent, discoverAgentsFiles({ workspaceRoots: [ws], homeDir: home }));
+  markAgentsSent(sent, directoryAgentsFiles(["pkg/AGENTS.md"], [ws], sent));
+  const now = () => detectAgentsChanges(sent, discoverAgentsFiles({ workspaceRoots: [ws], homeDir: home }));
+  assert.deepEqual(now(), { updated: [], removed: [] }, "nothing changed");
+
+  write(path.join(home, ".agents", "AGENTS.md"), "user rules v2");
+  write(path.join(ws, "pkg", "AGENTS.md"), "pkg rules v2");
+  fs.rmSync(path.join(repo, "sub", "AGENTS.md"));
+  const changes = now();
+  assert.deepEqual(changes.updated.map((file) => file.content), ["user rules v2", "pkg rules v2"]);
+  assert.deepEqual(changes.removed, [path.join(repo, "sub", "AGENTS.md")]);
+  const text = renderAgentsChanges(changes);
+  assert.ok(text);
+  assert.match(text, /^\[AgentBridge\] AGENTS\.md changed since it was sent to you\./);
+  assert.match(text, /user rules v2[\s\S]*pkg rules v2/);
+  assert.match(text, /No longer applies \(deleted or emptied\), so ignore its earlier instructions: .*sub.AGENTS\.md\.$/);
+
+  // Emptying a directory file counts as removal; a removal alone still renders.
+  write(path.join(ws, "pkg", "AGENTS.md"), " ");
+  const emptied = detectAgentsChanges(new Map([...sent].filter(([, file]) => file.scope === "directory")), []);
+  assert.deepEqual(emptied.removed, [path.join(ws, "pkg", "AGENTS.md")]);
+  assert.match(renderAgentsChanges(emptied) ?? "", /^\[AgentBridge\] AGENTS\.md changed[\s\S]*No longer applies/);
+  assert.equal(renderAgentsChanges({ updated: [], removed: [] }), undefined);
+});
+
+test("mid-session: AGENTS.md changes reach the next tool result once; the model's own edits are not echoed", async () => {
+  const { ws, home } = fixture();
+  write(path.join(ws, "top.ts"), "top\n");
+  const originalFolders = workspace.workspaceFolders;
+  workspace.workspaceFolders = [{ uri: { fsPath: ws } }];
+  try {
+    const manager = makeManager(home);
+    const sessions = (manager as any).sessions as Map<string, Record<string, unknown>>;
+    sessions.set("s1", session());
+    const call = (tool: string, args: Record<string, unknown>) => (manager as any).handleToolCall(tool, args, { sessionId: "s1" });
+    const text = (result: any) => result.content.map((item: any) => item.text ?? "").join("\n");
+
+    await call("read_files", { files: [{ path: "top.ts" }] }); // baseline
+    assert.ok(!text(await call("read_files", { files: [{ path: "top.ts", start_line: 1, end_line: 1 }] })).includes("AGENTS.md changed"), "no change, no notice");
+
+    write(path.join(ws, "AGENTS.md"), "workspace rules v2: do not touch tests");
+    const changed = await call("read_files", { files: [{ path: "top.ts", start_line: 1, end_line: 2 }] });
+    assert.match(changed.content[0].text, /^\[AgentBridge\] AGENTS\.md changed since it was sent to you\.[\s\S]*workspace rules v2: do not touch tests[\s\S]*The result of this call follows\.\n\n/);
+    assert.ok(!text(changed).includes("repo rules"), "only the changed file is resent");
+    assert.ok(!text(await call("read_files", { files: [{ path: "top.ts", start_line: 1, end_line: 3 }] })).includes("AGENTS.md changed"), "sent once");
+
+    // A new AGENTS.md in the home folder is reported too.
+    fs.rmSync(path.join(home, ".agents", "AGENTS.md"));
+    const removed = await call("read_files", { files: [{ path: "top.ts", start_line: 1, end_line: 4 }] });
+    assert.match(removed.content[0].text, /No longer applies[^\n]*\.agents.AGENTS\.md/);
+    write(path.join(home, ".agents", "AGENTS.md"), "user rules again");
+    assert.match((await call("read_files", { files: [{ path: "top.ts", start_line: 1, end_line: 5 }] })).content[0].text, /user rules again/);
+
+    // The model edits the workspace AGENTS.md itself: no echo on the next call.
+    const patched = await call("apply_patch", { patch: "*** Begin Patch\n*** Update File: AGENTS.md\n@@\n-workspace rules v2: do not touch tests\n+workspace rules v3\n*** End Patch" });
+    assert.equal(patched.isError, undefined, text(patched));
+    assert.ok(!text(await call("read_files", { files: [{ path: "top.ts", start_line: 1, end_line: 6 }] })).includes("AGENTS.md changed"), "the model's own edit is not echoed");
+  } finally {
+    workspace.workspaceFolders = originalFolders;
+  }
+});
+
+test("repeated identical calls earn reminders at 3, 5, and 8; anything different resets the count", async () => {
+  const { ws } = fixture();
+  write(path.join(ws, "top.ts"), "top\n");
+  const originalFolders = workspace.workspaceFolders;
+  workspace.workspaceFolders = [{ uri: { fsPath: ws } }];
+  try {
+    const manager = makeManager(path.join(ws, "no-home"));
+    let commandStatus = "running";
+    (manager as any).ideToolBroker = { invokeDirect: async () => ({ text: `command_id: cmd_1\nstatus: ${commandStatus}`, isError: false }), dispose() {} };
+    const sessions = (manager as any).sessions as Map<string, Record<string, unknown>>;
+    sessions.set("s1", { ...session(), agentsMdBaselinePending: false });
+    const call = (tool: string, args: Record<string, unknown>) => (manager as any).handleToolCall(tool, args, { sessionId: "s1" });
+    const reminder = (result: any) => result.content.map((item: any) => item.text ?? "").find((item: string) => item.startsWith("[AgentBridge notice] You have now called"));
+
+    const seen: Array<string | undefined> = [];
+    for (let index = 1; index <= 9; index += 1) seen.push(reminder(await call("read_files", { files: [{ end_line: 5, path: "top.ts" }] })));
+    assert.deepEqual(seen.map((item, index) => (item ? index + 1 : 0)).filter(Boolean), [3, 5, 8]);
+    assert.equal(seen[2], "[AgentBridge notice] You have now called read_files 3 times in a row with identical arguments. Check whether the previous results changed. If they did not, repeating the call will not help: change your approach, or stop and tell the user what is blocking you.");
+
+    // Same arguments in a different key order still count; a different call resets.
+    await call("read_files", { files: [{ path: "top.ts", start_line: 1, end_line: 7 }] });
+    await call("read_files", { files: [{ path: "top.ts", end_line: 5 }] });
+    await call("read_files", { files: [{ end_line: 5, path: "top.ts" }] });
+    assert.ok(reminder(await call("read_files", { files: [{ path: "top.ts", end_line: 5 }] })), "third in a row after the reset");
+
+    // Failed calls count too: that is the typical loop.
+    for (let index = 1; index <= 2; index += 1) await call("read_files", { files: [{ path: "missing.ts" }] });
+    assert.ok(reminder(await call("read_files", { files: [{ path: "missing.ts" }] })));
+
+    // Waiting on a running command is exempt; polling a finished one is not.
+    for (let index = 1; index <= 4; index += 1) assert.equal(reminder(await call("get_command_output", { command_id: "cmd_1" })), undefined);
+    commandStatus = "completed";
+    assert.ok(reminder(await call("get_command_output", { command_id: "cmd_1" })), "5th identical call, command finished");
   } finally {
     workspace.workspaceFolders = originalFolders;
   }

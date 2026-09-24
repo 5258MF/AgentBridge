@@ -4,6 +4,7 @@ import {
   BRIDGE_TOOL_DEFINITIONS,
   buildReadOnlySessionNotice,
   buildReadOnlyTransitionNotice,
+  buildRepeatCallReminder,
   buildServerInstructions,
   planModeBlockError,
   READ_ONLY_BLOCKED_TOOL_NAMES,
@@ -42,6 +43,7 @@ const PROSE: ReadonlyArray<readonly [string, string]> = [
   ["read-only ON transition notice", buildReadOnlyTransitionNotice(true)],
   ["read-only OFF transition notice", buildReadOnlyTransitionNotice(false)],
   ["read-only session notice", buildReadOnlySessionNotice()],
+  ["repeated-call reminder", buildRepeatCallReminder("read_files", 3)],
   ["Plan mode block error for a blocked tool", planModeBlockError([...READ_ONLY_BLOCKED_TOOL_NAMES][0], {}) ?? ""],
   ["Plan mode block error for a command", planModeBlockError("run_command", { command: "rm -rf dist" }) ?? ""],
   // Panel text that names tools (zh and en).
