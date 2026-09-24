@@ -11,6 +11,7 @@ const args = process.argv.slice(2);
 const matchIndex = args.indexOf("--match");
 const match = matchIndex >= 0 ? args[matchIndex + 1] : undefined;
 const skipPackage = args.includes("--skip-package");
+const updateCatalog = args.includes("--update-catalog");
 const tempDir = await mkdtemp(path.join(os.tmpdir(), "agentbridge-tests-"));
 
 function run(command, commandArgs, options = {}) {
@@ -45,7 +46,7 @@ try {
   console.log("[test] TypeScript checking test sources...");
   run(process.execPath, [path.join(root, "node_modules", "typescript", "bin", "tsc"), "-p", path.join("tests", "tsconfig.json"), "--noEmit"]);
 
-  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "terminal-lifecycle.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts"];
+  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "terminal-lifecycle.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts", "workspace-roots.test.ts", "todo-format.test.ts", "tool-errors.test.ts", "tool-catalog.test.ts", "server-instructions.test.ts", "path-outside.test.ts", "read-only-panel.test.ts", "read-only-notice.test.ts", "prompt-tool-names.test.ts"];
   const entries = match ? allEntries.filter((name) => name.replace(/\.test\.ts$/, "") === match) : allEntries;
   if (!entries.length) throw new Error(`No test entry matched ${JSON.stringify(match)}.`);
   const fakeVscode = path.join(testsDir, "helpers", "fake-vscode.ts");
@@ -80,7 +81,11 @@ try {
 
   const bundles = entries.map((entry) => path.join(tempDir, entry.replace(/\.ts$/, ".cjs")));
   run(process.execPath, ["--test", ...bundles], {
-    env: { ...process.env, NODE_PATH: path.join(root, "node_modules") },
+    env: {
+      ...process.env,
+      NODE_PATH: path.join(root, "node_modules"),
+      ...(updateCatalog ? { AGENTBRIDGE_UPDATE_TOOL_CATALOG: "1" } : {}),
+    },
   });
 
   if (!skipPackage) {

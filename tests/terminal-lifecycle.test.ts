@@ -164,3 +164,92 @@ test("natural PTY exit still flushes final output and completes the command exac
   managed.dispose();
   assert.equal(process.killCount, 0);
 });
+
+function makeWaitManager(): { manager: TerminalCommandManager; stateOf(id: string): any } {
+  vscodeTest.reset();
+  const manager = new TerminalCommandManager((cwd) => makeManaged(cwd).managed);
+  return { manager, stateOf: (id) => ((manager as any).states as Map<string, any>).get(id) };
+}
+
+test("get_command_output wait_ms returns as soon as the command exits", async () => {
+  const { manager, stateOf } = makeWaitManager();
+  try {
+    const id = commandIdFrom(await manager.run({ command: "Start-Sleep -Seconds 300", background: true }));
+    const state = stateOf(id);
+    setTimeout(() => {
+      (manager as any).appendOutput(state, "build finished\n");
+      (manager as any).finishState(state, 0);
+    }, 60);
+    const startedAt = Date.now();
+    const text = await manager.getOutput({ command_id: id, wait_ms: 10_000 });
+    assert.ok(Date.now() - startedAt < 3_000, "the wait must end at completion, not at the deadline");
+    assert.match(text, /^status: completed$/m);
+    assert.match(text, /^exit_code: 0$/m);
+    assert.match(text, /^wait_result: exited$/m);
+    assert.match(text, /^waited_ms: \d+$/m);
+    assert.match(text, /build finished/);
+    assert.equal(state.waiters?.size ?? 0, 0, "settled waits must unregister themselves");
+  } finally {
+    manager.dispose();
+  }
+});
+
+test("get_command_output wait_until=output wakes on new output while the command keeps running", async () => {
+  const { manager, stateOf } = makeWaitManager();
+  try {
+    const id = commandIdFrom(await manager.run({ command: "npm run dev", background: true }));
+    const state = stateOf(id);
+    const offset = state.totalOutputBytes;
+    setTimeout(() => (manager as any).appendOutput(state, "listening on 5173\n"), 60);
+    const text = await manager.getOutput({ command_id: id, offset, wait_ms: 10_000, wait_until: "output" });
+    assert.match(text, /^status: running$/m);
+    assert.match(text, /^wait_result: output$/m);
+    assert.match(text, /listening on 5173/);
+  } finally {
+    manager.dispose();
+  }
+});
+
+test("get_command_output wait_ms times out without killing the command", async () => {
+  const { manager, stateOf } = makeWaitManager();
+  try {
+    const id = commandIdFrom(await manager.run({ command: "Start-Sleep -Seconds 300", background: true }));
+    const startedAt = Date.now();
+    const text = await manager.getOutput({ command_id: id, wait_ms: 200 });
+    assert.ok(Date.now() - startedAt >= 150, "a timed-out wait must actually wait");
+    assert.match(text, /^status: running$/m);
+    assert.match(text, /^wait_result: timeout$/m);
+    assert.equal(stateOf(id).status, "running");
+    assert.equal(stateOf(id).waiters?.size ?? 0, 0);
+  } finally {
+    manager.dispose();
+  }
+});
+
+test("get_command_output without wait_ms keeps the original immediate result shape", async () => {
+  const { manager } = makeWaitManager();
+  try {
+    const id = commandIdFrom(await manager.run({ command: "Start-Sleep -Seconds 300", background: true }));
+    const text = await manager.getOutput({ command_id: id });
+    assert.doesNotMatch(text, /wait_result|waited_ms/);
+    assert.match(text, /^status: running$/m);
+  } finally {
+    manager.dispose();
+  }
+});
+
+test("get_command_output returns immediately for a finished command and rejects bad wait_until", async () => {
+  const { manager, stateOf } = makeWaitManager();
+  try {
+    const id = commandIdFrom(await manager.run({ command: "Write-Output done", background: true }));
+    (manager as any).finishState(stateOf(id), 0);
+    const startedAt = Date.now();
+    const text = await manager.getOutput({ command_id: id, wait_ms: 10_000 });
+    assert.ok(Date.now() - startedAt < 1_000);
+    assert.match(text, /^wait_result: exited$/m);
+    await assert.rejects(manager.getOutput({ command_id: id, wait_until: "later" }), (error: any) => error.code === "INVALID_ARGUMENT");
+    await assert.rejects(manager.getOutput({ command_id: "cmd_missing" }), (error: any) => error.code === "UNKNOWN_COMMAND_ID");
+  } finally {
+    manager.dispose();
+  }
+});

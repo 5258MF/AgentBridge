@@ -6,6 +6,24 @@ export interface AgentToolDefinition {
   capability: "read" | "execute";
 }
 
+/**
+ * Upper bound (and default) for how long a foreground run_command waits before returning
+ * status=running. It must stay below common reverse-proxy response deadlines: Cloudflare
+ * tunnels abort an origin response with HTTP 524 after 100 seconds, and Quick Tunnel mode
+ * serves MCP responses as plain JSON with no bytes sent until the tool returns. Returning
+ * earlier keeps the command_id deliverable so the agent can continue with get_command_output.
+ */
+export const RUN_COMMAND_MAX_FOREGROUND_WAIT_MS = 90_000;
+
+/**
+ * Upper bound for get_command_output wait_ms. Like the foreground run_command cap it stays
+ * well below the 100-second Cloudflare origin response deadline.
+ */
+export const GET_COMMAND_OUTPUT_MAX_WAIT_MS = 60_000;
+
+/** How many finished command states stay addressable by command_id. */
+export const MAX_RETAINED_FINISHED_COMMANDS = 32;
+
 export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
   {
     name: "list_directory",
@@ -36,7 +54,7 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
         command: { type: "string", minLength: 1, description: "Shell command to run." },
         cwd: { type: "string", description: "Optional workspace-relative working directory. When omitted, reuse the most recently used idle AgentBridge terminal and continue from its current directory; a new terminal starts at the workspace root." },
         background: { type: "boolean", description: "Whether this is expected to keep running. Must be chosen explicitly." },
-        timeout_ms: { type: "integer", minimum: 1000, maximum: 120000, default: 120000, description: "For foreground commands, maximum time to wait before returning status=running. The command is not killed on timeout." }
+        timeout_ms: { type: "integer", minimum: 1000, maximum: RUN_COMMAND_MAX_FOREGROUND_WAIT_MS, default: RUN_COMMAND_MAX_FOREGROUND_WAIT_MS, description: "For foreground commands, maximum time to wait before returning status=running. The command is not killed on timeout; continue with get_command_output using the returned command_id and wait_ms. Capped below common proxy response deadlines." }
       },
       additionalProperties: false
     }
@@ -45,14 +63,16 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "get_command_output",
     vscodeToolName: "agentbridge_get_command_output",
     capability: "execute",
-    description: "Read new output and status from a previously started run_command using its command_id. Use next_offset on subsequent reads to avoid repeating old output.",
+    description: `Read new output and status from a previously started run_command using its command_id. Pass the previous next_offset as offset to avoid repeating old output. To wait for a still-running command, set wait_ms (at most ${GET_COMMAND_OUTPUT_MAX_WAIT_MS}) instead of calling this tool repeatedly: with wait_until=exit (default) it returns as soon as the command finishes, with wait_until=output as soon as any output past offset arrives, otherwise at the deadline with wait_result=timeout while the command keeps running. Do not poll in a tight loop and do not run sleep commands to wait. Only the ${MAX_RETAINED_FINISHED_COMMANDS} most recent finished commands are retained.`,
     inputSchema: {
       type: "object",
       required: ["command_id"],
       properties: {
         command_id: { type: "string", minLength: 1 },
         offset: { type: "integer", minimum: 0, default: 0, description: "Absolute UTF-8 byte offset into captured output." },
-        max_bytes: { type: "integer", minimum: 1, maximum: 131072, default: 32768 }
+        max_bytes: { type: "integer", minimum: 1, maximum: 131072, default: 32768 },
+        wait_ms: { type: "integer", minimum: 0, maximum: GET_COMMAND_OUTPUT_MAX_WAIT_MS, default: 0, description: "Optional time to block while the command is still running. 0 returns immediately. The result then includes wait_result (exited, output, timeout, or cancelled) and waited_ms." },
+        wait_until: { type: "string", enum: ["exit", "output"], default: "exit", description: "With wait_ms: exit returns when the command finishes; output returns as soon as new output past offset arrives (useful for servers and watchers)." }
       },
       additionalProperties: false
     }

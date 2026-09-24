@@ -1,14 +1,22 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
-import { getIdeToolDefinition } from "./ide-tool-definitions.js";
+import {
+  GET_COMMAND_OUTPUT_MAX_WAIT_MS,
+  getIdeToolDefinition,
+  MAX_RETAINED_FINISHED_COMMANDS,
+  RUN_COMMAND_MAX_FOREGROUND_WAIT_MS,
+} from "./ide-tool-definitions.js";
 import { invokeLspTool } from "./lsp-tool.js";
+import { formatToolError, ToolError } from "./tool-errors.js";
+import { findContainingRoot, relativeToRoot, resolveExistingInRoots, resolveLexicalInRoots, workspaceRootPaths } from "./workspace-roots.js";
 
 const COMMON_EXCLUDES = new Set([".git", "node_modules", "dist", "build", "coverage", ".next", "target", "vendor"]);
 const MAX_CAPTURED_OUTPUT_BYTES = 2 * 1024 * 1024;
-const MAX_COMPLETED_STATES = 32;
+const MAX_COMPLETED_STATES = MAX_RETAINED_FINISHED_COMMANDS;
 const DEFAULT_OUTPUT_BYTES = 32 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_IDLE_TERMINALS = 4;
@@ -60,6 +68,16 @@ interface CommandState {
   ansiPending: string;
   done: Promise<void>;
   resolveDone(): void;
+  /** Pending get_command_output waits; notified on new output and on completion. */
+  waiters?: Set<() => void>;
+}
+
+type CommandWaitCondition = "exit" | "output";
+type CommandWaitResult = "exited" | "output" | "timeout" | "cancelled";
+
+function notifyCommandWaiters(state: CommandState): void {
+  if (!state.waiters?.size) return;
+  for (const waiter of [...state.waiters]) waiter();
 }
 
 interface ManagedShellSpec {
@@ -459,7 +477,9 @@ export class ManagedCommandPseudoterminal implements vscode.Pseudoterminal, vsco
   readonly onDidWrite = this.writeEmitter.event;
   private readonly closeEmitter = new vscode.EventEmitter<void | number>();
   readonly onDidClose = this.closeEmitter.event;
-  private readonly protocolToken = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  // Per-terminal secret embedded in prompt markers. It must be unguessable so command output
+  // cannot forge completion/exit-code/cwd markers. Hex keeps it safe inside every shell script.
+  private readonly protocolToken = randomBytes(16).toString("hex");
   private readonly protocolPrefix = `\u001b]633;AgentBridge;${this.protocolToken};`;
   private readonly openPromise: Promise<void>;
   private resolveOpen!: () => void;
@@ -1080,38 +1100,26 @@ function normalizeRelativePath(value: string): string {
   return normalized || ".";
 }
 
-function isInside(root: string, candidate: string): boolean {
-  const rootResolved = path.resolve(root);
-  const candidateResolved = path.resolve(candidate);
-  const rootCmp = process.platform === "win32" ? rootResolved.toLowerCase() : rootResolved;
-  const candidateCmp = process.platform === "win32" ? candidateResolved.toLowerCase() : candidateResolved;
-  return candidateCmp === rootCmp || candidateCmp.startsWith(`${rootCmp}${path.sep}`);
-}
-
-function workspaceRoot(): string {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) throw new Error("No workspace folder is open.");
-  return folder.uri.fsPath;
-}
-
+/**
+ * Lexically resolve a workspace-relative path. In a multi-root workspace the first folder
+ * containing an existing entry wins; otherwise the first folder is used (single-root behaviour).
+ */
 function resolveWorkspacePath(relative = "."): { root: string; absolute: string; relative: string; uri: vscode.Uri } {
-  const root = workspaceRoot();
+  const roots = workspaceRootPaths();
   const rel = normalizeRelativePath(relative);
-  if (path.isAbsolute(rel)) throw new Error("Path must be workspace-relative.");
-  const absolute = path.resolve(root, rel);
-  if (!isInside(root, absolute)) throw new Error(`Path is outside the workspace: ${relative}`);
-  const normalizedRelative = path.relative(root, absolute).replace(/\\/g, "/") || ".";
-  return { root, absolute, relative: normalizedRelative, uri: vscode.Uri.file(absolute) };
+  if (path.isAbsolute(rel)) throw new ToolError("INVALID_PATH", "Path must be workspace-relative.", "Pass a path relative to the workspace root, for example src/index.ts.");
+  const resolved = resolveLexicalInRoots(roots, rel);
+  if (!resolved) throw new ToolError("PATH_OUTSIDE_WORKSPACE", `Path is outside the workspace: ${relative}`);
+  return { ...resolved, uri: vscode.Uri.file(resolved.absolute) };
 }
 
+/** Resolve an existing workspace-relative path through symlinks, searching folders in order. */
 async function resolveExistingWorkspacePath(relative = "."): Promise<{ root: string; absolute: string; relative: string; uri: vscode.Uri }> {
-  const lexical = resolveWorkspacePath(relative);
-  const [root, absolute] = await Promise.all([
-    fs.promises.realpath(lexical.root),
-    fs.promises.realpath(lexical.absolute),
-  ]);
-  if (!isInside(root, absolute)) throw new Error(`Path is outside the workspace: ${relative}`);
-  return { root, absolute, relative: lexical.relative, uri: vscode.Uri.file(absolute) };
+  const roots = workspaceRootPaths();
+  const rel = normalizeRelativePath(relative);
+  if (path.isAbsolute(rel)) throw new ToolError("INVALID_PATH", "Path must be workspace-relative.", "Pass a path relative to the workspace root, for example src/index.ts.");
+  const resolved = await resolveExistingInRoots(roots, rel, () => new ToolError("PATH_OUTSIDE_WORKSPACE", `Path is outside the workspace: ${relative}`));
+  return { root: resolved.root, absolute: resolved.absolute, relative: resolved.lexicalRelative, uri: vscode.Uri.file(resolved.absolute) };
 }
 
 function toolResult(text: string): vscode.LanguageModelToolResult {
@@ -1205,6 +1213,7 @@ export class TerminalCommandManager implements vscode.Disposable {
           state.exitCode = null;
           state.endedAt = Date.now();
           state.resolveDone();
+          notifyCommandWaiters(state);
         }
       }),
     );
@@ -1312,7 +1321,8 @@ export class TerminalCommandManager implements vscode.Disposable {
             return `${slot.id} · ${slot.busyCommandId ?? "?"} · ${mode} · ${summary}`;
           })
           .join("\n");
-        throw new Error(
+        throw new ToolError(
+          "TERMINALS_BUSY",
           `AgentBridge terminal limit reached (${MAX_TOTAL_TERMINALS} live terminals, all busy). ` +
           `Foreground commands are listed first; background commands may be intentionally long-lived. ` +
           `Wait for intended work to finish, or use terminate_command only for a command that is actually stuck:\n${busyLines}`,
@@ -1356,9 +1366,9 @@ export class TerminalCommandManager implements vscode.Disposable {
   }
 
   private displayCwd(absolute: string): string {
-    const root = workspaceRoot();
-    if (!isInside(root, absolute)) return absolute;
-    return path.relative(root, absolute).replace(/\\/g, "/") || ".";
+    const root = findContainingRoot(workspaceRootPaths(), absolute);
+    if (!root) return absolute;
+    return relativeToRoot(root, absolute);
   }
 
   private appendOutput(state: CommandState, text: string): void {
@@ -1411,6 +1421,7 @@ export class TerminalCommandManager implements vscode.Disposable {
       state.outputChunkHead = 0;
     }
     state.outputStartOffset = state.totalOutputBytes - state.retainedOutputBytes;
+    notifyCommandWaiters(state);
   }
 
   private finishState(state: CommandState, exitCode: number | null, status?: CommandState["status"]): void {
@@ -1421,6 +1432,7 @@ export class TerminalCommandManager implements vscode.Disposable {
     state.slot.lastUsedAt = state.endedAt;
     if (state.slot.busyCommandId === state.id) state.slot.busyCommandId = undefined;
     state.resolveDone();
+    notifyCommandWaiters(state);
     this.pruneIdleTerminals();
     pruneFinishedCommandStates(this.states, MAX_COMPLETED_STATES);
   }
@@ -1484,17 +1496,25 @@ export class TerminalCommandManager implements vscode.Disposable {
   async run(input: Record<string, unknown>): Promise<string> {
     const shellChoice = getManagedShellChoice();
     if (!RUN_COMMAND_SHELLS.has(shellChoice.kind)) {
-      throw new Error(
+      throw new ToolError(
+        "SHELL_UNSUPPORTED",
         `Managed shell "${shellChoice.description}" does not support run_command. ` +
         `Supported: PowerShell (Windows), bash (Linux), zsh (macOS). ` +
         `Switch via the agentbridge.bridge.managedShell.* settings.`,
       );
     }
     const command = asString(input.command).trim();
-    if (!command) throw new Error("command must be a non-empty string");
+    if (!command) throw new ToolError("INVALID_ARGUMENT", "command must be a non-empty string");
     const background = asBoolean(input.background, false);
-    if (typeof input.background !== "boolean") throw new Error("background must be explicitly true or false");
-    const timeoutMs = asInteger(input.timeout_ms, 120_000, 1_000, 120_000);
+    if (typeof input.background !== "boolean") {
+      throw new ToolError(
+        "INVALID_ARGUMENT",
+        "background must be explicitly true or false",
+        "Use background=false to wait for the result (builds, tests) or background=true for servers and watchers.",
+      );
+    }
+    // Out-of-range values (e.g. 120000 from clients with a cached tool list) are clamped, not rejected.
+    const timeoutMs = asInteger(input.timeout_ms, RUN_COMMAND_MAX_FOREGROUND_WAIT_MS, 1_000, RUN_COMMAND_MAX_FOREGROUND_WAIT_MS);
     const cwdInfo = typeof input.cwd === "string" && input.cwd.trim()
       ? await resolveExistingWorkspacePath(input.cwd)
       : undefined;
@@ -1580,12 +1600,71 @@ export class TerminalCommandManager implements vscode.Disposable {
     ].join("\n");
   }
 
-  getOutput(input: Record<string, unknown>): string {
-    const id = asString(input.command_id);
+  private requireCommandState(id: string): CommandState {
     const state = this.states.get(id);
-    if (!state) throw new Error(`Unknown command_id: ${id}. Only the ${MAX_COMPLETED_STATES} most recent finished commands are retained.`);
+    if (!state) {
+      throw new ToolError(
+        "UNKNOWN_COMMAND_ID",
+        `Unknown command_id: ${id}.`,
+        `Only the ${MAX_COMPLETED_STATES} most recent finished commands are retained, and command ids do not survive an AgentBridge reload. Start the command again with run_command if you still need its output.`,
+      );
+    }
+    return state;
+  }
+
+  /**
+   * Block until the command satisfies the wait condition, the deadline passes, or the tool
+   * call is cancelled. Wake-ups come from appendOutput/finishState/terminal close, so an idle
+   * wait costs nothing and returns immediately once the condition is met.
+   */
+  private waitForCommand(
+    state: CommandState,
+    offset: number,
+    until: CommandWaitCondition,
+    waitMs: number,
+    token?: vscode.CancellationToken,
+  ): Promise<CommandWaitResult> {
+    const satisfied = (): CommandWaitResult | undefined => {
+      if (state.status !== "running") return "exited";
+      if (until === "output" && state.totalOutputBytes > offset) return "output";
+      return undefined;
+    };
+    const immediate = satisfied();
+    if (immediate) return Promise.resolve(immediate);
+    if (token?.isCancellationRequested) return Promise.resolve("cancelled");
+    return new Promise<CommandWaitResult>((resolve) => {
+      const waiters = state.waiters ?? (state.waiters = new Set());
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancellation: vscode.Disposable | undefined;
+      const settle = (result: CommandWaitResult): void => {
+        if (timer) clearTimeout(timer);
+        waiters.delete(check);
+        cancellation?.dispose();
+        resolve(result);
+      };
+      const check = (): void => {
+        const result = satisfied();
+        if (result) settle(result);
+      };
+      waiters.add(check);
+      timer = setTimeout(() => settle("timeout"), waitMs);
+      cancellation = token?.onCancellationRequested(() => settle("cancelled"));
+    });
+  }
+
+  async getOutput(input: Record<string, unknown>, token?: vscode.CancellationToken): Promise<string> {
+    if (input.wait_until !== undefined && input.wait_until !== "exit" && input.wait_until !== "output") {
+      throw new ToolError("INVALID_ARGUMENT", "wait_until must be \"exit\" or \"output\".");
+    }
+    const id = asString(input.command_id);
+    const state = this.requireCommandState(id);
     const offset = asInteger(input.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const maxBytes = asInteger(input.max_bytes, DEFAULT_OUTPUT_BYTES, 1, MAX_OUTPUT_BYTES);
+    // Out-of-range wait_ms values are clamped like run_command timeout_ms, not rejected.
+    const waitMs = asInteger(input.wait_ms, 0, 0, GET_COMMAND_OUTPUT_MAX_WAIT_MS);
+    const waitUntil: CommandWaitCondition = input.wait_until === "output" ? "output" : "exit";
+    const waitStartedAt = Date.now();
+    const waitResult = waitMs > 0 ? await this.waitForCommand(state, offset, waitUntil, waitMs, token) : undefined;
     const snapshot = this.readOutput(state, offset, maxBytes);
     return [
       "=== COMMAND_OUTPUT BEGIN ===",
@@ -1600,6 +1679,7 @@ export class TerminalCommandManager implements vscode.Disposable {
       `total_output_bytes: ${snapshot.total_output_bytes}`,
       `output_lost: ${snapshot.output_lost}`,
       `has_more: ${snapshot.has_more}`,
+      ...(waitResult ? [`wait_result: ${waitResult}`, `waited_ms: ${Date.now() - waitStartedAt}`] : []),
       "--- OUTPUT BEGIN ---",
       String(snapshot.output ?? ""),
       "--- OUTPUT END ---",
@@ -1609,9 +1689,14 @@ export class TerminalCommandManager implements vscode.Disposable {
 
   sendInput(input: Record<string, unknown>): string {
     const id = asString(input.command_id);
-    const state = this.states.get(id);
-    if (!state) throw new Error(`Unknown command_id: ${id}. Only the ${MAX_COMPLETED_STATES} most recent finished commands are retained.`);
-    if (state.status !== "running") throw new Error(`Command ${id} is not running (status=${state.status}).`);
+    const state = this.requireCommandState(id);
+    if (state.status !== "running") {
+      throw new ToolError(
+        "COMMAND_NOT_RUNNING",
+        `Command ${id} is not running (status=${state.status}).`,
+        "Read its final output with get_command_output; start a new command with run_command if needed.",
+      );
+    }
     const text = asString(input.input);
     const appendNewline = asBoolean(input.append_newline, true);
     state.slot.pty.sendInput(text, appendNewline);
@@ -1628,8 +1713,7 @@ export class TerminalCommandManager implements vscode.Disposable {
 
   terminate(input: Record<string, unknown>): string {
     const id = asString(input.command_id);
-    const state = this.states.get(id);
-    if (!state) throw new Error(`Unknown command_id: ${id}. Only the ${MAX_COMPLETED_STATES} most recent finished commands are retained.`);
+    const state = this.requireCommandState(id);
     if (state.status !== "running") {
       return [
         "=== TERMINATE_COMMAND BEGIN ===",
@@ -1744,7 +1828,7 @@ function diagnosticCode(code: vscode.Diagnostic["code"]): string | number | unde
 }
 
 function getDiagnostics(input: Record<string, unknown>): string {
-  const root = workspaceRoot();
+  const roots = workspaceRootPaths();
   const scope = input.path === undefined ? undefined : resolveWorkspacePath(asString(input.path));
   const severities = Array.isArray(input.severity) ? new Set(input.severity.filter((value): value is string => typeof value === "string")) : undefined;
   const maxResults = asInteger(input.max_results, 100, 1, 500);
@@ -1752,7 +1836,8 @@ function getDiagnostics(input: Record<string, unknown>): string {
   let totalMatching = 0;
 
   for (const [uri, diagnostics] of vscode.languages.getDiagnostics()) {
-    if (uri.scheme !== "file" || !isInside(root, uri.fsPath)) continue;
+    const root = uri.scheme === "file" ? findContainingRoot(roots, uri.fsPath) : undefined;
+    if (!root) continue;
     if (scope) {
       const scopePath = path.resolve(scope.absolute);
       const candidate = path.resolve(uri.fsPath);
@@ -1836,16 +1921,16 @@ export class IdeToolBroker implements vscode.Disposable {
     return this.terminalManager.revealTerminal(terminalId);
   }
 
-  private async executeTool(name: string, input: Record<string, unknown>): Promise<vscode.LanguageModelToolResult> {
+  private async executeTool(name: string, input: Record<string, unknown>, token?: vscode.CancellationToken): Promise<vscode.LanguageModelToolResult> {
     switch (name) {
       case "list_directory": return toolResult(await listDirectory(input));
       case "run_command": return this.terminalResult(name, input, await this.terminalManager.run(input));
-      case "get_command_output": return this.terminalResult(name, input, this.terminalManager.getOutput(input));
+      case "get_command_output": return this.terminalResult(name, input, await this.terminalManager.getOutput(input, token));
       case "send_command_input": return this.terminalResult(name, input, this.terminalManager.sendInput(input));
       case "terminate_command": return this.terminalResult(name, input, this.terminalManager.terminate(input));
       case "get_diagnostics": return toolResult(getDiagnostics(input));
       case "lsp": return toolResult(await invokeLspTool(input));
-      default: throw new Error(`Unsupported IDE tool: ${name}`);
+      default: throw new ToolError("UNKNOWN_TOOL", `Unsupported IDE tool: ${name}`);
     }
   }
 
@@ -1896,15 +1981,14 @@ export class IdeToolBroker implements vscode.Disposable {
     args: Record<string, unknown>,
     cancellationToken?: vscode.CancellationToken,
   ): Promise<{ text: string; isError: boolean }> {
-    if (!getIdeToolDefinition(name)) return { text: `Unknown IDE tool: ${name}`, isError: true };
-    if (cancellationToken?.isCancellationRequested) return { text: `IDE tool ${name} canceled.`, isError: true };
+    if (!getIdeToolDefinition(name)) return { text: formatToolError(new ToolError("UNKNOWN_TOOL", `Unknown IDE tool: ${name}`)), isError: true };
+    if (cancellationToken?.isCancellationRequested) return { text: `CANCELLED: IDE tool ${name} canceled.`, isError: true };
     try {
-      const result = await this.executeTool(name, args);
-      if (cancellationToken?.isCancellationRequested) return { text: `IDE tool ${name} canceled.`, isError: true };
+      const result = await this.executeTool(name, args, cancellationToken);
+      if (cancellationToken?.isCancellationRequested) return { text: `CANCELLED: IDE tool ${name} canceled.`, isError: true };
       return { text: resultText(result), isError: false };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return { text: `IDE tool ${name} failed: ${message}`, isError: true };
+      return { text: formatToolError(error), isError: true };
     }
   }
 

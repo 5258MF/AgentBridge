@@ -126,12 +126,15 @@ async function canonicalRoots(roots: string[]): Promise<string[]> {
 
 async function resolveSafeScope(requestedPath: string, roots: string[]): Promise<{ realPath: string; root: string }> {
   const canonical = await canonicalRoots(roots);
+  const lexicalRoots = [...roots.map((root) => path.resolve(root)), ...canonical];
   const candidates = path.isAbsolute(requestedPath)
     ? [requestedPath]
     : canonical.map((root) => path.resolve(root, requestedPath));
 
   let sawNotFound = false;
   for (const candidate of candidates) {
+    // Lexical containment first: outside paths never reveal whether they exist.
+    if (!lexicalRoots.some((root) => isInsideRoot(root, path.resolve(candidate)))) continue;
     try {
       const target = await realpath(candidate);
       const root = canonical.find((candidateRoot) => isInsideRoot(candidateRoot, target));

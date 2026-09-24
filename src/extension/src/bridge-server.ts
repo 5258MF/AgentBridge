@@ -1,6 +1,5 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { isIPv4 } from "node:net";
 import path from "node:path";
@@ -15,6 +14,8 @@ import { getManagedShellChoice } from "./ide-tool-broker.js";
 import { managedShellExecutable, managedShellOverrideWarning } from "./ide-tool-broker.js";
 import type { IdeToolBroker } from "./ide-tool-broker.js";
 import { translate } from "./i18n.js";
+import { formatSetTodosResult } from "./todo-format.js";
+import { formatToolError, ToolError } from "./tool-errors.js";
 import {
   appendCloudflaredDiagnosticOutput,
   cloudflaredFirstQuicFailureAt,
@@ -62,7 +63,7 @@ const TUNNEL_PROTOCOL_SETTING = "bridge.tunnelProtocol";
 const TRUSTED_BROWSER_ORIGINS_SETTING = "bridge.trustedBrowserOrigins";
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_ACTIVITY = 60;
-const MAX_TODOS = 24;
+export const MAX_TODOS = 24;
 /** Idle sessions are retained long enough for ChatGPT to pause and resume without being forced to reinitialize. */
 const SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 const SESSION_PRUNE_INTERVAL_MS = 60_000;
@@ -216,45 +217,63 @@ function classifyCloudflaredInstallFailure(error: unknown): Exclude<CloudflaredI
   return "command-failed";
 }
 
-const BRIDGE_SERVER_INSTRUCTIONS = `You are connected to the currently open AgentBridge workspace.
+/**
+ * Server instructions, one entry per line after the intro. When read-only mode is active,
+ * lines that depend on a blocked tool are dropped (or replaced by readOnlyText) and a read-only
+ * section is placed right after the intro, so the instructions never recommend a tool the
+ * session cannot use. Normal mode renders byte-for-byte the previous fixed text;
+ * tests/server-instructions.test.ts pins both variants.
+ */
+interface InstructionLine {
+  readonly text: string;
+  readonly requires?: readonly string[];
+  readonly readOnlyText?: string;
+}
 
-AgentBridge executes tools and displays your task state, progress, and tool activity to the local user.
+const INSTRUCTION_INTRO = "You are connected to the currently open AgentBridge workspace.";
 
-Use:
-- list_directory/find_files to discover files
-- search_files for raw text search
-- lsp for semantic code navigation
-- read_files before editing
-- apply_patch for workspace changes
-- get_diagnostics after edits
-- run_command for builds and tests
-- terminate_command for a hard stop when cooperative Ctrl+C does not stop a command
-- set_todos to maintain the complete task list for multi-step work
-- report_progress to report transient progress for the current task
-
-Task coordination:
-- Use set_todos for multi-step work, significant replanning, or validation workflows.
-- Send the complete ordered todo list whenever task state changes.
-- Keep at most one todo in_progress.
-- Use stable todo IDs across updates.
-- Keep todos at the goal level; do not create one todo per tool call.
-- Use report_progress for what you are doing right now, not for durable task state.
-- When there is exactly one in_progress todo, report_progress is automatically associated with it.
-- Pass todo_id only when an explicit association is needed.
-- Send an empty todo list when the task state should be cleared.
-
-Tool guidance:
-- Prefer semantic navigation over broad text search when locating code symbols.
-- Do not assume an empty LSP result means a symbol does not exist.
-- Use search_files for exact text and lsp for symbols, definitions, references, and type information.
-- Reread affected files after stale patch or context-mismatch failures before retrying.
-- Prefer small, focused patches with enough unique context.
-- Run diagnostics and relevant tests after meaningful edits.
-- Report meaningful progress periodically during long work, but avoid progress updates for every tool call.`;
+const INSTRUCTION_LINES: readonly InstructionLine[] = [
+  { text: "" },
+  { text: "AgentBridge executes tools and displays your task state, progress, and tool activity to the local user." },
+  { text: "" },
+  { text: "Use:" },
+  { text: "- list_directory/find_files to discover files" },
+  { text: "- search_files for raw text search" },
+  { text: "- lsp for semantic code navigation" },
+  { text: "- read_files before editing", readOnlyText: "- read_files to read file contents" },
+  { text: "- apply_patch for workspace changes", requires: ["apply_patch"] },
+  { text: "- get_diagnostics after edits", readOnlyText: "- get_diagnostics to inspect current errors and warnings" },
+  { text: "- run_command for builds and tests", requires: ["run_command"] },
+  { text: "- terminate_command for a hard stop when cooperative Ctrl+C does not stop a command", requires: ["terminate_command"] },
+  { text: "- set_todos to maintain the complete task list for multi-step work" },
+  { text: "- report_progress to report transient progress for the current task" },
+  { text: "" },
+  { text: "Task coordination:" },
+  { text: "- Use set_todos for multi-step work, significant replanning, or validation workflows." },
+  { text: "- Send the complete ordered todo list whenever task state changes." },
+  { text: "- Keep at most one todo in_progress." },
+  { text: "- Use stable todo IDs across updates." },
+  { text: "- Keep todos at the goal level; do not create one todo per tool call." },
+  { text: "- Use report_progress for what you are doing right now, not for durable task state." },
+  { text: "- When there is exactly one in_progress todo, report_progress is automatically associated with it." },
+  { text: "- Pass todo_id only when an explicit association is needed." },
+  { text: "- Send an empty todo list when the task state should be cleared." },
+  { text: "" },
+  { text: "Tool guidance:" },
+  { text: "- Prefer semantic navigation over broad text search when locating code symbols." },
+  { text: "- Do not assume an empty LSP result means a symbol does not exist." },
+  { text: "- Use search_files for exact text and lsp for symbols, definitions, references, and type information." },
+  { text: "- Reread affected files after stale patch or context-mismatch failures before retrying.", requires: ["apply_patch"] },
+  { text: "- Prefer small, focused patches with enough unique context.", requires: ["apply_patch"] },
+  { text: "- Run diagnostics and relevant tests after meaningful edits.", requires: ["apply_patch"] },
+  { text: "- Report meaningful progress periodically during long work, but avoid progress updates for every tool call." },
+  { text: "- To wait for a running command, call get_command_output with wait_ms instead of polling it repeatedly or running sleep commands.", requires: ["run_command"] },
+  { text: "- Failed tool results start with a stable UPPER_SNAKE_CASE error code (for example INVALID_ARGUMENT, STALE_FILE, UNKNOWN_COMMAND_ID, READ_ONLY_MODE), sometimes followed by a Hint line. Use the code to choose a recovery instead of retrying blindly." },
+];
 
 export const SET_TODOS_TOOL = {
   name: "set_todos",
-  description: "Set the complete durable task list for the current remote-agent job in AgentBridge. Use this for multi-step work so the local user can see what is done, in progress, and still pending. Send the full list whenever the plan changes; keep at most one item in_progress. Use report_progress for transient details about the current step instead of creating tool-call-sized todos. Send an empty list to clear task state.",
+  description: `Set the complete durable task list for the current remote-agent job in AgentBridge. Use this for multi-step work so the local user can see what is done, in progress, and still pending. Send the full list whenever the plan changes; keep at most one item in_progress and at most ${MAX_TODOS} items. Use report_progress for transient details about the current step instead of creating tool-call-sized todos. Send an empty list to clear task state. The result echoes the stored list.`,
   inputSchema: {
     type: "object",
     required: ["todos"],
@@ -321,7 +340,57 @@ export const BRIDGE_TOOL_DEFINITIONS = [
  *   instead of acting on the environment, so it stays blocked for consistency
  *   with the other execute tools.
  */
-const READ_ONLY_BLOCKED_TOOL_NAMES = new Set<string>(["apply_patch", "run_command", "send_command_input", "terminate_command"]);
+export const READ_ONLY_BLOCKED_TOOL_NAMES: ReadonlySet<string> = new Set<string>(["apply_patch", "run_command", "send_command_input", "terminate_command"]);
+
+function formatNameList(names: readonly string[]): string {
+  if (names.length <= 2) return names.join(" and ");
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+/** Read-only section, generated from READ_ONLY_BLOCKED_TOOL_NAMES so it cannot drift. */
+function readOnlyInstructions(): string {
+  return [
+    `Read-only mode is ACTIVE: ${formatNameList([...READ_ONLY_BLOCKED_TOOL_NAMES])} are disabled.`,
+    "- Investigate with the read tools, get_diagnostics, and lsp.",
+    "- Present proposed changes as a patch or diff in your reply instead of applying them.",
+    "- Suggest commands for the user to run instead of running them.",
+    "- set_todos and report_progress remain available for task state and progress.",
+    "- If the user asks you to apply changes, explain that read-only mode must first be turned off in the AgentBridge panel.",
+  ].join("\n");
+}
+
+/**
+ * MCP server instructions for a new session.
+ * @param readOnly - whether read-only mode is active when the session is created.
+ */
+export function buildServerInstructions(readOnly: boolean): string {
+  const body = INSTRUCTION_LINES
+    .filter((line) => !readOnly || !line.requires?.some((name) => READ_ONLY_BLOCKED_TOOL_NAMES.has(name)))
+    .map((line) => (readOnly && line.readOnlyText !== undefined ? line.readOnlyText : line.text));
+  return [INSTRUCTION_INTRO, ...(readOnly ? ["", readOnlyInstructions()] : []), ...body].join("\n");
+}
+
+/**
+ * One-time notice prefixed to a session's next tool result after the user toggles read-only
+ * mode, because the instructions that session received describe the previous mode.
+ * @param readOnly - the mode now in effect.
+ */
+export function buildReadOnlyTransitionNotice(readOnly: boolean): string {
+  const blocked = formatNameList([...READ_ONLY_BLOCKED_TOOL_NAMES]);
+  return readOnly
+    ? `[AgentBridge notice] The user turned read-only mode ON since your last tool call. ${blocked} are now disabled and fail with READ_ONLY_MODE. Continue with read-only investigation, present proposed changes as a patch or diff in your reply, and suggest commands for the user to run. The result of this call follows.`
+    : `[AgentBridge notice] The user turned read-only mode OFF since your last tool call. ${blocked} are available again, and the read-only guidance you received earlier no longer applies. If your tool list still lacks them, ask the user to refresh it. The result of this call follows.`;
+}
+
+/**
+ * Reminder prefixed to the first tool result of a session created in read-only mode.
+ * Worded neutrally: the model may be continuing a conversation from an earlier, closed
+ * session that ran in normal mode, and the client may not have shown it the instructions.
+ */
+export function buildReadOnlySessionNotice(): string {
+  const blocked = formatNameList([...READ_ONLY_BLOCKED_TOOL_NAMES]);
+  return `[AgentBridge notice] Read-only mode is ON for this connection. ${blocked} are disabled and fail with READ_ONLY_MODE, even if earlier messages in this conversation used them. Continue with read-only investigation, present proposed changes as a patch or diff in your reply, and suggest commands for the user to run. The result of this call follows.`;
+}
 
 export interface BridgeActivity {
   readonly id: number;
@@ -873,6 +942,17 @@ interface McpSession {
   lastActivity: number;
   activeRequests: number;
   activeStreams: number;
+  /**
+   * Read-only state the model was last told about: the mode baked into this session's
+   * instructions, then updated whenever a transition notice is delivered in a tool result.
+   */
+  toldReadOnly?: boolean;
+  /**
+   * True for a session created while read-only mode was active, until its first tool call.
+   * That call repeats the read-only guidance in its result, because clients may not show
+   * server instructions to the model (for example after reconnecting mid-conversation).
+   */
+  firstCallReminderPending?: boolean;
 }
 
 class BoundedInMemoryEventStore implements EventStore {
@@ -1000,6 +1080,17 @@ function writeJsonError(response: ServerResponse, statusCode: number, message: s
     error: { code: statusCode === 404 ? -32004 : -32000, message },
     id: null,
   }));
+}
+
+/**
+ * Constant-time string comparison for secret-bearing values such as route-token paths.
+ * Both sides are hashed to fixed-length SHA-256 digests first, so timingSafeEqual never
+ * throws on length mismatch and the comparison time does not leak the secret's length.
+ */
+export function constantTimeStringEqual(a: string, b: string): boolean {
+  const left = createHash("sha256").update(a, "utf8").digest();
+  const right = createHash("sha256").update(b, "utf8").digest();
+  return timingSafeEqual(left, right);
 }
 
 export function normalizeTrustedBrowserOrigin(value: string): string | undefined {
@@ -1316,14 +1407,52 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   /**
+   * Every Bridge start begins in Build mode (read-only off), so clients connecting to the new
+   * endpoint fetch the full tool list instead of caching a Plan-mode list that lacks the
+   * modifying tools. Only start() reaches this (Start button, persistent auto-start, command);
+   * automatic tunnel recovery restarts the tunnel directly and keeps the current mode.
+   */
+  private async resetToBuildModeForStart(): Promise<void> {
+    if (!this.readOnlyMode && !this.readReadOnlyMode()) return;
+    this.setReadOnlyMode(false);
+    try {
+      await vscode.workspace.getConfiguration("agentbridge.bridge").update("readOnlyMode", false, vscode.ConfigurationTarget.Global);
+    } catch (error) {
+      this.output.appendLine(`[bridge] could not persist Build mode on start: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.output.appendLine("[bridge] start: Build mode (read-only off), so new sessions get the full tool list");
+  }
+
+  /**
    * Hot-apply read-only mode without restarting the Bridge. The tools/list
    * filter takes effect for the next list request; the hard block in
    * handleToolCall covers clients that cached the old tool list, so toggling
    * is safe at any time.
    */
   setReadOnlyMode(enabled: boolean): void {
+    // Both the panel handler and the configuration listener call this for one toggle;
+    // the repeat is a no-op so it neither logs twice nor re-notifies clients.
+    if (this.readOnlyMode === enabled) return;
     this.readOnlyMode = enabled;
     this.output.appendLine(`[bridge] read-only mode ${enabled ? "enabled" : "disabled"}`);
+    this.notifyToolListChanged();
+  }
+
+  /**
+   * Ask connected clients to re-fetch tools/list (MCP notifications/tools/list_changed) so
+   * blocked tools disappear, or reappear, without a manual refresh. Delivery needs an open
+   * standalone SSE stream; clients that ignore the notification are still covered by the
+   * call-time block in handleToolCall. Server instructions are fixed per session by the
+   * protocol and are not affected.
+   */
+  private notifyToolListChanged(): void {
+    for (const [sessionId, session] of this.sessions) {
+      Promise.resolve()
+        .then(() => session.server.sendToolListChanged())
+        .catch((error: unknown) => {
+          this.output.appendLine(`[bridge] tools/list_changed not delivered to session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+        });
+    }
   }
 
   private readPersistedDomain(): string {
@@ -1945,6 +2074,9 @@ export class BridgeManager implements vscode.Disposable {
 
       const folders = vscode.workspace.workspaceFolders;
       if (!folders?.length) throw new Error("Open a workspace folder before starting the Bridge.");
+
+      await this.resetToBuildModeForStart();
+      this.assertStartGeneration(generation);
 
       const tunnel = await this.checkTunnelInternal(true);
       this.assertStartGeneration(generation);
@@ -3125,7 +3257,7 @@ export class BridgeManager implements vscode.Disposable {
       writeJsonError(response, 503, "Bridge is stopping.");
       return;
     }
-    if (url.pathname === healthPath) {
+    if (constantTimeStringEqual(url.pathname, healthPath)) {
       if (request.method !== "GET" && request.method !== "HEAD") {
         writeJsonError(response, 405, "Method not allowed.");
         return;
@@ -3140,7 +3272,7 @@ export class BridgeManager implements vscode.Disposable {
       }
       return;
     }
-    if (url.pathname !== endpointPath) {
+    if (!constantTimeStringEqual(url.pathname, endpointPath)) {
       writeJsonError(response, 404, "Not found");
       return;
     }
@@ -3307,13 +3439,12 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   private createSession(ownerServer: HttpServer, ownerGeneration: number, onSessionInitialized?: () => void): { transport: StreamableHTTPServerTransport; server: McpServer } {
-    const instructions = this.readOnlyMode
-      ? `${BRIDGE_SERVER_INSTRUCTIONS}\n\nRead-only mode is ACTIVE: apply_patch, run_command, send_command_input, and terminate_command are disabled. Do not attempt file modifications or command execution; report findings and proposed changes to the user instead.`
-      : BRIDGE_SERVER_INSTRUCTIONS;
+    const instructions = buildServerInstructions(this.readOnlyMode);
+    const instructionsReadOnly = this.readOnlyMode;
     const packageVersion = String(this.context.extension.packageJSON.version ?? "").trim() || "0.0.0";
     const server = new McpServer(
       { name: "agentbridge", version: packageVersion },
-      { capabilities: { tools: {}, logging: {} }, instructions },
+      { capabilities: { tools: { listChanged: true }, logging: {} }, instructions },
     );
     let transport!: StreamableHTTPServerTransport;
     transport = new StreamableHTTPServerTransport({
@@ -3334,6 +3465,8 @@ export class BridgeManager implements vscode.Disposable {
           lastActivity: Date.now(),
           activeRequests: 0,
           activeStreams: 0,
+          toldReadOnly: instructionsReadOnly,
+          firstCallReminderPending: instructionsReadOnly,
         });
         this.revision += 1;
         this.output.appendLine(`[bridge] new MCP session: ${sid}`);
@@ -3376,13 +3509,56 @@ export class BridgeManager implements vscode.Disposable {
     return { transport, server };
   }
 
+  /**
+   * Run a tool call and, when read-only mode changed since this session was last told,
+   * prefix the result with a one-time notice. Tool results are the only per-turn channel an
+   * MCP server has: instructions are fixed at initialize and many clients ignore list_changed.
+   */
   private async handleToolCall(
     toolName: string,
     args: Record<string, unknown>,
     extra: { signal?: AbortSignal; sessionId?: string },
   ): Promise<{ content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean; structuredContent?: Record<string, unknown> }> {
+    const notice = this.takeReadOnlyTransitionNotice(extra.sessionId);
+    const result = await this.executeToolCall(toolName, args, extra);
+    if (!notice) return result;
+    const [first, ...rest] = result.content;
+    const content = first?.type === "text"
+      ? [{ type: "text" as const, text: `${notice}\n\n${first.text}` }, ...rest]
+      : [{ type: "text" as const, text: notice }, ...result.content];
+    return { ...result, content };
+  }
+
+  /**
+   * Return the notice owed to a session, if any:
+   * - a transition notice, at most once per actual change since the model was last told
+   *   (a toggle that ends where the model was last told owes nothing);
+   * - otherwise, on the first tool call of a session created in read-only mode, a reminder
+   *   that read-only mode is ON, since the model may never have seen the instructions.
+   */
+  private takeReadOnlyTransitionNotice(sessionId: string | undefined): string | undefined {
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (!session || typeof session.toldReadOnly !== "boolean") return undefined;
+    const firstCallReminder = session.firstCallReminderPending === true;
+    session.firstCallReminderPending = false;
+    if (session.toldReadOnly !== this.readOnlyMode) {
+      session.toldReadOnly = this.readOnlyMode;
+      return buildReadOnlyTransitionNotice(this.readOnlyMode);
+    }
+    return firstCallReminder && this.readOnlyMode ? buildReadOnlySessionNotice() : undefined;
+  }
+
+  private async executeToolCall(
+    toolName: string,
+    args: Record<string, unknown>,
+    extra: { signal?: AbortSignal; sessionId?: string },
+  ): Promise<{ content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean; structuredContent?: Record<string, unknown> }> {
     if (this.readOnlyMode && READ_ONLY_BLOCKED_TOOL_NAMES.has(toolName)) {
-      const errorMsg = `Tool ${toolName} is disabled in read-only mode. AgentBridge is currently running with modifications and command execution blocked.`;
+      const errorMsg = formatToolError(new ToolError(
+        "READ_ONLY_MODE",
+        `Tool ${toolName} is disabled in read-only mode. AgentBridge is currently running with modifications and command execution blocked.`,
+        "Do not retry. Report findings and proposed changes to the user instead; only the local user can turn read-only mode off.",
+      ));
       const activityId = this.pushActivity({
         tool: toolName,
         status: "running",
@@ -3395,11 +3571,16 @@ export class BridgeManager implements vscode.Disposable {
         isError: true,
       };
     }
-    if (toolName === SET_TODOS_TOOL.name) {
-      return this.handleSetTodos(args);
-    }
-    if (toolName === REPORT_PROGRESS_TOOL.name) {
-      return this.handleReportProgress(args, extra.sessionId);
+    if (toolName === SET_TODOS_TOOL.name || toolName === REPORT_PROGRESS_TOOL.name) {
+      // Validation failures must come back as tool errors (isError) the model can correct,
+      // not escape as JSON-RPC protocol errors.
+      try {
+        return toolName === SET_TODOS_TOOL.name
+          ? this.handleSetTodos(args)
+          : this.handleReportProgress(args, extra.sessionId);
+      } catch (error) {
+        return { isError: true, content: [{ type: "text" as const, text: formatToolError(error, "INVALID_ARGUMENT") }] };
+      }
     }
 
     const activityId = this.pushActivity({
@@ -3437,7 +3618,7 @@ export class BridgeManager implements vscode.Disposable {
       }
 
       if (BRIDGE_EXCLUDED_TOOL_NAMES.has(toolName)) {
-        throw new Error(`The ${toolName} tool is not available in Bridge mode.`);
+        throw new ToolError("UNKNOWN_TOOL", `The ${toolName} tool is not available in Bridge mode.`);
       }
 
       const definition = getIdeToolDefinition(toolName);
@@ -3461,9 +3642,13 @@ export class BridgeManager implements vscode.Disposable {
         }
       }
 
-      throw new Error(`Unknown Bridge tool: ${toolName}`);
+      throw new ToolError(
+        "UNKNOWN_TOOL",
+        `Unknown Bridge tool: ${toolName}`,
+        "Refresh the tool list (tools/list); ChatGPT Connectors need Settings → Connectors → Refresh after AgentBridge updates.",
+      );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = formatToolError(error);
       this.finishActivity(activityId, "error", Date.now() - startedAt, message, bridgePresentation(toolName, args, message, undefined, true));
       return {
         isError: true,
@@ -3597,19 +3782,12 @@ export class BridgeManager implements vscode.Disposable {
     this.output.appendLine(todos.length
       ? `[bridge-todos] ${completed}/${todos.length} completed${current ? ` · current: [${current.id}] ${current.title}` : ""}`
       : "[bridge-todos] cleared");
-    return {
-      content: [{
-        type: "text",
-        text: todos.length
-          ? `Todo state updated in AgentBridge: ${completed}/${todos.length} completed${current ? `; current todo ${current.id}: ${current.title}` : ""}.`
-          : "Todo state cleared in AgentBridge.",
-      }],
-    };
+    return { content: [{ type: "text", text: formatSetTodosResult(todos) }] };
   }
 
   private workspaceRoots(): string[] {
     const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
-    if (!roots.length) throw new Error("No workspace folder is open.");
+    if (!roots.length) throw new ToolError("NO_WORKSPACE", "No workspace folder is open.", "Ask the user to open a folder in VS Code.");
     return roots;
   }
 

@@ -145,12 +145,16 @@ async function resolveSafePath(requestedPath: string, roots: string[]): Promise<
   }
 
   const canonicalRoots = await Promise.all(roots.map((root) => realpath(root)));
+  // Containment is checked lexically before touching the filesystem, so a path outside the
+  // workspace always reports PATH_OUTSIDE_WORKSPACE and never reveals whether it exists.
+  const lexicalRoots = [...roots.map((root) => path.resolve(root)), ...canonicalRoots];
   const candidates = path.isAbsolute(requestedPath)
     ? [requestedPath]
     : canonicalRoots.map((root) => path.resolve(root, requestedPath));
 
   let lastNotFound: unknown;
   for (const candidate of candidates) {
+    if (!lexicalRoots.some((root) => isInsideRoot(root, path.resolve(candidate)))) continue;
     try {
       const canonicalTarget = await realpath(candidate);
       if (canonicalRoots.some((root) => isInsideRoot(root, canonicalTarget))) {

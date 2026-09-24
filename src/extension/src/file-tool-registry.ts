@@ -1,6 +1,6 @@
 import { applyPatch, formatApplyPatchForModel, type ApplyPatchInput } from "./apply-patch.js";
 import { findFiles, formatFindFilesForModel, type FindFilesInput } from "./find-files.js";
-import { formatReadFilesForModel, readFiles, type ReadFilesInput } from "./read-files.js";
+import { DEFAULT_READ_FILES_CONFIG, formatReadFilesForModel, readFiles, type ReadFilesInput } from "./read-files.js";
 import { formatReadImageFileForModel, readImageFile, type ReadImageFileInput } from "./read-files.js";
 import { formatSearchFilesForModel, searchFiles, type SearchFilesInput } from "./search-files.js";
 
@@ -37,7 +37,7 @@ export const READ_FILES_TOOL = {
   name: "read_files",
   description: [
     "Read one or more UTF-8 text files from the current workspace.",
-    "Batch independent files together in one call.",
+    `Batch independent files together in one call, at most ${DEFAULT_READ_FILES_CONFIG.maxFilesPerCall} files per call; split larger batches into several calls.`,
     "For small files, omit start_line/end_line to read the complete file.",
     "For large files, results may be truncated and include next_start_line.",
     "A satisfied explicit range can still report has_more=true when the file continues afterward.",
@@ -50,7 +50,7 @@ export const READ_FILES_TOOL = {
       files: {
         type: "array",
         minItems: 1,
-        maxItems: 20,
+        maxItems: DEFAULT_READ_FILES_CONFIG.maxFilesPerCall,
         description: "Files to read. Independent files should be requested together.",
         items: {
           type: "object",
@@ -110,7 +110,7 @@ export const FIND_FILES_TOOL = {
   description: [
     "Find files by path/name glob patterns inside the current workspace; this does not search file contents.",
     "Use find_files when you know a filename, extension, or path shape but not the exact path. Use search_files when you need to search file contents.",
-    "Batch independent file patterns together in the patterns array instead of making separate calls.",
+    "Batch independent file patterns together in the patterns array (at most 20 patterns) instead of making separate calls.",
     "Patterns are evaluated within path, which defaults to the workspace root. Results are files only, never directories.",
     "By default matching is case-insensitive, ignored/common generated directories and hidden paths are skipped, and results are sorted by modification time newest first.",
     "Use exclude for additional path globs, include_hidden/no_ignore only when those files are intentionally needed, and sort='path_asc' when deterministic path order matters.",

@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { invalidateManagedShellCache, sanityCheckManagedShellPath } from "./ide-tool-broker.js";
-import { BridgeStartCancelledError, normalizeTrustedBrowserOrigin, type BridgeManager, type BridgeStatus } from "./bridge-server.js";
+import { BridgeStartCancelledError, normalizeTrustedBrowserOrigin, READ_ONLY_BLOCKED_TOOL_NAMES, type BridgeManager, type BridgeStatus } from "./bridge-server.js";
 import { createTranslator, detectLang, enMessages, readLanguagePreference, translate, zhMessages } from "./i18n.js";
 
 const POLL_INTERVAL_MS = 1500;
@@ -691,6 +691,15 @@ private renderHtml(advancedOpen = false): string {
   .agentbridge-switch[aria-checked=true] .agentbridge-switch-track::after { transform: translateX(16px); background: var(--vscode-button-foreground); }
   .agentbridge-switch:focus-visible .agentbridge-switch-track { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
   .agentbridge-switch:disabled { opacity: .55; cursor: default; }
+  /* Plan | Build segmented switch in the hero header; the active side shows the current mode. */
+  .agentbridge-mode-switch { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, rgba(128,128,128,.45))); border-radius: 4px; overflow: hidden; }
+  .agentbridge-mode-switch button { width: auto; min-width: 0; margin: 0; padding: 2px 10px; border: 0; border-radius: 0; background: transparent; color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 600; line-height: 16px; white-space: nowrap; cursor: pointer; }
+  .agentbridge-mode-switch button + button { border-left: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, rgba(128,128,128,.45))); }
+  .agentbridge-mode-switch button[aria-checked=true] { background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: default; }
+  .agentbridge-mode-switch button.agentbridge-mode-plan[aria-checked=true] { background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 16%, transparent); color: var(--vscode-editorWarning-foreground, #cca700); box-shadow: inset 0 0 0 1px var(--vscode-editorWarning-foreground, #cca700); }
+  .agentbridge-mode-switch button:not([aria-checked=true]):not(:disabled):hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.15)); }
+  .agentbridge-mode-switch button:disabled { opacity: .55; cursor: default; }
+  .agentbridge-mode-switch button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   button { font: inherit; }
   button.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 4px 12px; border-radius: 2px; cursor: pointer; min-height: 26px; }
   button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
@@ -868,13 +877,17 @@ private renderHtml(advancedOpen = false): string {
   <div class="agentbridge-card agentbridge-hero">
     <div class="agentbridge-card-header">
       <h2>AgentBridge</h2>
-      <span style="display:flex; gap:6px; align-items:center;">
-        <span class="agentbridge-state state-stopped" id="readOnlyBadge" style="display:none;">${t("readOnlyBadge")}</span>
+      <span style="display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; align-items:center;">
+        <span class="agentbridge-mode-switch" role="radiogroup" aria-label="${escapeHtml(t("modeSwitchLabel"))}">
+          <button class="agentbridge-mode-plan" id="modePlanButton" role="radio" aria-checked="false" type="button" title="${escapeHtml(t("modePlanTitle") + [...READ_ONLY_BLOCKED_TOOL_NAMES].join(", "))}" disabled>${t("modePlan")}</button>
+          <button class="agentbridge-mode-build" id="modeBuildButton" role="radio" aria-checked="true" type="button" title="${escapeHtml(t("modeBuildTitle"))}" disabled>${t("modeBuild")}</button>
+        </span>
         <span class="agentbridge-state state-stopped" id="stateBadge">…</span>
       </span>
     </div>
     <p class="agentbridge-hero-description">${t("heroDescription")}</p>
     <div class="agentbridge-status-details" id="stateDetails">${t("loadingBridgeStatus")}</div>
+    <div class="agentbridge-address-notice" id="readOnlyNotice" role="status" style="display:none"></div>
     <div class="agentbridge-open-folder-group" id="openFolderGroup" style="display:none">
       <p class="agentbridge-open-folder-hint">${t("openFolderHint")}</p>
       <button class="secondary" id="openFolderButton" type="button">${t("openFolderButton")}</button>
@@ -1114,15 +1127,6 @@ private renderHtml(advancedOpen = false): string {
             <button class="secondary" id="trustedBrowserOriginsSaveButton" disabled>${t("saveTrustedBrowserOrigins")}</button>
           </div>
           <div class="agentbridge-help" id="trustedBrowserOriginsStatus" style="display:none; margin-top:6px;"></div>
-        </div>
-        <div class="agentbridge-persistent-row" style="margin-top:10px;">
-          <div class="agentbridge-persistent-text">
-            <label class="agentbridge-label">${t("readOnlyLabel")}</label>
-            <div class="agentbridge-help">${t("readOnlyHelp")}</div>
-          </div>
-          <button class="agentbridge-switch" id="readOnlyToggle" role="switch" type="button" disabled>
-            <span class="agentbridge-switch-track"></span>
-          </button>
         </div>
       </div>
       <div class="agentbridge-advanced-section">
@@ -1947,9 +1951,20 @@ private renderHtml(advancedOpen = false): string {
       $('persistentModeToggle').title = persistentMode ? t('persistentOnTitle') : t('persistentOffTitle');
     }
     const readOnlyActive = status.readOnlyMode === true;
-    $('readOnlyToggle').setAttribute('aria-checked', String(readOnlyActive));
-    $('readOnlyToggle').title = readOnlyActive ? t('readOnlyOnTitle') : t('readOnlyOffTitle');
-    $('readOnlyBadge').style.display = readOnlyActive ? '' : 'none';
+    renderMode(readOnlyActive);
+    // The read-only notice stays until the next toggle. It is only dropped when the mode later
+    // changes elsewhere (settings.json), after a status has first confirmed the toggled mode.
+    const readOnlyNotice = $('readOnlyNotice');
+    if (readOnlyNotice.dataset.mode) {
+      if (readOnlyActive === (readOnlyNotice.dataset.mode === 'on')) {
+        readOnlyNotice.dataset.confirmed = 'true';
+      } else if (readOnlyNotice.dataset.confirmed === 'true') {
+        readOnlyNotice.style.display = 'none';
+        readOnlyNotice.textContent = '';
+        readOnlyNotice.dataset.mode = '';
+        readOnlyNotice.dataset.confirmed = '';
+      }
+    }
     if (typeof status.openInternalBrowser === 'string' && ['auto','all','external'].includes(status.openInternalBrowser)) {
       $('openInternalBrowserAuto').setAttribute('aria-checked', String(status.openInternalBrowser === 'auto'));
       $('openInternalBrowserAll').setAttribute('aria-checked', String(status.openInternalBrowser === 'all'));
@@ -2016,7 +2031,8 @@ private renderHtml(advancedOpen = false): string {
     $('startStopButton').disabled = !statusLoaded || tunnelOperationBusy || starting || cloudflareStartBlocked;
     $('startStopButton').textContent = running ? t('stopBridge') : starting ? t('starting') : t('startBridge');
     $('persistentModeToggle').disabled = !statusLoaded || busy || cloudflaredInstallInProgress;
-    $('readOnlyToggle').disabled = !statusLoaded || busy;
+    $('modePlanButton').disabled = !statusLoaded || busy;
+    $('modeBuildButton').disabled = !statusLoaded || busy;
     $('managedShellInput').disabled = !statusLoaded || busy;
     $('managedShellSaveButton').disabled = !statusLoaded || busy;
     $('managedShellResetButton').disabled = !statusLoaded || busy;
@@ -2186,17 +2202,30 @@ private renderHtml(advancedOpen = false): string {
     $('persistentModeToggle').title = enabled ? t('persistentOnTitle') : t('persistentOffTitle');
     vscode.postMessage({ type: 'setPersistentMode', enabled });
   });
-  $('readOnlyToggle').addEventListener('click', () => {
+  /** Plan mode is read-only mode; the active side of the Plan | Build switch shows the current mode. */
+  function renderMode(readOnly) {
+    $('modePlanButton').setAttribute('aria-checked', String(readOnly));
+    $('modeBuildButton').setAttribute('aria-checked', String(!readOnly));
+  }
+  function requestReadOnlyMode(enabled) {
     if (!lastStatus || busy) return;
-    const enabled = $('readOnlyToggle').getAttribute('aria-checked') !== 'true';
-    $('readOnlyToggle').setAttribute('aria-checked', String(enabled));
-    $('readOnlyToggle').title = enabled ? t('readOnlyOnTitle') : t('readOnlyOffTitle');
-    $('readOnlyBadge').style.display = enabled ? '' : 'none';
-    const notice = $('addressNotice');
-    notice.textContent = enabled ? t('readOnlyEnabledNotice') : t('readOnlyDisabledNotice');
+    if (($('modePlanButton').getAttribute('aria-checked') === 'true') === enabled) return; // already in that mode
+    renderMode(enabled);
+    // Shown in the hero card under the status line, near the header switch; addressNotice is
+    // reset on every status render, so it cannot carry this message.
+    const notice = $('readOnlyNotice');
+    // Quick Tunnel disables the standalone SSE stream, so tools/list_changed cannot reach clients there.
+    const manualRefresh = lastStatus.tunnelProvider === 'cloudflare';
+    notice.textContent = enabled
+      ? t(manualRefresh ? 'readOnlyEnabledNoticeManualRefresh' : 'readOnlyEnabledNotice')
+      : t(manualRefresh ? 'readOnlyDisabledNoticeManualRefresh' : 'readOnlyDisabledNotice');
+    notice.dataset.mode = enabled ? 'on' : 'off';
+    notice.dataset.confirmed = '';
     notice.style.display = '';
     vscode.postMessage({ type: 'setReadOnlyMode', enabled });
-  });
+  }
+  $('modePlanButton').addEventListener('click', () => requestReadOnlyMode(true));
+  $('modeBuildButton').addEventListener('click', () => requestReadOnlyMode(false));
   $('managedShellSaveButton').addEventListener('click', () => {
     if (!lastStatus || busy) return;
     const raw = $('managedShellInput').value.trim();

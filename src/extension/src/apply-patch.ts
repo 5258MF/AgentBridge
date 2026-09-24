@@ -216,12 +216,15 @@ async function canonicalRoots(roots: string[]): Promise<string[]> {
 
 async function resolveExistingPath(requestedPath: string, roots: string[]): Promise<ResolvedExistingPath> {
   const canonical = await canonicalRoots(roots);
+  const lexicalRoots = [...roots.map((root) => path.resolve(root)), ...canonical];
   const candidates = path.isAbsolute(requestedPath)
     ? [requestedPath]
     : canonical.map((root) => path.resolve(root, requestedPath));
   let sawMissing = false;
 
   for (const candidate of candidates) {
+    // Lexical containment first: outside paths never reveal whether they exist.
+    if (!lexicalRoots.some((root) => isInsideRoot(root, path.resolve(candidate)))) continue;
     try {
       const target = await realpath(candidate);
       const root = canonical.find((candidateRoot) => isInsideRoot(candidateRoot, target));
@@ -249,11 +252,13 @@ async function resolveExistingPath(requestedPath: string, roots: string[]): Prom
 
 async function resolveNewPath(requestedPath: string, roots: string[]): Promise<ResolvedNewPath> {
   const canonical = await canonicalRoots(roots);
+  const lexicalRoots = [...roots.map((root) => path.resolve(root)), ...canonical];
   const candidates = path.isAbsolute(requestedPath)
     ? [path.resolve(requestedPath)]
     : canonical.map((root) => path.resolve(root, requestedPath));
 
   for (const candidate of candidates) {
+    if (!lexicalRoots.some((root) => isInsideRoot(root, candidate))) continue;
     const parent = path.dirname(candidate);
     try {
       const realParent = await realpath(parent);

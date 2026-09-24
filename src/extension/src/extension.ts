@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import * as vscode from "vscode";
 import { BridgeManager, BridgeStartCancelledError, type BridgeStatus } from "./bridge-server.js";
 import { BridgePanelProvider } from "./bridge-panel.js";
@@ -7,13 +8,18 @@ import { translate } from "./i18n.js";
 let activeBridge: BridgeManager | undefined;
 
 function bridgeWorkspaceUri(relativePath: string): vscode.Uri {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) throw new Error("No workspace folder is open.");
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (!folders.length) throw new Error("No workspace folder is open.");
   const normalized = relativePath.trim().replace(/\\/g, "/").replace(/^\.\//, "");
   if (!normalized || normalized === "." || normalized.startsWith("../") || normalized.includes("/../") || normalized.startsWith("/")) {
     throw new Error(`Invalid Bridge workspace path: ${relativePath}`);
   }
-  return vscode.Uri.joinPath(folder.uri, ...normalized.split("/").filter(Boolean));
+  const segments = normalized.split("/").filter(Boolean);
+  const candidates = folders.map((folder) => vscode.Uri.joinPath(folder.uri, ...segments));
+  // Multi-root: open the entry from the first folder that actually contains it; otherwise
+  // (and always in a single-folder workspace) keep the previous first-folder behaviour.
+  if (candidates.length === 1) return candidates[0];
+  return candidates.find((candidate) => candidate.scheme === "file" && fs.existsSync(candidate.fsPath)) ?? candidates[0];
 }
 
 function bridgeDiffSnippet(diff: string, filePath?: string): { before: string; after: string } {

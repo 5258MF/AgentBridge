@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeTrustedBrowserOrigin } from "../src/extension/src/bridge-server.js";
+import { constantTimeStringEqual, normalizeTrustedBrowserOrigin } from "../src/extension/src/bridge-server.js";
 
 test("normalizeTrustedBrowserOrigin accepts exact canonical origins", () => {
   const accepted = [
@@ -41,4 +41,15 @@ test("normalizeTrustedBrowserOrigin rejects non-canonical and unsafe forms", () 
   for (const origin of rejected) {
     assert.equal(normalizeTrustedBrowserOrigin(origin), undefined, origin);
   }
+});
+
+test("constantTimeStringEqual matches only identical strings", () => {
+  const endpoint = "/mcp/0123456789abcdef0123456789abcdef";
+  assert.equal(constantTimeStringEqual(endpoint, endpoint), true);
+  assert.equal(constantTimeStringEqual("", ""), true);
+  assert.equal(constantTimeStringEqual(endpoint, "/mcp/0123456789abcdef0123456789abcdee"), false);
+  assert.equal(constantTimeStringEqual(endpoint, "/mcp/0123456789abcdef"), false);
+  assert.equal(constantTimeStringEqual(endpoint, `${endpoint}/`), false);
+  assert.equal(constantTimeStringEqual(endpoint, endpoint.toUpperCase()), false);
+  assert.equal(constantTimeStringEqual(endpoint, ""), false);
 });

@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 import * as vscode from "vscode";
+import { findContainingRoot, relativeToRoot, resolveExistingInRoots, workspaceRootPaths } from "./workspace-roots.js";
 
 const HARD_MAX_RESULTS = 500;
 const MAX_OUTPUT_CHARS = 64_000;
@@ -51,50 +52,48 @@ function asInteger(value: unknown, fallback: number, min: number, max: number): 
   return Math.min(max, Math.max(min, Number(value)));
 }
 
-function workspaceRoot(): string {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) throw new Error("No workspace folder is open.");
-  return folder.uri.fsPath;
-}
-
-function isInside(root: string, candidate: string): boolean {
-  const rootResolved = path.resolve(root);
-  const candidateResolved = path.resolve(candidate);
-  const rootCmp = process.platform === "win32" ? rootResolved.toLowerCase() : rootResolved;
-  const candidateCmp = process.platform === "win32" ? candidateResolved.toLowerCase() : candidateResolved;
-  return candidateCmp === rootCmp || candidateCmp.startsWith(`${rootCmp}${path.sep}`);
-}
-
-async function canonicalWorkspaceRoot(): Promise<string> {
-  return realpath(workspaceRoot());
+/**
+ * Canonical (realpath) workspace folder roots in VS Code order. A folder that cannot be
+ * resolved is skipped in multi-root workspaces; if none resolve, the first error is thrown
+ * (identical to the previous single-root behaviour).
+ */
+async function canonicalWorkspaceRoots(): Promise<string[]> {
+  const settled = await Promise.allSettled(workspaceRootPaths().map((root) => realpath(root)));
+  const roots = settled.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  if (roots.length === 0) {
+    const failure = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    throw failure?.reason ?? new Error("No workspace folder is open.");
+  }
+  return roots;
 }
 
 async function resolveWorkspaceFile(inputPath: string): Promise<{ root: string; relative: string; uri: vscode.Uri }> {
-  const lexicalRoot = workspaceRoot();
+  const roots = workspaceRootPaths();
   const raw = inputPath.trim();
   if (!raw) throw new Error("path must be a non-empty workspace path");
   const normalized = raw.replace(/\\/g, "/").replace(/^\.\//, "");
-  const absolute = path.isAbsolute(raw) || path.isAbsolute(normalized)
-    ? path.resolve(raw)
-    : path.resolve(lexicalRoot, normalized);
-  if (!isInside(lexicalRoot, absolute)) throw new Error(`Path is outside the workspace: ${inputPath}`);
-  const [root, target] = await Promise.all([realpath(lexicalRoot), realpath(absolute)]);
-  if (!isInside(root, target)) throw new Error(`Path is outside the workspace: ${inputPath}`);
-  const relative = path.relative(root, target).replace(/\\/g, "/") || ".";
+  const target = path.isAbsolute(raw) || path.isAbsolute(normalized) ? path.resolve(raw) : normalized;
+  const resolved = await resolveExistingInRoots(
+    roots,
+    target,
+    () => new Error(`Path is outside the workspace: ${inputPath}`),
+    { allowAbsolute: true },
+  );
   return {
-    root,
-    relative,
-    uri: vscode.Uri.file(target),
+    root: resolved.root,
+    relative: resolved.canonicalRelative,
+    uri: vscode.Uri.file(resolved.absolute),
   };
 }
 
-async function resolveWorkspaceCandidate(root: string, uri: vscode.Uri): Promise<{ relative: string; uri: vscode.Uri } | undefined> {
+async function resolveWorkspaceCandidate(roots: readonly string[], uri: vscode.Uri): Promise<{ relative: string; uri: vscode.Uri } | undefined> {
   if (uri.scheme !== "file") return undefined;
   try {
     const target = await realpath(uri.fsPath);
-    if (!isInside(root, target)) return undefined;
+    const root = findContainingRoot(roots, target);
+    if (!root) return undefined;
     return {
-      relative: path.relative(root, target).replace(/\\/g, "/") || ".",
+      relative: relativeToRoot(root, target),
       uri: vscode.Uri.file(target),
     };
   } catch {
@@ -121,12 +120,11 @@ function warmupCandidateScore(relativePath: string, query: string, tokens: strin
   return score;
 }
 
-async function warmWorkspaceSymbolProjects(query: string, anchorPath?: string): Promise<string[]> {
-  const root = await canonicalWorkspaceRoot();
+async function warmWorkspaceSymbolProjects(query: string, anchor?: { relative: string; uri: vscode.Uri }): Promise<string[]> {
+  const roots = await canonicalWorkspaceRoots();
   const candidates = new Map<string, vscode.Uri>();
   let searchBase: vscode.Uri | undefined;
-  if (anchorPath?.trim()) {
-    const anchor = await resolveWorkspaceFile(anchorPath);
+  if (anchor) {
     try {
       const stat = await vscode.workspace.fs.stat(anchor.uri);
       if (stat.type & vscode.FileType.Directory) searchBase = anchor.uri;
@@ -145,7 +143,7 @@ async function warmWorkspaceSymbolProjects(query: string, anchorPath?: string): 
       16,
     );
     for (const uri of matches) {
-      const candidate = await resolveWorkspaceCandidate(root, uri);
+      const candidate = await resolveWorkspaceCandidate(roots, uri);
       if (!candidate) continue;
       candidates.set(candidate.relative, candidate.uri);
       if (candidates.size >= WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES) break;
@@ -161,7 +159,7 @@ async function warmWorkspaceSymbolProjects(query: string, anchorPath?: string): 
       WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES,
     );
     for (const uri of broadMatches) {
-      const candidate = await resolveWorkspaceCandidate(root, uri);
+      const candidate = await resolveWorkspaceCandidate(roots, uri);
       if (!candidate) continue;
       candidates.set(candidate.relative, candidate.uri);
       if (candidates.size >= WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES) break;
@@ -224,8 +222,9 @@ function symbolKindName(kind: vscode.SymbolKind): string {
   return row?.[0] ?? String(kind);
 }
 
-function uriDisplay(root: string, uri: vscode.Uri): { path: string; workspace: boolean } {
-  if (uri.scheme === "file" && isInside(root, uri.fsPath)) {
+function uriDisplay(roots: readonly string[], uri: vscode.Uri): { path: string; workspace: boolean } {
+  const root = uri.scheme === "file" ? findContainingRoot(roots, uri.fsPath) : undefined;
+  if (root) {
     return { path: path.relative(root, uri.fsPath).replace(/\\/g, "/"), workspace: true };
   }
   return { path: uri.toString(), workspace: false };
@@ -340,9 +339,9 @@ function emitEnvelope(
   ].join("\n");
 }
 
-function formatLocations(root: string, operation: LspOperation, rows: LspLocationRow[], maxResults: number, metadata: string[]): string {
+function formatLocations(roots: readonly string[], operation: LspOperation, rows: LspLocationRow[], maxResults: number, metadata: string[]): string {
   const blocks = rows.map((row, index) => {
-    const display = uriDisplay(root, row.uri);
+    const display = uriDisplay(roots, row.uri);
     return [
       `--- RESULT ${index + 1} ---`,
       `path: ${JSON.stringify(display.path)}`,
@@ -380,7 +379,7 @@ async function locationOperation(
     rows = rows.filter((row) => !definitionKeys.has(locationKey(row)));
   }
 
-  return formatLocations(source.root, operation, rows, maxResults, [
+  return formatLocations(await canonicalWorkspaceRoots(), operation, rows, maxResults, [
     `source: ${JSON.stringify(source.relative)}`,
     `position: ${positionText(source.position)}`,
     `language_id: ${JSON.stringify(source.languageId)}`,
@@ -390,7 +389,7 @@ async function locationOperation(
 }
 
 async function workspaceSymbols(input: Record<string, unknown>, maxResults: number): Promise<string> {
-  const root = await canonicalWorkspaceRoot();
+  const roots = await canonicalWorkspaceRoots();
   const query = asString(input.query).trim();
   if (!query) throw new Error("workspace_symbols requires a non-empty query");
 
@@ -401,7 +400,7 @@ async function workspaceSymbols(input: Record<string, unknown>, maxResults: numb
   let symbols = await vscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>("vscode.executeWorkspaceSymbolProvider", query) ?? [];
   const initialResults = symbols.length;
   if (symbols.length === 0) {
-    warmupDocuments = await warmWorkspaceSymbolProjects(query, explicitAnchor?.relative);
+    warmupDocuments = await warmWorkspaceSymbolProjects(query, explicitAnchor);
     if (warmupDocuments.length > 0) {
       symbols = await vscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>("vscode.executeWorkspaceSymbolProvider", query) ?? [];
     }
@@ -423,7 +422,7 @@ async function workspaceSymbols(input: Record<string, unknown>, maxResults: numb
     semanticResultInconclusive: inconclusive,
   };
   const blocks = symbols.map((symbol, index) => {
-    const display = uriDisplay(root, symbol.location.uri);
+    const display = uriDisplay(roots, symbol.location.uri);
     return [
       `--- RESULT ${index + 1} ---`,
       `name: ${JSON.stringify(symbol.name)}`,
@@ -450,6 +449,7 @@ async function workspaceSymbols(input: Record<string, unknown>, maxResults: numb
 
 async function documentSymbols(input: Record<string, unknown>, maxResults: number): Promise<string> {
   const file = await resolveWorkspaceFile(asString(input.path));
+  const roots = await canonicalWorkspaceRoots();
   const document = await vscode.workspace.openTextDocument(file.uri);
   const symbols = await vscode.commands.executeCommand<Array<vscode.SymbolInformation | vscode.DocumentSymbol> | undefined>(
     "vscode.executeDocumentSymbolProvider",
@@ -457,7 +457,7 @@ async function documentSymbols(input: Record<string, unknown>, maxResults: numbe
   ) ?? [];
   const blocks = symbols.map((symbol, index) => {
     if ("location" in symbol) {
-      const display = uriDisplay(file.root, symbol.location.uri);
+      const display = uriDisplay(roots, symbol.location.uri);
       return [
         `--- RESULT ${index + 1} ---`,
         `name: ${JSON.stringify(symbol.name)}`,
