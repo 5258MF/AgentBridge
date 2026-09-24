@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, link, open, realpath, readFile, rename, stat, unlink } from "node:fs/promises";
+import { access, link, lstat, mkdir, open, realpath, readFile, rename, rmdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { createCanonicalUnifiedDiff } from "./canonical-diff.js";
 
@@ -32,6 +32,7 @@ export type ApplyPatchErrorCode =
   | "FILE_NOT_FOUND"
   | "FILE_ALREADY_EXISTS"
   | "NOT_A_FILE"
+  | "NOT_A_DIRECTORY"
   | "PATH_OUTSIDE_WORKSPACE"
   | "PERMISSION_DENIED"
   | "BINARY_FILE"
@@ -70,6 +71,8 @@ export interface ApplyPatchResult {
   diff_source: "runtime_old_vs_new";
   commit_strategy: "staged_atomic_per_file";
   multi_file_atomic: false;
+  /** Parent directories created for Add File / Move to destinations, workspace-relative, outermost first. */
+  created_directories?: string[];
 }
 
 export interface ApplyPatchContext {
@@ -122,6 +125,14 @@ interface ResolvedNewPath {
   requestedPath: string;
   absolutePath: string;
   root: string;
+  /** Parent directories that do not exist yet and are created on commit, outermost first. */
+  missingDirs: CreatedDirectory[];
+}
+
+interface CreatedDirectory {
+  absolutePath: string;
+  /** Workspace-relative path with forward slashes, for the tool result. */
+  display: string;
 }
 
 interface MutationPlan {
@@ -137,6 +148,7 @@ interface MutationPlan {
   newVersion: string | null;
   additions: number;
   deletions: number;
+  createDirs?: CreatedDirectory[];
 }
 
 interface StagedWrite {
@@ -257,30 +269,62 @@ async function resolveNewPath(requestedPath: string, roots: string[]): Promise<R
     ? [path.resolve(requestedPath)]
     : canonical.map((root) => path.resolve(root, requestedPath));
 
+  // Prefer a root where the parent directory already exists (multi-root workspaces);
+  // otherwise use the first root and create the missing parent directories.
+  let fallback: ResolvedNewPath | undefined;
   for (const candidate of candidates) {
+    // Lexical containment first: outside paths never reveal whether they exist.
     if (!lexicalRoots.some((root) => isInsideRoot(root, candidate))) continue;
-    const parent = path.dirname(candidate);
+    const resolved = await resolveNewCandidate(requestedPath, candidate, canonical);
+    if (!resolved) continue;
+    if (resolved.missingDirs.length === 0) return resolved;
+    fallback ??= resolved;
+  }
+  if (fallback) return fallback;
+
+  throw new PatchToolError("PATH_OUTSIDE_WORKSPACE", `${requestedPath} resolves outside the allowed workspace roots.`);
+}
+
+/**
+ * Resolves a new file path through its nearest existing ancestor directory. The
+ * ancestor is canonicalized (symlinks and junctions resolved) and must lie inside a
+ * workspace root; the missing directories below it are created on commit.
+ */
+async function resolveNewCandidate(requestedPath: string, candidate: string, canonical: string[]): Promise<ResolvedNewPath | undefined> {
+  const missingNames: string[] = [];
+  let ancestor = path.dirname(candidate);
+  for (;;) {
+    let realAncestor: string;
     try {
-      const realParent = await realpath(parent);
-      const root = canonical.find((candidateRoot) => isInsideRoot(candidateRoot, realParent));
-      if (!root) continue;
-      const absolutePath = path.join(realParent, path.basename(candidate));
-      if (!isInsideRoot(root, absolutePath)) continue;
-      return { requestedPath, absolutePath, root };
+      realAncestor = await realpath(ancestor);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") continue;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) return undefined;
+        missingNames.unshift(path.basename(ancestor));
+        ancestor = parent;
+        continue;
+      }
       if (code === "EACCES" || code === "EPERM") {
         throw new PatchToolError("PERMISSION_DENIED", `Permission denied while resolving parent directory for ${requestedPath}.`);
       }
       throw error;
     }
+    const root = canonical.find((candidateRoot) => isInsideRoot(candidateRoot, realAncestor));
+    if (!root) return undefined;
+    if (!(await stat(realAncestor)).isDirectory()) {
+      const shown = path.relative(root, realAncestor).split(path.sep).join("/");
+      throw new PatchToolError("NOT_A_DIRECTORY", `Cannot create ${requestedPath}: ${shown} is a file, not a directory.`);
+    }
+    const missingDirs: CreatedDirectory[] = missingNames.map((_, index) => {
+      const absolutePath = path.join(realAncestor, ...missingNames.slice(0, index + 1));
+      return { absolutePath, display: path.relative(root, absolutePath).split(path.sep).join("/") };
+    });
+    const absolutePath = path.join(realAncestor, ...missingNames, path.basename(candidate));
+    if (!isInsideRoot(root, absolutePath)) return undefined;
+    return { requestedPath, absolutePath, root, missingDirs };
   }
-
-  throw new PatchToolError(
-    "PATH_OUTSIDE_WORKSPACE",
-    `${requestedPath} has no existing parent directory inside the allowed workspace roots.`,
-  );
 }
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -586,6 +630,7 @@ async function preflight(
       const newBytes = encodeText(operation.lines, operation.lines.length > 0, "\n", false);
       plans.push({
         action: "add",
+        createDirs: destination.missingDirs,
         destinationPath: destination.absolutePath,
         sourceDisplay: operation.path,
         oldVersion: null,
@@ -639,6 +684,7 @@ async function preflight(
       }
       plans.push({
         action: "move",
+        createDirs: destination.missingDirs,
         sourcePath: source.absolutePath,
         destinationPath: destination.absolutePath,
         sourceDisplay: operation.path,
@@ -779,7 +825,41 @@ async function rollbackPlans(completed: MutationPlan[]): Promise<void> {
   }
 }
 
-async function commitPlans(plans: MutationPlan[], signal?: AbortSignal): Promise<void> {
+/** Creates missing parent directories one level at a time; returns the ones actually created. */
+async function createParentDirectories(plans: MutationPlan[], created: CreatedDirectory[]): Promise<void> {
+  for (const plan of plans) {
+    for (const dir of plan.createDirs ?? []) {
+      try {
+        await mkdir(dir.absolutePath);
+        created.push(dir);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        // Created meanwhile (or by an earlier plan): accept only a real directory, not a symlink or file.
+        if (!(await lstat(dir.absolutePath)).isDirectory()) {
+          throw new PatchToolError("NOT_A_DIRECTORY", `Cannot create ${plan.destinationDisplay ?? plan.sourceDisplay}: ${dir.display} is not a directory.`);
+        }
+      }
+    }
+  }
+}
+
+async function commitPlans(plans: MutationPlan[], signal?: AbortSignal): Promise<CreatedDirectory[]> {
+  const created: CreatedDirectory[] = [];
+  let committed = false;
+  try {
+    await createParentDirectories(plans, created);
+    await commitStagedPlans(plans, signal);
+    committed = true;
+    return created;
+  } finally {
+    if (!committed) {
+      // Remove only directories this call created, deepest first, and only if still empty.
+      for (const dir of [...created].reverse()) await rmdir(dir.absolutePath).catch(() => undefined);
+    }
+  }
+}
+
+async function commitStagedPlans(plans: MutationPlan[], signal?: AbortSignal): Promise<void> {
   // Stage every new file image before mutating any workspace path. Updates are then installed with an
   // atomic same-directory rename; creates/move destinations use a no-overwrite hard-link install.
   const staged = await stagePlans(plans);
@@ -863,7 +943,7 @@ export async function applyPatch(input: ApplyPatchInput, context: ApplyPatchCont
           new_bytes: plan.newBytes,
         })),
       );
-      await commitPlans(locked.plans, context.signal);
+      const createdDirectories = await commitPlans(locked.plans, context.signal);
       const files: AppliedPatchFile[] = locked.plans.map((plan) => ({
         action: plan.action,
         path: plan.sourceDisplay,
@@ -888,6 +968,7 @@ export async function applyPatch(input: ApplyPatchInput, context: ApplyPatchCont
         diff_source: "runtime_old_vs_new",
         commit_strategy: "staged_atomic_per_file",
         multi_file_atomic: false,
+        ...(createdDirectories.length > 0 ? { created_directories: createdDirectories.map((dir) => dir.display) } : {}),
       };
     });
   } catch (error) {
@@ -907,6 +988,7 @@ export function formatApplyPatchForModel(result: ApplyPatchResult): string {
     `commit_strategy: ${result.commit_strategy}`,
     `multi_file_atomic: ${result.multi_file_atomic}`,
   ];
+  if (result.created_directories?.length) parts.push(`created_directories: ${JSON.stringify(result.created_directories)}`);
   for (const file of result.files) {
     parts.push(
       "--- FILE ---",
