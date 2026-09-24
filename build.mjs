@@ -10,6 +10,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { webviewAssetPath, webviewTextPlugin } from "./src/extension/src/webview/text-import-plugin.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const watch = process.argv.includes("--watch");
@@ -55,7 +56,7 @@ const config = {
   format: "cjs",
   sourcemap: true,
   logLevel: "info",
-  plugins: [packagedRipgrepPlugin],
+  plugins: [packagedRipgrepPlugin, webviewTextPlugin],
 };
 
 const workerConfig = {
@@ -79,17 +80,10 @@ if (watch) {
 } else {
   await build(config);
   await build(workerConfig);
-  // Regression check: the webview script is embedded in the HTML template string.
-  // esbuild evaluates escapes like \n inside the template, which can split string
-  // literals in the emitted script. Verify the extracted <script> body compiles.
+  // The panel script is inlined as text (webviewTextPlugin), so esbuild never parses it.
+  // Check its syntax here instead of finding out in the webview.
+  transformSync(fs.readFileSync(webviewAssetPath("panel.js"), "utf8"), { loader: "js" });
   const bundle = fs.readFileSync(config.outfile, "utf8");
-  const open = bundle.indexOf("<script>", bundle.indexOf("agentbridge-tabs"));
-  const close = bundle.indexOf("</script>", open);
-  if (open < 0 || close < 0) {
-    throw new Error("[build] webview <script> not found in bundle");
-  }
-  const webviewScript = bundle.slice(open + 8, close);
-  transformSync(webviewScript, { loader: "js" });
   if (bundle.includes("photon_rs_bg.wasm")) {
     throw new Error("[build] Photon must not be bundled into dist/extension.js");
   }

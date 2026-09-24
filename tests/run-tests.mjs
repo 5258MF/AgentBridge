@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { webviewTextPlugin } from "../src/extension/src/webview/text-import-plugin.mjs";
 
 const testsDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(testsDir);
@@ -76,7 +77,7 @@ try {
     format: "cjs",
     sourcemap: false,
     logLevel: "warning",
-    plugins: [moduleReplacement],
+    plugins: [moduleReplacement, webviewTextPlugin],
   });
 
   const bundles = entries.map((entry) => path.join(tempDir, entry.replace(/\.ts$/, ".cjs")));

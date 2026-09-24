@@ -1,0 +1,284 @@
+  html { height: 100%; margin: 0; padding: 0; }
+  body { box-sizing: border-box; width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: none; padding: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
+  .agentbridge-card h2, .agentbridge-card h3, .agentbridge-advanced-section h4, .agentbridge-setup-step h4 { margin: 0; font-weight: 600; }
+  .agentbridge-hero-description { max-width: 720px; margin: 7px 0 0; color: var(--vscode-descriptionForeground); line-height: 1.4; }
+  .agentbridge-security-note { display: flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.4; }
+  .agentbridge-security-note > span:first-child { color: var(--vscode-editorWarning-foreground); }
+  .agentbridge-open-folder-group { margin-top: 12px; padding: 8px 10px; border: 1px dashed var(--vscode-editorWarning-foreground); border-radius: 4px; }
+  .agentbridge-open-folder-hint { color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.4; margin: 0 0 8px 0; }
+  .agentbridge-card, .agentbridge-setup { box-sizing: border-box; padding: 13px 15px; margin-bottom: 10px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 6px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); }
+  .agentbridge-hero { padding: 16px; }
+  .agentbridge-card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .agentbridge-hero-actions { margin-top: 14px; }
+  .agentbridge-hero-actions > button { width: auto; min-width: 150px; }
+  .agentbridge-more-sites { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .agentbridge-more-sites[hidden] { display: none; }
+  .agentbridge-more-sites > button { width: auto; min-width: 140px; }
+  .agentbridge-connection-card, .agentbridge-advanced-card { padding: 0; }
+  .agentbridge-connection-card > summary, .agentbridge-advanced-card > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; cursor: pointer; list-style-position: inside; }
+  .agentbridge-connection-card > summary::marker, .agentbridge-advanced-card > summary::marker { color: var(--vscode-descriptionForeground); }
+  .agentbridge-connection-summary-main { display: flex; min-width: 0; flex: 1 1 auto; align-items: baseline; gap: 10px; }
+  .agentbridge-connection-summary-main h3 { flex: 0 0 auto; }
+  .agentbridge-connection-details { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.4; }
+  .agentbridge-connection-body { padding: 2px 14px 14px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-field { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; }
+  .agentbridge-label, .agentbridge-url-label { font-size: 12px; font-weight: 600; }
+  .agentbridge-input, .agentbridge-select { box-sizing: border-box; width: min(100%, 680px); height: 28px; padding: 3px 8px; border: 1px solid var(--vscode-input-border, transparent); outline: none; background: var(--vscode-input-background); color: var(--vscode-input-foreground); font: inherit; }
+  .agentbridge-input:focus, .agentbridge-select:focus { border-color: var(--vscode-focusBorder); }
+  .agentbridge-input:disabled, .agentbridge-select:disabled { opacity: .72; }
+  .agentbridge-provider-choices { display: flex; width: min(100%, 680px); flex-direction: column; gap: 8px; }
+  .agentbridge-provider-choice { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 5px; background: var(--vscode-editor-background); color: var(--vscode-foreground); font: inherit; text-align: left; cursor: pointer; }
+  .agentbridge-provider-choice:hover:not(:disabled) { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground, var(--vscode-editor-background)); }
+  .agentbridge-provider-choice:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+  .agentbridge-provider-choice.selected { border-color: var(--vscode-focusBorder); background: var(--vscode-list-activeSelectionBackground, var(--vscode-editor-background)); color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground)); }
+  .agentbridge-provider-choice:disabled { opacity: .65; cursor: default; }
+
+  .agentbridge-oib-radio { padding: 4px 10px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 4px; background: transparent; color: var(--vscode-foreground); font: inherit; cursor: pointer; transition: background-color 120ms ease, border-color 120ms ease; }
+  .agentbridge-oib-radio[aria-checked="true"] { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: var(--vscode-button-background, transparent); }
+  .agentbridge-oib-radio[aria-checked="true"]:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+  .agentbridge-oib-radio[aria-checked="false"]:hover:not(:disabled) { background: var(--vscode-list-hoverBackground, transparent); }
+  .agentbridge-oib-radio:disabled { opacity: .55; cursor: default; }
+  .agentbridge-provider-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .agentbridge-provider-title { font-weight: 600; }
+  .agentbridge-provider-badge { flex: 0 0 auto; padding: 2px 7px; border-radius: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 11px; }
+  .agentbridge-provider-summary, .agentbridge-provider-facts { color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.45; }
+  .agentbridge-provider-summary { margin-top: 5px; }
+  .agentbridge-provider-facts { margin: 6px 0 0; padding-left: 18px; }
+  .agentbridge-named-configuration { box-sizing: border-box; width: min(100%, 680px); margin-top: 12px; padding: 12px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 5px; background: var(--vscode-editor-background); }
+  .agentbridge-named-configuration h4 { margin: 0 0 4px; font-size: 12px; }
+  .agentbridge-named-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
+  .agentbridge-named-grid .agentbridge-field, .agentbridge-named-grid .agentbridge-input { min-width: 0; width: 100%; }
+  .agentbridge-named-origin-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; }
+  .agentbridge-named-origin-row .agentbridge-input { border-right: 0; border-radius: 0; }
+  .agentbridge-help, .agentbridge-status-details, .agentbridge-tunnel-state, .agentbridge-address-notice { color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.45; }
+  .agentbridge-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .agentbridge-state { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); white-space: nowrap; }
+  .agentbridge-state.state-running { color: var(--vscode-testing-iconPassed, var(--vscode-foreground)); }
+  .agentbridge-state.state-error { color: var(--vscode-errorForeground); }
+  .agentbridge-status-details { margin-top: 7px; }
+  .agentbridge-tunnel-state { margin-top: 5px; }
+  .agentbridge-tunnel-panel { box-sizing: border-box; width: min(100%, 680px); margin-top: 12px; padding: 10px 12px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; background: var(--vscode-editor-background); }
+  .agentbridge-tunnel-panel.needs-attention { border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground)); background: var(--vscode-inputValidation-warningBackground, var(--vscode-editor-background)); }
+  .agentbridge-tunnel-status-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .agentbridge-tunnel-status-text { min-width: 0; flex: 1 1 auto; }
+  .agentbridge-tunnel-actions { flex: 0 0 auto; margin-top: 0; }
+  .agentbridge-public-health-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-public-health-info { min-width: 0; }
+  .agentbridge-public-health-details, .agentbridge-public-health-meta { overflow: hidden; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+  .agentbridge-public-health-meta { margin-top: 2px; font-size: 10px; }
+  .agentbridge-public-health-badge { display: inline-flex; box-sizing: border-box; flex: 0 0 auto; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid transparent; border-radius: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 11px; font-weight: 600; line-height: 1; white-space: nowrap; }
+  .agentbridge-public-health-badge::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; content: ''; }
+  .agentbridge-public-health-badge.state-healthy { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
+  .agentbridge-public-health-badge.state-unstable { border-color: var(--vscode-editorWarning-foreground); color: var(--vscode-badge-foreground); }
+  .agentbridge-public-health-badge.state-unstable::before { background: var(--vscode-editorWarning-foreground); }
+  .agentbridge-public-health-badge.state-unhealthy { color: var(--vscode-errorForeground); }
+  .agentbridge-public-health-badge.state-checking { color: var(--vscode-progressBar-background); }
+  .agentbridge-public-health-check { flex: 0 0 auto; padding-left: 9px; padding-right: 9px; font-size: 11px; }
+  .agentbridge-url-section { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-address-notice { margin-top: 7px; padding: 7px 9px; border-left: 3px solid var(--vscode-editorWarning-foreground); background: var(--vscode-inputValidation-warningBackground, var(--vscode-editor-background)); }
+  .agentbridge-url-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 8px; margin: 6px 0; min-width: 0; width: 100%; }
+  .agentbridge-command-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; min-width: 0; width: 100%; }
+  .agentbridge-command-row > button { flex: 0 0 auto; width: auto; min-width: 28px; }
+  .agentbridge-url-value { box-sizing: border-box; min-width: 0; width: 100%; height: 30px; padding: 5px 8px; border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, transparent)); border-radius: 3px; outline: none; background: var(--vscode-input-background); color: var(--vscode-input-foreground); font-family: var(--monaco-monospace-font); font-size: 12px; white-space: nowrap; user-select: text; }
+  .agentbridge-url-value:focus { border-color: var(--vscode-focusBorder); }
+  .agentbridge-copy-url { box-sizing: border-box; min-width: 72px; height: 30px; padding: 0 12px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 3px; background: var(--vscode-button-secondaryBackground, var(--vscode-button-background)); color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground)); font: inherit; white-space: nowrap; cursor: pointer; }
+  .agentbridge-copy-url:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground)); }
+  .agentbridge-copy-url:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+  .agentbridge-command-row code { box-sizing: border-box; min-width: 0; width: 0; padding: 6px 8px; border-radius: 3px; background: var(--vscode-textCodeBlock-background); color: var(--vscode-textPreformat-foreground); font-family: var(--monaco-monospace-font); font-size: 12px; white-space: pre-wrap; word-break: break-word; flex: 1 1 0; }
+  .agentbridge-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .agentbridge-tool { padding: 3px 7px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-family: var(--monaco-monospace-font); font-size: 11px; }
+  .agentbridge-tool.bridge-only { border-style: dashed; }
+  .agentbridge-advanced-card > summary { cursor: pointer; }
+  .agentbridge-advanced-body { padding: 14px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-static-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 680px; padding: 8px 10px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; background: var(--vscode-editor-background); }
+  .agentbridge-static-value { color: var(--vscode-descriptionForeground); font-family: var(--monaco-monospace-font); font-size: 12px; }
+  .agentbridge-advanced-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-advanced-section h4 { font-size: 12px; }
+  .agentbridge-setup > summary { cursor: pointer; font-weight: 600; }
+  .agentbridge-setup-body { padding-top: 10px; }
+  .agentbridge-setup-step { margin-top: 14px; }
+  .agentbridge-setup-step h4 { margin-bottom: 6px; font-size: 12px; }
+  .agentbridge-persistent-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: min(100%, 680px); margin-top: 14px; }
+  .agentbridge-persistent-text { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; gap: 4px; }
+  .agentbridge-switch { position: relative; display: inline-flex; width: 36px; height: 20px; flex: 0 0 auto; padding: 0; border: 0; outline: none; appearance: none; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+  .agentbridge-switch-track { box-sizing: border-box; width: 36px; height: 20px; border: 1px solid var(--vscode-checkbox-border, var(--vscode-widget-border)); border-radius: 10px; background: var(--vscode-checkbox-background); transition: background-color 120ms ease, border-color 120ms ease; }
+  .agentbridge-switch-track::after { content: ""; display: block; width: 14px; height: 14px; margin: 2px; border-radius: 50%; background: var(--vscode-checkbox-foreground); transition: transform 120ms ease; }
+  .agentbridge-switch[aria-checked=true] .agentbridge-switch-track { border-color: var(--vscode-button-background); background: var(--vscode-button-background); }
+  .agentbridge-switch[aria-checked=true] .agentbridge-switch-track::after { transform: translateX(16px); background: var(--vscode-button-foreground); }
+  .agentbridge-switch:focus-visible .agentbridge-switch-track { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+  .agentbridge-switch:disabled { opacity: .55; cursor: default; }
+  /* Plan | Build segmented switch in the hero header; the active side shows the current mode. */
+  .agentbridge-mode-switch { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, rgba(128,128,128,.45))); border-radius: 4px; overflow: hidden; }
+  .agentbridge-mode-switch button { width: auto; min-width: 0; margin: 0; padding: 2px 10px; border: 0; border-radius: 0; background: transparent; color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 600; line-height: 16px; white-space: nowrap; cursor: pointer; }
+  .agentbridge-mode-switch button + button { border-left: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, rgba(128,128,128,.45))); }
+  .agentbridge-mode-switch button[aria-checked=true] { background: var(--vscode-button-background); color: var(--vscode-button-foreground); cursor: default; }
+  .agentbridge-mode-switch button.agentbridge-mode-plan[aria-checked=true] { background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 16%, transparent); color: var(--vscode-editorWarning-foreground, #cca700); box-shadow: inset 0 0 0 1px var(--vscode-editorWarning-foreground, #cca700); }
+  .agentbridge-mode-switch button:not([aria-checked=true]):not(:disabled):hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.15)); }
+  .agentbridge-mode-switch button:disabled { opacity: .55; cursor: default; }
+  .agentbridge-mode-switch button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  button { font: inherit; }
+  button.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 4px 12px; border-radius: 2px; cursor: pointer; min-height: 26px; }
+  button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+  button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid var(--vscode-button-border, transparent); padding: 4px 12px; border-radius: 2px; cursor: pointer; min-height: 26px; }
+  button.secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+  button:disabled { opacity: .5; cursor: default; }
+  @media (max-width: 520px) {
+    .agentbridge-named-grid { grid-template-columns: minmax(0, 1fr); }
+    .agentbridge-connection-card > summary, .agentbridge-connection-summary-main, .agentbridge-advanced-card > summary, .agentbridge-static-row { align-items: flex-start; flex-direction: column; }
+    .agentbridge-connection-details { white-space: normal; }
+    .agentbridge-persistent-row { align-items: flex-start; }
+  }
+  .agentbridge-tabs { display: flex; align-items: center; gap: 2px; margin: 0 12px 10px; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-tab { flex: 1 1 auto; padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--vscode-descriptionForeground); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; text-align: center; }
+  .agentbridge-tab:hover { background: var(--vscode-list-hoverBackground, transparent); }
+  .agentbridge-tab:focus { outline: none; }
+  .agentbridge-tab.active { color: var(--vscode-foreground); border-bottom-color: var(--vscode-focusBorder, var(--vscode-button-background)); }
+  .agentbridge-session-view { display: flex; flex-direction: column; min-height: 0; flex: 1 1 0; }
+  #configSection { box-sizing: border-box; flex: 1; min-height: 0; padding-bottom: 24px; overflow: auto; }
+  .agentbridge-session-todos-region { max-width: 950px; margin: 0 auto; width: 100%; padding: 14px 12px 0; box-sizing: border-box; }
+  .agentbridge-session-todos-region:empty { display: none; }
+  .agentbridge-session-history-toolbar { box-sizing: border-box; width: 100%; max-width: 950px; min-height: 31px; margin: 0 auto; padding: 4px 12px; display: flex; align-items: center; gap: 10px; }
+  .agentbridge-session-history-title { flex: 0 0 auto; font-size: 11px; font-weight: 600; color: var(--vscode-descriptionForeground); }
+  .agentbridge-session-history-divider { flex: 1 1 auto; min-width: 12px; height: 1px; background: color-mix(in srgb, var(--vscode-widget-border, var(--vscode-editorWidget-border)) 70%, transparent); }
+  .agentbridge-session-history-clear { flex: 0 0 auto; min-height: 22px; padding: 1px 7px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--vscode-descriptionForeground); font: inherit; font-size: 10px; cursor: pointer; }
+  .agentbridge-session-history-clear:hover:not(:disabled) { border-color: var(--vscode-button-secondaryBorder, transparent); background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
+  .agentbridge-session-history-clear:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+  .agentbridge-session-history-clear:disabled { opacity: .4; background: transparent; }
+  .agentbridge-session-scroll { flex: 1; min-height: 0; overflow: auto; }
+  .agentbridge-session-timeline { max-width: 950px; margin: 0 auto; display: flex; flex-direction: column; }
+  .agentbridge-session-empty { display: flex; min-height: 180px; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-session-empty-icon { font-size: 26px; opacity: .6; }
+  .agentbridge-session-empty strong { color: var(--vscode-foreground); font-weight: 600; }
+  .agentbridge-session-empty span { font-size: 12px; }
+  .agentbridge-todos { border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 6px; background: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-editor-background)) 78%, transparent); margin-bottom: 10px; }
+  .agentbridge-todos-summary { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 30px; padding: 4px 8px; border-radius: 6px; cursor: pointer; list-style: none; font-size: 12px; }
+  .agentbridge-todos-summary::-webkit-details-marker { display: none; }
+  .agentbridge-todos-summary:hover { background: var(--vscode-list-hoverBackground); }
+  .agentbridge-todos-count { font-size: 11px; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+  .agentbridge-todos-body { display: flex; flex-direction: column; gap: 1px; padding: 2px 8px 8px 33px; }
+  .agentbridge-todo { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 26px; padding: 2px 5px; border-radius: 4px; font-size: 12px; }
+  .agentbridge-todo.in-progress { background: color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 35%, transparent); }
+  .agentbridge-todo.completed .agentbridge-todo-title { text-decoration: line-through; color: var(--vscode-descriptionForeground); }
+  .agentbridge-todo-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--vscode-descriptionForeground); }
+  .agentbridge-todo.completed .agentbridge-todo-icon { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
+  .agentbridge-todo.in-progress .agentbridge-todo-icon { color: var(--vscode-progressBar-background); }
+  .agentbridge-todo-progress { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  .agentbridge-todo-progress .phase { font-weight: 600; }
+  .agentbridge-todo-progress .percent { font-variant-numeric: tabular-nums; }
+  .agentbridge-todo.in-progress .agentbridge-todo-progress .phase, .agentbridge-todo.in-progress .agentbridge-todo-progress .percent { color: var(--vscode-foreground); }
+  .agentbridge-progress-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 28px; padding: 4px 8px; border: 1px solid transparent; border-radius: 4px; font-size: 12px; margin-bottom: 1px; }
+  .agentbridge-progress-row:hover { background: var(--vscode-list-hoverBackground); }
+  .agentbridge-progress-row .agentbridge-progress-icon { color: var(--vscode-progressBar-background); }
+  .agentbridge-progress-body { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
+  .agentbridge-progress-task { display: flex; min-width: 0; align-items: baseline; gap: 6px; overflow: hidden; }
+  .agentbridge-progress-task .task { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agentbridge-progress-task .phase { font-weight: 600; white-space: nowrap; }
+  .agentbridge-progress-task .message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .agentbridge-progress-percent { font-size: 11px; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+  .agentbridge-tool-card { margin-bottom: 1px; border: 1px solid transparent; border-radius: 5px; }
+  .agentbridge-tool-card[open] { border-color: var(--vscode-widget-border, var(--vscode-editorWidget-border)); background: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-editor-background)) 78%, transparent); }
+  .agentbridge-tool-card.state-error { border-color: color-mix(in srgb, var(--vscode-errorForeground) 38%, transparent); }
+  .agentbridge-tool-summary { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 28px; padding: 4px 6px; border-radius: 4px; cursor: pointer; list-style: none; font-size: 12px; }
+  .agentbridge-tool-summary::-webkit-details-marker { display: none; }
+  .agentbridge-tool-summary:hover { background: var(--vscode-list-hoverBackground); }
+  .agentbridge-tool-card:not([open]) > .agentbridge-tool-body { display: none; }
+  .agentbridge-tool-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--vscode-descriptionForeground); }
+  .agentbridge-tool-card.state-running .agentbridge-tool-icon { color: var(--vscode-progressBar-background); }
+  .agentbridge-tool-card.state-error .agentbridge-tool-icon, .agentbridge-tool-card.state-error .agentbridge-tool-meta { color: var(--vscode-errorForeground); }
+  .agentbridge-tool-labels { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
+  .agentbridge-tool-title, .agentbridge-tool-subtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agentbridge-tool-title { color: var(--vscode-foreground); }
+  .agentbridge-tool-subtitle, .agentbridge-tool-meta { font-size: 11px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-tool-meta { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .agentbridge-tool-body { display: flex; flex-direction: column; gap: 8px; padding: 3px 8px 10px 31px; }
+  .agentbridge-tool-items, .agentbridge-tool-files { display: flex; flex-direction: column; gap: 2px; }
+  .agentbridge-tool-item, .agentbridge-tool-file { display: flex; min-width: 0; align-items: center; gap: 6px; min-height: 25px; padding: 2px 5px; border-radius: 4px; font-size: 12px; }
+  .agentbridge-tool-item { cursor: pointer; }
+  .agentbridge-tool-item:hover, .agentbridge-tool-item:focus-visible { outline: none; background: var(--vscode-list-hoverBackground); }
+  .agentbridge-tool-item-icon { flex: none; color: var(--vscode-descriptionForeground); }
+  .agentbridge-tool-item.severity-error .agentbridge-tool-item-icon { color: var(--vscode-errorForeground); }
+  .agentbridge-tool-item.severity-warning .agentbridge-tool-item-icon { color: var(--vscode-editorWarning-foreground); }
+  .agentbridge-tool-item-labels { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; }
+  .agentbridge-tool-item-primary, .agentbridge-tool-item-secondary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agentbridge-tool-item-primary { color: var(--vscode-foreground); }
+  .agentbridge-tool-item-secondary { font-size: 10px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-tool-item-action { display: inline-flex; flex: none; width: 25px; height: 24px; align-items: center; justify-content: center; border: 0; border-radius: 3px; background: transparent; color: var(--vscode-descriptionForeground); cursor: pointer; font: inherit; font-size: 11px; }
+  .agentbridge-tool-item-action:hover { background: var(--vscode-button-secondaryHoverBackground); color: var(--vscode-button-secondaryForeground); }
+  .agentbridge-tool-actions { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+  .agentbridge-tool-action { display: inline-flex; flex: none; align-items: center; justify-content: center; gap: 5px; height: 24px; padding: 0 7px; border: 1px solid var(--vscode-button-secondaryBorder, transparent); border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; font-family: inherit; font-size: 11px; }
+  .agentbridge-tool-action:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .agentbridge-tool-card.kind-edit .agentbridge-tool-summary { grid-template-rows: auto auto; }
+  .agentbridge-edit-summary-files { display: flex; min-width: 0; grid-column: 2 / 4; flex-direction: column; gap: 1px; margin-top: 3px; }
+  .agentbridge-edit-summary-file { display: grid; min-width: 0; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 6px; height: 24px; padding: 0 5px; border: 0; border-radius: 3px; background: transparent; color: var(--vscode-foreground); cursor: pointer; font: inherit; font-size: 11px; text-align: left; }
+  .agentbridge-edit-summary-file:hover, .agentbridge-edit-summary-file:focus-visible { outline: none; background: var(--vscode-list-hoverBackground); }
+  .agentbridge-edit-summary-file-icon { color: var(--vscode-descriptionForeground); }
+  .agentbridge-edit-summary-file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agentbridge-edit-summary-file-stats { display: inline-flex; gap: 5px; white-space: nowrap; font-family: var(--monaco-monospace-font); font-size: 10px; }
+  .agentbridge-edit-summary-file-stats .additions { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed)); }
+  .agentbridge-edit-summary-file-stats .deletions { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-errorForeground)); }
+  .agentbridge-edit-summary-more { padding: 2px 5px 1px 22px; font-size: 10px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-mini-diff { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+  .agentbridge-mini-diff-file { min-width: 0; overflow: hidden; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 5px; background: var(--vscode-textCodeBlock-background); }
+  .agentbridge-mini-diff-header { display: flex; min-width: 0; align-items: center; gap: 4px; min-height: 28px; padding: 0 4px 0 6px; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); }
+  .agentbridge-mini-diff-file-button { display: inline-flex; min-width: 0; flex: 1; align-items: center; gap: 6px; height: 24px; padding: 0 4px; border: 0; border-radius: 3px; background: transparent; color: var(--vscode-foreground); cursor: pointer; font: inherit; justify-content: flex-start; }
+  .agentbridge-mini-diff-open { display: inline-flex; min-width: 0; flex: none; width: 24px; align-items: center; justify-content: center; gap: 6px; height: 24px; padding: 0 4px; border: 0; border-radius: 3px; background: transparent; color: var(--vscode-descriptionForeground); cursor: pointer; font: inherit; }
+  .agentbridge-mini-diff-file-button:hover, .agentbridge-mini-diff-open:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+  .agentbridge-mini-diff-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+  .agentbridge-mini-diff-code { min-width: 0; font-family: var(--monaco-monospace-font); font-size: 11px; line-height: 18px; }
+  .agentbridge-mini-diff-line { display: grid; min-width: 0; grid-template-columns: 36px 14px minmax(0, 1fr); min-height: 18px; }
+  .agentbridge-mini-diff-line.add { background: var(--vscode-diffEditor-insertedLineBackground, color-mix(in srgb, var(--vscode-testing-iconPassed) 12%, transparent)); }
+  .agentbridge-mini-diff-line.delete { background: var(--vscode-diffEditor-removedLineBackground, color-mix(in srgb, var(--vscode-errorForeground) 10%, transparent)); }
+  .agentbridge-mini-diff-line-number { padding-right: 7px; border-right: 1px solid color-mix(in srgb, var(--vscode-widget-border) 65%, transparent); color: var(--vscode-editorLineNumber-foreground); text-align: right; user-select: none; }
+  .agentbridge-mini-diff-marker { color: var(--vscode-descriptionForeground); text-align: center; user-select: none; }
+  .agentbridge-mini-diff-line.add .agentbridge-mini-diff-marker { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed)); }
+  .agentbridge-mini-diff-line.delete .agentbridge-mini-diff-marker { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-errorForeground)); }
+  .agentbridge-mini-diff-text { min-width: 0; overflow: hidden; padding: 0 7px 0 2px; color: var(--vscode-editor-foreground); text-overflow: ellipsis; white-space: pre; }
+  .agentbridge-mini-diff-gap, .agentbridge-mini-diff-truncated { padding: 2px 8px 2px 50px; font-size: 10px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-tool-file > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agentbridge-tool-more { font-size: 11px; color: var(--vscode-descriptionForeground); padding: 1px 5px; }
+  .agentbridge-tool-section { min-width: 0; }
+  .agentbridge-tool-section-label { display: block; margin: 0 0 4px; font-size: 11px; font-weight: 600; color: var(--vscode-descriptionForeground); }
+  .agentbridge-tool-section pre { box-sizing: border-box; max-height: 260px; margin: 0; padding: 7px 9px; overflow: auto; border-radius: 4px; background: var(--vscode-textCodeBlock-background); color: var(--vscode-textPreformat-foreground); font-family: var(--monaco-monospace-font); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  .agentbridge-tool-error { font-size: 12px; color: var(--vscode-errorForeground); white-space: pre-wrap; }
+  .agentbridge-session-footer { flex: none; box-sizing: border-box; padding: 10px 12px 11px; border-top: 1px solid var(--vscode-panel-border, var(--vscode-widget-border)); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+  .agentbridge-session-connection-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .agentbridge-session-connection-actions { display: flex; flex: none; align-items: center; gap: 5px; }
+  .agentbridge-session-connection-info { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+  .agentbridge-session-connection-heading { display: flex; min-width: 0; align-items: center; gap: 7px; font-size: 12px; }
+  .agentbridge-session-connection-heading > strong { flex: 0 0 auto; }
+  .agentbridge-session-connection-heading .agentbridge-public-health-badge { flex: 0 1 auto; min-width: 0; max-width: min(145px, 38vw); overflow: hidden; text-overflow: ellipsis; }
+  .agentbridge-session-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--vscode-descriptionForeground); }
+  .agentbridge-session-dot.state-connected, .agentbridge-session-dot.state-running { background: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
+  .agentbridge-session-dot.state-starting { background: var(--vscode-progressBar-background); }
+  .agentbridge-session-dot.state-error { background: var(--vscode-errorForeground); }
+  .agentbridge-session-connection-description, .agentbridge-session-meta, .agentbridge-session-hint { font-size: 11px; line-height: 1.4; color: var(--vscode-descriptionForeground); }
+  .agentbridge-session-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 10px; }
+  .agentbridge-session-stat { display: flex; min-width: 0; flex-direction: column; gap: 3px; padding: 7px 9px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; }
+  .agentbridge-session-stat span { font-size: 11px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-session-stat strong { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .agentbridge-session-meta { margin-top: 8px; }
+  .agentbridge-session-hint { margin-top: 5px; }
+  .agentbridge-session-list { margin-top: 8px; padding: 7px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; font-size: 11px; max-height: 120px; overflow-y: auto; }
+  .agentbridge-session-list-header { font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 5px; }
+  .agentbridge-session-list-header-row { display: flex; align-items: center; gap: 8px; }
+  .agentbridge-session-list-heading { display: flex; flex: 1 1 auto; min-width: 0; align-items: baseline; gap: 8px; flex-wrap: nowrap; }
+  .agentbridge-session-list-title { flex: 0 0 auto; font-weight: 600; }
+  .agentbridge-session-list-summary { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-session-list-clear { flex: 0 0 auto; padding: 1px 7px; font-size: 10px; }
+  .agentbridge-session-list-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+  .agentbridge-session-list-info { flex: 1 1 auto; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agentbridge-session-list-disconnect { flex: 0 0 auto; padding: 1px 7px; font-size: 10px; }
+  .agentbridge-session-badge { display: inline-block; flex: 0 0 auto; padding: 1px 5px; border: 1px solid; border-radius: 3px; font-size: 10px; font-family: var(--vscode-editor-font-family, Menlo, Consolas, monospace); font-variant-numeric: tabular-nums; line-height: 1; vertical-align: middle; }
+  .agentbridge-tool-labels .agentbridge-session-badge { margin-left: 6px; }
+  .agentbridge-session-view.footer-collapsed .agentbridge-session-footer { padding-top: 7px; padding-bottom: 7px; }
+  .agentbridge-session-view.footer-collapsed .agentbridge-session-connection-info { gap: 1px; }
+  .agentbridge-session-view.footer-collapsed .agentbridge-session-connection-description { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 340px) {
+    .agentbridge-session-connection-description { display: none; }
+    .agentbridge-public-health-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .agentbridge-public-health-row .agentbridge-public-health-badge { grid-column: 1; grid-row: 2; justify-self: start; }
+    .agentbridge-public-health-check { grid-column: 2; grid-row: 1 / 3; }
+    .agentbridge-session-stats { grid-template-columns: 1fr; }
+  }
+  .agentbridge-spin { display: inline-block; animation: agentbridge-spin 1s linear infinite; }
+  @keyframes agentbridge-spin { to { transform: rotate(360deg); } }
