@@ -453,7 +453,8 @@ function managedShellSpec(protocolToken: string): ManagedShellSpec {
   }
 }
 
-function managedProcessEnvironment(): Record<string, string> {
+/** Environment for managed terminals. Exported for tests. */
+export function managedProcessEnvironment(): Record<string, string> {
   const env = Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
@@ -469,6 +470,10 @@ function managedProcessEnvironment(): Record<string, string> {
   env.TERM = "xterm-256color";
   env.COLORTERM = "truecolor";
   env.AGENTBRIDGE_AGENT_TERMINAL = "1";
+  // git log/diff/show would otherwise open a pager that waits for a keypress, leaving the
+  // terminal busy. In Plan mode the model cannot even send "q" (send_command_input is blocked).
+  // GIT_PAGER overrides core.pager, and git treats "cat" as "no pager".
+  env.GIT_PAGER = "cat";
   return env;
 }
 

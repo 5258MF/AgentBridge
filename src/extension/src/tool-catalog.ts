@@ -13,8 +13,16 @@ export interface CatalogTool {
 }
 
 export interface CatalogOptions {
-  /** Tools hidden from tools/list and blocked at call time in read-only mode. */
+  /** Tools blocked at call time in Plan mode (read-only mode). */
   readonly readOnlyBlocked: ReadonlySet<string>;
+  /** Tools that only accept allowlisted input in Plan mode (run_command). */
+  readonly planRestricted: ReadonlySet<string>;
+}
+
+function planModeCell(name: string, options: CatalogOptions): string {
+  if (options.readOnlyBlocked.has(name)) return "blocked";
+  if (options.planRestricted.has(name)) return "allowlisted commands only";
+  return "available";
 }
 
 type JsonSchema = Record<string, unknown>;
@@ -82,15 +90,15 @@ export function renderToolCatalog(tools: readonly CatalogTool[], options: Catalo
     "",
     "This is exactly what MCP clients receive from `tools/list`. In `run_command`, `${RUNTIME_SHELL_DESCRIPTION}` and `${RUNTIME_SHELL_SYNTAX_HINT}` are replaced at runtime with the configured managed shell.",
     "",
-    `${tools.length} tools; ${tools.filter((tool) => !options.readOnlyBlocked.has(tool.name)).length} remain available in read-only mode.`,
+    `${tools.length} tools, listed in both Plan and Build mode. In Plan mode (read-only), ${tools.filter((tool) => options.readOnlyBlocked.has(tool.name)).length} are blocked at call time and ${tools.filter((tool) => options.planRestricted.has(tool.name)).map((tool) => `\`${tool.name}\``).join(", ")} only runs allowlisted read-only commands.`,
     "",
-    "| Tool | Read-only mode | Required parameters |",
+    "| Tool | Plan mode | Required parameters |",
     "|---|---|---|",
   ];
   for (const tool of tools) {
     const schema = tool.inputSchema as JsonSchema;
     const required = Array.isArray(schema.required) ? (schema.required as string[]) : [];
-    lines.push(`| [\`${tool.name}\`](#${tool.name}) | ${options.readOnlyBlocked.has(tool.name) ? "hidden and blocked" : "available"} | ${required.length ? required.map((name) => `\`${name}\``).join(", ") : "(none)"} |`);
+    lines.push(`| [\`${tool.name}\`](#${tool.name}) | ${planModeCell(tool.name, options)} | ${required.length ? required.map((name) => `\`${name}\``).join(", ") : "(none)"} |`);
   }
   for (const tool of tools) {
     const rows = parameterRows(tool.inputSchema as JsonSchema);

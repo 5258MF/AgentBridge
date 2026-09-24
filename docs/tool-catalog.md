@@ -4,20 +4,20 @@
 
 This is exactly what MCP clients receive from `tools/list`. In `run_command`, `${RUNTIME_SHELL_DESCRIPTION}` and `${RUNTIME_SHELL_SYNTAX_HINT}` are replaced at runtime with the configured managed shell.
 
-14 tools; 10 remain available in read-only mode.
+14 tools, listed in both Plan and Build mode. In Plan mode (read-only), 3 are blocked at call time and `run_command` only runs allowlisted read-only commands.
 
-| Tool | Read-only mode | Required parameters |
+| Tool | Plan mode | Required parameters |
 |---|---|---|
-| [`apply_patch`](#apply_patch) | hidden and blocked | `patch` |
+| [`apply_patch`](#apply_patch) | blocked | `patch` |
 | [`find_files`](#find_files) | available | `patterns` |
 | [`read_files`](#read_files) | available | `files` |
 | [`read_image_file`](#read_image_file) | available | `path` |
 | [`search_files`](#search_files) | available | `pattern` |
 | [`list_directory`](#list_directory) | available | (none) |
-| [`run_command`](#run_command) | hidden and blocked | `command`, `background` |
+| [`run_command`](#run_command) | allowlisted commands only | `command`, `background` |
 | [`get_command_output`](#get_command_output) | available | `command_id` |
-| [`send_command_input`](#send_command_input) | hidden and blocked | `command_id`, `input` |
-| [`terminate_command`](#terminate_command) | hidden and blocked | `command_id` |
+| [`send_command_input`](#send_command_input) | blocked | `command_id`, `input` |
+| [`terminate_command`](#terminate_command) | blocked | `command_id` |
 | [`get_diagnostics`](#get_diagnostics) | available | (none) |
 | [`lsp`](#lsp) | available | `operation` |
 | [`set_todos`](#set_todos) | available | `todos` |

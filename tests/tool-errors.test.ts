@@ -63,13 +63,41 @@ test("set_todos and report_progress validation failures are INVALID_ARGUMENT too
   assert.match(ok.text, /^Todo state updated in AgentBridge: 0\/1 completed/);
 });
 
-test("read-only mode blocks write tools with READ_ONLY_MODE and a hint", async () => {
+test("Plan mode blocks write tools with READ_ONLY_MODE and a hint", async () => {
   const manager = makeManager();
   (manager as any).readOnlyMode = true;
   const result = await callTool(manager, "apply_patch", { patch: "*** Begin Patch\n*** End Patch" });
   assert.equal(result.isError, true);
-  assert.match(result.text, /^READ_ONLY_MODE: Tool apply_patch is disabled in read-only mode\./);
-  assert.match(result.text, /\nHint: Do not retry\./);
+  assert.match(result.text, /^READ_ONLY_MODE: Tool apply_patch is disabled in Plan mode \(read-only\)\./);
+  assert.match(result.text, /\nHint: Do not retry or work around it\./);
+});
+
+test("Plan mode runs allowlisted commands and blocks the rest before they reach the shell", async () => {
+  vscodeTest.reset();
+  const invoked: string[] = [];
+  const broker = {
+    invokeDirect: async (name: string, args: Record<string, unknown>) => {
+      invoked.push(`${name}: ${String(args.command)}`);
+      return { text: "ran", isError: false };
+    },
+    dispose() {},
+  } as any;
+  const manager = new BridgeManager(makeContext(), { append() {}, appendLine() {} } as any, broker);
+  (manager as any).readOnlyMode = true;
+
+  const blocked = await callTool(manager, "run_command", { command: "git status; Remove-Item -Recurse src", background: false });
+  assert.equal(blocked.isError, true);
+  assert.match(blocked.text, /^READ_ONLY_MODE: In Plan mode, run_command only runs allowlisted read-only commands\. Blocked: Remove-Item is not on the Plan mode allowlist\./);
+  assert.match(blocked.text, /\nHint: Do not work around it\..*Allowed: file inspection and search/);
+  assert.deepEqual(invoked, [], "a blocked command never reaches the shell");
+
+  const allowed = await callTool(manager, "run_command", { command: "git status -sb", background: false });
+  assert.notEqual(allowed.isError, true);
+  assert.deepEqual(invoked, ["run_command: git status -sb"]);
+
+  (manager as any).readOnlyMode = false;
+  await callTool(manager, "run_command", { command: "Remove-Item dist", background: false });
+  assert.deepEqual(invoked.at(-1), "run_command: Remove-Item dist", "Build mode runs any command");
 });
 
 test("unknown bridge tools fail with UNKNOWN_TOOL and a refresh hint", async () => {

@@ -42,9 +42,9 @@ async function call(manager: BridgeManager, sessionId: string, name = "set_todos
   return { text: result.content[0]?.text ?? "", isError: result.isError, count: result.content.length };
 }
 
-const ON = /^\[AgentBridge notice\] The user turned read-only mode ON/;
-const OFF = /^\[AgentBridge notice\] The user turned read-only mode OFF/;
-const SESSION_ON = /^\[AgentBridge notice\] Read-only mode is ON for this connection/;
+const ON = /^\[AgentBridge notice\] The user switched to Plan mode since your last tool call/;
+const OFF = /^\[AgentBridge notice\] The user switched from Plan mode to Build mode/;
+const SESSION_ON = /^\[AgentBridge notice\] This connection is in Plan mode/;
 
 /** Mirrors createSession: the reminder is pending exactly when the session starts read-only. */
 function addNewSession(manager: BridgeManager, sessionId: string): void {
@@ -57,8 +57,10 @@ test("notice text names every blocked tool and says what to do", () => {
   for (const name of READ_ONLY_BLOCKED_TOOL_NAMES) assert.ok(on.includes(name), name);
   for (const name of READ_ONLY_BLOCKED_TOOL_NAMES) assert.ok(buildReadOnlyTransitionNotice(false).includes(name), name);
   assert.match(on, /READ_ONLY_MODE/);
-  assert.match(on, /patch or diff in your reply/);
-  assert.match(buildReadOnlyTransitionNotice(false), /available again/);
+  assert.match(on, /run_command only runs allowlisted read-only commands/);
+  assert.match(on, /present one complete plan/);
+  assert.match(on, /plan them instead/, "a request to make changes becomes a request to plan them");
+  assert.match(buildReadOnlyTransitionNotice(false), /available again, and run_command can run any command/);
 });
 
 test("a toggle is announced once, in the next tool result, prefixed to its text", async () => {
@@ -117,7 +119,8 @@ test("session notice names every blocked tool and addresses earlier usage", () =
   const text = buildReadOnlySessionNotice();
   for (const name of READ_ONLY_BLOCKED_TOOL_NAMES) assert.ok(text.includes(name), name);
   assert.match(text, /READ_ONLY_MODE/);
-  assert.match(text, /even if earlier messages in this conversation used them/);
+  assert.match(text, /even if earlier messages in this conversation made changes or ran commands/);
+  assert.match(text, /present one complete plan/);
   assert.doesNotMatch(text, /since your last tool call/, "a fresh session has no last call");
 });
 
@@ -164,21 +167,12 @@ test("toggles before the first call: transition notices win, and the reminder is
 test("a repeated setReadOnlyMode with the same value is a no-op (panel + config listener both fire)", () => {
   const lines: string[] = [];
   const manager = makeManager(lines);
-  let notified = 0;
-  ((manager as any).sessions as Map<string, unknown>).set("s1", {
-    server: { sendToolListChanged: async () => { notified += 1; } },
-    lastActivity: Date.now(),
-    activeRequests: 0,
-    activeStreams: 0,
-    toldReadOnly: false,
-  });
   manager.setReadOnlyMode(true);
   manager.setReadOnlyMode(true);
   manager.setReadOnlyMode(false);
   manager.setReadOnlyMode(false);
   const toggles = lines.filter((line) => line.startsWith("[bridge] read-only mode"));
   assert.deepEqual(toggles, ["[bridge] read-only mode enabled", "[bridge] read-only mode disabled"]);
-  return new Promise<void>((resolve) => setImmediate(() => { assert.equal(notified, 2); resolve(); }));
 });
 
 test("every Bridge start begins in Build mode, in memory and in settings", async () => {

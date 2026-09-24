@@ -5,6 +5,7 @@ import {
   buildReadOnlySessionNotice,
   buildReadOnlyTransitionNotice,
   buildServerInstructions,
+  planModeBlockError,
   READ_ONLY_BLOCKED_TOOL_NAMES,
 } from "../src/extension/src/bridge-server.js";
 import { enMessages, zhMessages } from "../src/extension/src/i18n.js";
@@ -41,8 +42,10 @@ const PROSE: ReadonlyArray<readonly [string, string]> = [
   ["read-only ON transition notice", buildReadOnlyTransitionNotice(true)],
   ["read-only OFF transition notice", buildReadOnlyTransitionNotice(false)],
   ["read-only session notice", buildReadOnlySessionNotice()],
+  ["Plan mode block error for a blocked tool", planModeBlockError([...READ_ONLY_BLOCKED_TOOL_NAMES][0], {}) ?? ""],
+  ["Plan mode block error for a command", planModeBlockError("run_command", { command: "rm -rf dist" }) ?? ""],
   // Panel text that names tools (zh and en).
-  ...(["modePlanTitle", "readOnlyEnabledNotice", "readOnlyDisabledNotice", "readOnlyEnabledNoticeManualRefresh", "readOnlyDisabledNoticeManualRefresh"] as const)
+  ...(["modePlanTitle", "readOnlyEnabledNotice", "readOnlyDisabledNotice"] as const)
     .flatMap((key) => [[`panel ${key} (zh)`, String((zhMessages as any)[key])], [`panel ${key} (en)`, String((enMessages as any)[key])]] as Array<[string, string]>),
 ];
 
@@ -73,7 +76,7 @@ test("lowercase names that start a bullet (for example \"- lsp for ...\") are li
 test("read-only guidance only recommends tools that stay available", () => {
   const text = buildServerInstructions(true);
   const [, readOnlySection = "", ...rest] = text.split("\n\n");
-  const guidance = readOnlySection.split("\n").slice(1).join("\n"); // lines after "…are disabled."
+  const guidance = readOnlySection.split("\n").slice(1).join("\n"); // lines after "Plan mode is ACTIVE: … are disabled …"
   for (const tool of TOOL_NAMES) {
     if (!READ_ONLY_BLOCKED_TOOL_NAMES.has(tool)) continue;
     assert.ok(!new RegExp(`\\b${tool}\\b`).test(guidance), `read-only guidance recommends blocked tool ${tool}`);

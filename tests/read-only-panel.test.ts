@@ -39,8 +39,6 @@ function openPanel(tunnelProvider: string) {
   return { harness, sendStatus };
 }
 
-const MANUAL = /manual|手动/;
-
 function panelHtml(): string {
   const manager = makeManager();
   const provider = new BridgePanelProvider(manager, Promise.resolve());
@@ -99,7 +97,7 @@ test("the read-only notice appears under the switch and survives status refreshe
   harness.element("modePlanButton").click();
   assert.equal(JSON.stringify(harness.posted.at(-1)), JSON.stringify({ type: "setReadOnlyMode", enabled: true }));
   assert.equal(notice.style.display, "");
-  assert.match(notice.textContent, MANUAL, "Quick Tunnel cannot push list_changed, so a manual refresh is required");
+  assert.match(notice.textContent, /Plan mode|计划模式/);
 
   sendStatus(false); // a poll that raced ahead of the setting update must not hide it
   assert.equal(notice.style.display, "");
@@ -112,13 +110,15 @@ test("the read-only notice appears under the switch and survives status refreshe
   assert.equal(notice.style.display, "none");
 });
 
-test("tunnels with a standalone SSE stream say clients were notified", () => {
-  for (const provider of ["ngrok", "cloudflare-named"]) {
+test("the notice is the same for every tunnel and never asks for a tool-list refresh", () => {
+  const texts = new Set<string>();
+  for (const provider of ["cloudflare", "ngrok", "cloudflare-named"]) {
     const { harness } = openPanel(provider);
     harness.element("modePlanButton").click();
     const notice = harness.element("readOnlyNotice");
     assert.equal(notice.style.display, "");
-    assert.doesNotMatch(notice.textContent, /Cloudflare Quick Tunnel/, provider);
-    assert.match(notice.textContent, /asked to refresh|已通知/, provider);
+    assert.doesNotMatch(notice.textContent, /refresh|刷新/, provider);
+    texts.add(notice.textContent);
   }
+  assert.equal(texts.size, 1, "the tool list no longer changes, so the tunnel type does not matter");
 });

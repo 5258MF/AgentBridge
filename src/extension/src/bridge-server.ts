@@ -16,6 +16,7 @@ import type { IdeToolBroker } from "./ide-tool-broker.js";
 import { translate } from "./i18n.js";
 import { formatSetTodosResult } from "./todo-format.js";
 import { formatToolError, ToolError } from "./tool-errors.js";
+import { checkPlanModeCommand, PLAN_MODE_COMMAND_SUMMARY } from "./plan-mode-commands.js";
 import {
   appendCloudflaredDiagnosticOutput,
   cloudflaredFirstQuicFailureAt,
@@ -218,9 +219,9 @@ function classifyCloudflaredInstallFailure(error: unknown): Exclude<CloudflaredI
 }
 
 /**
- * Server instructions, one entry per line after the intro. When read-only mode is active,
- * lines that depend on a blocked tool are dropped (or replaced by readOnlyText) and a read-only
- * section is placed right after the intro, so the instructions never recommend a tool the
+ * Server instructions, one entry per line after the intro. In Plan mode (read-only mode),
+ * lines that depend on a blocked tool are dropped (or replaced by readOnlyText) and the Plan
+ * mode section is placed right after the intro, so the instructions never recommend a tool the
  * session cannot use. Normal mode renders byte-for-byte the previous fixed text;
  * tests/server-instructions.test.ts pins both variants.
  */
@@ -243,7 +244,7 @@ const INSTRUCTION_LINES: readonly InstructionLine[] = [
   { text: "- read_files before editing", readOnlyText: "- read_files to read file contents" },
   { text: "- apply_patch for workspace changes", requires: ["apply_patch"] },
   { text: "- get_diagnostics after edits", readOnlyText: "- get_diagnostics to inspect current errors and warnings" },
-  { text: "- run_command for builds and tests", requires: ["run_command"] },
+  { text: "- run_command for builds and tests", readOnlyText: "- run_command for allowlisted read-only commands, tests, and builds" },
   { text: "- terminate_command for a hard stop when cooperative Ctrl+C does not stop a command", requires: ["terminate_command"] },
   { text: "- set_todos to maintain the complete task list for multi-step work" },
   { text: "- report_progress to report transient progress for the current task" },
@@ -267,7 +268,7 @@ const INSTRUCTION_LINES: readonly InstructionLine[] = [
   { text: "- Prefer small, focused patches with enough unique context.", requires: ["apply_patch"] },
   { text: "- Run diagnostics and relevant tests after meaningful edits.", requires: ["apply_patch"] },
   { text: "- Report meaningful progress periodically during long work, but avoid progress updates for every tool call." },
-  { text: "- To wait for a running command, call get_command_output with wait_ms instead of polling it repeatedly or running sleep commands.", requires: ["run_command"] },
+  { text: "- To wait for a running command, call get_command_output with wait_ms instead of polling it repeatedly or running sleep commands." },
   { text: "- Failed tool results start with a stable UPPER_SNAKE_CASE error code (for example INVALID_ARGUMENT, STALE_FILE, UNKNOWN_COMMAND_ID, READ_ONLY_MODE), sometimes followed by a Hint line. Use the code to choose a recovery instead of retrying blindly." },
 ];
 
@@ -328,68 +329,103 @@ export const BRIDGE_TOOL_DEFINITIONS = [
 ] as const;
 
 /**
- * Tools that modify or drive the local environment. Hidden from tools/list
- * and hard-blocked at call time while read-only mode is active.
+ * Tools blocked at call time in Plan mode (read-only mode). Every tool stays in tools/list in
+ * both modes, so switching never requires clients to refresh their tool list; a blocked call
+ * fails with READ_ONLY_MODE instead.
  * - apply_patch: writes workspace files.
- * - run_command: executes arbitrary commands in a managed terminal.
- * - send_command_input: feeds input into running processes (defense in depth —
- *   it depends on command ids produced by run_command, but blocking it closes
- *   the "drive an already-running REPL" bypass completely).
- * - terminate_command: force-kills a managed shell. Its only reach is
- *   AgentBridge's own terminals, but a read-only agent reports findings
- *   instead of acting on the environment, so it stays blocked for consistency
- *   with the other execute tools.
+ * - send_command_input: feeds input into running processes, which could drive a REPL or a
+ *   process started in Build mode.
+ * - terminate_command: force-kills a managed shell. A planning agent reports findings instead
+ *   of acting on the environment.
+ * run_command is not in this set: in Plan mode it only runs commands accepted by
+ * checkPlanModeCommand (see PLAN_MODE_COMMAND_TOOL_NAME).
  */
-export const READ_ONLY_BLOCKED_TOOL_NAMES: ReadonlySet<string> = new Set<string>(["apply_patch", "run_command", "send_command_input", "terminate_command"]);
+export const READ_ONLY_BLOCKED_TOOL_NAMES: ReadonlySet<string> = new Set<string>(["apply_patch", "send_command_input", "terminate_command"]);
+
+/** In Plan mode this tool runs only allowlisted read-only commands (plan-mode-commands.ts). */
+export const PLAN_MODE_COMMAND_TOOL_NAME = "run_command";
 
 function formatNameList(names: readonly string[]): string {
   if (names.length <= 2) return names.join(" and ");
   return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
-/** Read-only section, generated from READ_ONLY_BLOCKED_TOOL_NAMES so it cannot drift. */
-function readOnlyInstructions(): string {
+/**
+ * Plan mode guidance, shared by the server instructions and the notices. Modeled on the plan
+ * modes of Codex and opencode: the limits first, then how to plan, then how the plan ends.
+ * Tool names come from READ_ONLY_BLOCKED_TOOL_NAMES and PLAN_MODE_COMMAND_TOOL_NAME, and the
+ * command summary from plan-mode-commands.ts, so the text cannot drift from what is enforced.
+ * Only the first line names the blocked tools.
+ */
+export function buildPlanModeGuidance(): string {
   return [
-    `Read-only mode is ACTIVE: ${formatNameList([...READ_ONLY_BLOCKED_TOOL_NAMES])} are disabled.`,
-    "- Investigate with the read tools, get_diagnostics, and lsp.",
-    "- Present proposed changes as a patch or diff in your reply instead of applying them.",
-    "- Suggest commands for the user to run instead of running them.",
-    "- set_todos and report_progress remain available for task state and progress.",
-    "- If the user asks you to apply changes, explain that read-only mode must first be turned off in the AgentBridge panel.",
+    `Plan mode is ACTIVE: the user wants a plan before any changes are made. ${formatNameList([...READ_ONLY_BLOCKED_TOOL_NAMES])} are disabled and fail with READ_ONLY_MODE.`,
+    `- ${PLAN_MODE_COMMAND_TOOL_NAME} only runs allowlisted read-only commands: ${PLAN_MODE_COMMAND_SUMMARY}. Anything else, including redirection, command substitution, and script blocks, fails with READ_ONLY_MODE.`,
+    "- Do not work around these limits with other commands. Plan mode ends only when the user switches to Build mode in the AgentBridge panel; requests in chat do not end it. If the user asks you to make changes while Plan mode is active, plan them instead and tell the user to switch to Build mode.",
+    "- Explore first: read the relevant code, configuration, and tests, and check the current state with read-only commands. Do not ask the user anything you can find out yourself.",
+    "- Then ask about preferences and tradeoffs you cannot discover. Offer 2-4 concrete options with a recommended default; if the user does not choose, use the default and record it as an assumption.",
+    "- When the approach is settled, present one complete plan in your reply that leaves no decisions to the implementer: a short summary, the key changes grouped by behavior (name files only where that prevents ambiguity), a test plan, and the assumptions made. Keep it concise.",
+    "- Do not ask whether to proceed. When the user wants the plan implemented, they switch to Build mode.",
   ].join("\n");
 }
 
 /**
  * MCP server instructions for a new session.
- * @param readOnly - whether read-only mode is active when the session is created.
+ * @param readOnly - whether Plan mode (read-only mode) is active when the session is created.
  */
 export function buildServerInstructions(readOnly: boolean): string {
   const body = INSTRUCTION_LINES
     .filter((line) => !readOnly || !line.requires?.some((name) => READ_ONLY_BLOCKED_TOOL_NAMES.has(name)))
     .map((line) => (readOnly && line.readOnlyText !== undefined ? line.readOnlyText : line.text));
-  return [INSTRUCTION_INTRO, ...(readOnly ? ["", readOnlyInstructions()] : []), ...body].join("\n");
+  return [INSTRUCTION_INTRO, ...(readOnly ? ["", buildPlanModeGuidance()] : []), ...body].join("\n");
 }
 
 /**
- * One-time notice prefixed to a session's next tool result after the user toggles read-only
- * mode, because the instructions that session received describe the previous mode.
- * @param readOnly - the mode now in effect.
+ * One-time notice prefixed to a session's next tool result after the user switches between
+ * Plan and Build mode, because the instructions that session received describe the previous mode.
+ * @param readOnly - true when Plan mode is now in effect.
  */
 export function buildReadOnlyTransitionNotice(readOnly: boolean): string {
+  if (readOnly) {
+    return `[AgentBridge notice] The user switched to Plan mode since your last tool call.\n${buildPlanModeGuidance()}\nThe result of this call follows.`;
+  }
   const blocked = formatNameList([...READ_ONLY_BLOCKED_TOOL_NAMES]);
-  return readOnly
-    ? `[AgentBridge notice] The user turned read-only mode ON since your last tool call. ${blocked} are now disabled and fail with READ_ONLY_MODE. Continue with read-only investigation, present proposed changes as a patch or diff in your reply, and suggest commands for the user to run. The result of this call follows.`
-    : `[AgentBridge notice] The user turned read-only mode OFF since your last tool call. ${blocked} are available again, and the read-only guidance you received earlier no longer applies. If your tool list still lacks them, ask the user to refresh it. The result of this call follows.`;
+  return `[AgentBridge notice] The user switched from Plan mode to Build mode since your last tool call. Plan mode no longer applies: ${blocked} are available again, and ${PLAN_MODE_COMMAND_TOOL_NAME} can run any command. If the user asks you to implement a plan you presented, follow it. The result of this call follows.`;
 }
 
 /**
- * Reminder prefixed to the first tool result of a session created in read-only mode.
+ * Reminder prefixed to the first tool result of a session created in Plan mode.
  * Worded neutrally: the model may be continuing a conversation from an earlier, closed
- * session that ran in normal mode, and the client may not have shown it the instructions.
+ * session that ran in Build mode, and the client may not have shown it the instructions.
  */
 export function buildReadOnlySessionNotice(): string {
-  const blocked = formatNameList([...READ_ONLY_BLOCKED_TOOL_NAMES]);
-  return `[AgentBridge notice] Read-only mode is ON for this connection. ${blocked} are disabled and fail with READ_ONLY_MODE, even if earlier messages in this conversation used them. Continue with read-only investigation, present proposed changes as a patch or diff in your reply, and suggest commands for the user to run. The result of this call follows.`;
+  return `[AgentBridge notice] This connection is in Plan mode, even if earlier messages in this conversation made changes or ran commands.\n${buildPlanModeGuidance()}\nThe result of this call follows.`;
+}
+
+/**
+ * The READ_ONLY_MODE error for a tool call that Plan mode does not allow, or undefined when the
+ * call may proceed. Blocked tools always fail; run_command fails unless its command passes the
+ * allowlist. A non-string command is left to the tool's own argument validation.
+ */
+export function planModeBlockError(toolName: string, args: Record<string, unknown>): string | undefined {
+  if (READ_ONLY_BLOCKED_TOOL_NAMES.has(toolName)) {
+    return formatToolError(new ToolError(
+      "READ_ONLY_MODE",
+      `Tool ${toolName} is disabled in Plan mode (read-only).`,
+      "Do not retry or work around it. Continue planning and describe the proposed change in your plan; only the local user can switch to Build mode, in the AgentBridge panel.",
+    ));
+  }
+  if (toolName === PLAN_MODE_COMMAND_TOOL_NAME && typeof args.command === "string") {
+    const check = checkPlanModeCommand(args.command);
+    if (!check.allowed) {
+      return formatToolError(new ToolError(
+        "READ_ONLY_MODE",
+        `In Plan mode, ${toolName} only runs allowlisted read-only commands. Blocked: ${check.reason}.`,
+        `Do not work around it. Use a read-only alternative, or list the command in your plan for the Build phase. Allowed: ${PLAN_MODE_COMMAND_SUMMARY}.`,
+      ));
+    }
+  }
+  return undefined;
 }
 
 export interface BridgeActivity {
@@ -1304,9 +1340,7 @@ export class BridgeManager implements vscode.Disposable {
     }
     const localUrl = this.localPort && this.routeToken ? `http://127.0.0.1:${this.localPort}/mcp/${this.routeToken}` : undefined;
     const publicUrl = this.domain && this.routeToken ? `https://${this.domain}/mcp/${this.routeToken}` : undefined;
-    const visibleToolNames = BRIDGE_TOOL_DEFINITIONS
-      .map((tool) => tool.name)
-      .filter((name) => !this.readOnlyMode || !READ_ONLY_BLOCKED_TOOL_NAMES.has(name));
+    const visibleToolNames = BRIDGE_TOOL_DEFINITIONS.map((tool) => tool.name);
     return {
       state: this.state,
       transport: "streamable-http",
@@ -1407,9 +1441,8 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   /**
-   * Every Bridge start begins in Build mode (read-only off), so clients connecting to the new
-   * endpoint fetch the full tool list instead of caching a Plan-mode list that lacks the
-   * modifying tools. Only start() reaches this (Start button, persistent auto-start, command);
+   * Every Bridge start begins in Build mode (read-only off), the mode the user most likely
+   * expects from a fresh connection. Only start() reaches this (Start button, persistent auto-start, command);
    * automatic tunnel recovery restarts the tunnel directly and keeps the current mode.
    */
   private async resetToBuildModeForStart(): Promise<void> {
@@ -1420,39 +1453,21 @@ export class BridgeManager implements vscode.Disposable {
     } catch (error) {
       this.output.appendLine(`[bridge] could not persist Build mode on start: ${error instanceof Error ? error.message : String(error)}`);
     }
-    this.output.appendLine("[bridge] start: Build mode (read-only off), so new sessions get the full tool list");
+    this.output.appendLine("[bridge] start: Build mode (read-only off)");
   }
 
   /**
-   * Hot-apply read-only mode without restarting the Bridge. The tools/list
-   * filter takes effect for the next list request; the hard block in
-   * handleToolCall covers clients that cached the old tool list, so toggling
-   * is safe at any time.
+   * Hot-apply Plan mode (read-only mode) without restarting the Bridge. tools/list is the same
+   * in both modes; the call-time checks in executeToolCall enforce the mode, and each session's
+   * next tool result carries a one-time notice (takeReadOnlyTransitionNotice), so switching is
+   * safe at any time and clients never need to refresh their tool list.
    */
   setReadOnlyMode(enabled: boolean): void {
     // Both the panel handler and the configuration listener call this for one toggle;
-    // the repeat is a no-op so it neither logs twice nor re-notifies clients.
+    // the repeat is a no-op so it does not log twice.
     if (this.readOnlyMode === enabled) return;
     this.readOnlyMode = enabled;
     this.output.appendLine(`[bridge] read-only mode ${enabled ? "enabled" : "disabled"}`);
-    this.notifyToolListChanged();
-  }
-
-  /**
-   * Ask connected clients to re-fetch tools/list (MCP notifications/tools/list_changed) so
-   * blocked tools disappear, or reappear, without a manual refresh. Delivery needs an open
-   * standalone SSE stream; clients that ignore the notification are still covered by the
-   * call-time block in handleToolCall. Server instructions are fixed per session by the
-   * protocol and are not affected.
-   */
-  private notifyToolListChanged(): void {
-    for (const [sessionId, session] of this.sessions) {
-      Promise.resolve()
-        .then(() => session.server.sendToolListChanged())
-        .catch((error: unknown) => {
-          this.output.appendLine(`[bridge] tools/list_changed not delivered to session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
-        });
-    }
   }
 
   private readPersistedDomain(): string {
@@ -3444,7 +3459,7 @@ export class BridgeManager implements vscode.Disposable {
     const packageVersion = String(this.context.extension.packageJSON.version ?? "").trim() || "0.0.0";
     const server = new McpServer(
       { name: "agentbridge", version: packageVersion },
-      { capabilities: { tools: { listChanged: true }, logging: {} }, instructions },
+      { capabilities: { tools: {}, logging: {} }, instructions },
     );
     let transport!: StreamableHTTPServerTransport;
     transport = new StreamableHTTPServerTransport({
@@ -3479,8 +3494,8 @@ export class BridgeManager implements vscode.Disposable {
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       const shell = getManagedShellChoice();
       return {
+        // The same list in Plan and Build mode; see setReadOnlyMode.
         tools: BRIDGE_TOOL_DEFINITIONS
-          .filter((tool) => !this.readOnlyMode || !READ_ONLY_BLOCKED_TOOL_NAMES.has(tool.name))
           .map((tool) => ({
             name: tool.name,
             description: tool.description
@@ -3553,21 +3568,17 @@ export class BridgeManager implements vscode.Disposable {
     args: Record<string, unknown>,
     extra: { signal?: AbortSignal; sessionId?: string },
   ): Promise<{ content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean; structuredContent?: Record<string, unknown> }> {
-    if (this.readOnlyMode && READ_ONLY_BLOCKED_TOOL_NAMES.has(toolName)) {
-      const errorMsg = formatToolError(new ToolError(
-        "READ_ONLY_MODE",
-        `Tool ${toolName} is disabled in read-only mode. AgentBridge is currently running with modifications and command execution blocked.`,
-        "Do not retry. Report findings and proposed changes to the user instead; only the local user can turn read-only mode off.",
-      ));
+    const planModeBlock = this.readOnlyMode ? planModeBlockError(toolName, args) : undefined;
+    if (planModeBlock) {
       const activityId = this.pushActivity({
         tool: toolName,
         status: "running",
         presentation: bridgePresentation(toolName, args),
         sessionId: extra.sessionId,
       });
-      this.finishActivity(activityId, "error", 0, errorMsg, bridgePresentation(toolName, args, errorMsg, undefined, true));
+      this.finishActivity(activityId, "error", 0, planModeBlock, bridgePresentation(toolName, args, planModeBlock, undefined, true));
       return {
-        content: [{ type: "text" as const, text: errorMsg }],
+        content: [{ type: "text" as const, text: planModeBlock }],
         isError: true,
       };
     }

@@ -2214,11 +2214,8 @@ private renderHtml(advancedOpen = false): string {
     // Shown in the hero card under the status line, near the header switch; addressNotice is
     // reset on every status render, so it cannot carry this message.
     const notice = $('readOnlyNotice');
-    // Quick Tunnel disables the standalone SSE stream, so tools/list_changed cannot reach clients there.
-    const manualRefresh = lastStatus.tunnelProvider === 'cloudflare';
-    notice.textContent = enabled
-      ? t(manualRefresh ? 'readOnlyEnabledNoticeManualRefresh' : 'readOnlyEnabledNotice')
-      : t(manualRefresh ? 'readOnlyDisabledNoticeManualRefresh' : 'readOnlyDisabledNotice');
+    // The tool list is the same in both modes, so the notice does not depend on the tunnel type.
+    notice.textContent = enabled ? t('readOnlyEnabledNotice') : t('readOnlyDisabledNotice');
     notice.dataset.mode = enabled ? 'on' : 'off';
     notice.dataset.confirmed = '';
     notice.style.display = '';

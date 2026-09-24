@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BridgeManager, buildServerInstructions, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/bridge-server.js";
+import { BRIDGE_TOOL_DEFINITIONS, BridgeManager, buildServerInstructions, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/bridge-server.js";
 import { vscodeTest } from "./helpers/fake-vscode.js";
 
 /** The fixed instructions shipped before they became data-driven; normal mode must not change. */
@@ -32,14 +32,17 @@ test("normal-mode server instructions are unchanged byte for byte", () => {
   assert.equal(buildServerInstructions(false), NORMAL_MODE_INSTRUCTIONS);
 });
 
-test("read-only instructions lead with the read-only section and never recommend blocked tools", () => {
+test("Plan mode instructions lead with the Plan mode section and never recommend blocked tools", () => {
   const text = buildServerInstructions(true);
   const paragraphs = text.split("\n\n");
   assert.equal(paragraphs[0], "You are connected to the currently open AgentBridge workspace.");
   const readOnly = paragraphs[1];
-  assert.match(readOnly, /^Read-only mode is ACTIVE: .+ are disabled\./);
-  assert.match(readOnly, /Present proposed changes as a patch or diff in your reply/);
-  assert.match(readOnly, /Suggest commands for the user to run/);
+  assert.match(readOnly, /^Plan mode is ACTIVE: .+ are disabled and fail with READ_ONLY_MODE\./);
+  assert.match(readOnly, /run_command only runs allowlisted read-only commands: file inspection and search/);
+  assert.match(readOnly, /Explore first/);
+  assert.match(readOnly, /Offer 2-4 concrete options with a recommended default/);
+  assert.match(readOnly, /present one complete plan in your reply that leaves no decisions to the implementer/);
+  assert.match(readOnly, /Do not ask whether to proceed/);
   for (const blocked of READ_ONLY_BLOCKED_TOOL_NAMES) {
     assert.ok(readOnly.includes(blocked), `read-only section must name ${blocked}`);
   }
@@ -49,28 +52,24 @@ test("read-only instructions lead with the read-only section and never recommend
   }
   assert.doesNotMatch(rest, /before editing|after edits|after meaningful edits|focused patches/);
   assert.match(rest, /- read_files to read file contents/);
+  assert.match(rest, /- run_command for allowlisted read-only commands, tests, and builds/);
   assert.match(rest, /- get_diagnostics to inspect current errors and warnings/);
   assert.match(rest, /- set_todos to maintain the complete task list/);
   assert.match(rest, /READ_ONLY_MODE/);
 });
 
-test("toggling read-only mode notifies connected sessions exactly when the mode changes", async () => {
+test("switching modes keeps the tool list and sends no tools/list_changed", async () => {
   const manager = makeManager();
   let notified = 0;
   const sessions = (manager as any).sessions as Map<string, unknown>;
   sessions.set("ok", { server: { sendToolListChanged: async () => { notified += 1; } }, lastActivity: Date.now(), activeRequests: 0, activeStreams: 0 });
-  sessions.set("broken", { server: { sendToolListChanged: async () => { throw new Error("stream closed"); } }, lastActivity: Date.now(), activeRequests: 0, activeStreams: 0 });
-  sessions.set("legacy", { server: {}, lastActivity: Date.now(), activeRequests: 0, activeStreams: 0 });
 
+  const buildTools = manager.getStatus().toolNames;
   manager.setReadOnlyMode(true);
   await flush();
-  assert.equal(notified, 1);
-
-  manager.setReadOnlyMode(true);
-  await flush();
-  assert.equal(notified, 1, "an unchanged mode must not notify again");
-
+  assert.deepEqual(manager.getStatus().toolNames, buildTools, "Plan mode lists the same tools");
+  assert.equal(manager.getStatus().toolCount, BRIDGE_TOOL_DEFINITIONS.length);
   manager.setReadOnlyMode(false);
   await flush();
-  assert.equal(notified, 2);
+  assert.equal(notified, 0, "nothing for clients to refresh");
 });

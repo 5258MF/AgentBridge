@@ -245,7 +245,7 @@
           "type": "boolean",
           "default": false,
           "scope": "application",
-          "description": "Plan mode (read-only). When active, tools that modify files or run commands are hidden from tools/list and hard-blocked at call time. Takes effect immediately; connected clients see the change after they refresh their tool list. Every Bridge start resets this to false (Build mode) so new connections receive the full tool list."
+          "description": "Plan mode (read-only). When active, tools that modify files or drive running commands are blocked at call time, and run_command only runs allowlisted read-only commands, tests, and builds. The tool list stays the same, and the change takes effect immediately. Every Bridge start resets this to false (Build mode)."
         },
         "agentbridge.bridge.trustedBrowserOrigins": {
           "type": "array",

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { BRIDGE_TOOL_DEFINITIONS, MAX_TODOS, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/bridge-server.js";
+import { BRIDGE_TOOL_DEFINITIONS, MAX_TODOS, PLAN_MODE_COMMAND_TOOL_NAME, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/bridge-server.js";
 import {
   GET_COMMAND_OUTPUT_MAX_WAIT_MS,
   MAX_RETAINED_FINISHED_COMMANDS,
@@ -23,7 +23,7 @@ function tool(name: string): any {
 }
 
 test("docs/tool-catalog.md matches the live tool definitions", () => {
-  const expected = renderToolCatalog(BRIDGE_TOOL_DEFINITIONS, { readOnlyBlocked: READ_ONLY_BLOCKED_TOOL_NAMES });
+  const expected = renderToolCatalog(BRIDGE_TOOL_DEFINITIONS, { readOnlyBlocked: READ_ONLY_BLOCKED_TOOL_NAMES, planRestricted: new Set([PLAN_MODE_COMMAND_TOOL_NAME]) });
   if (process.env.AGENTBRIDGE_UPDATE_TOOL_CATALOG === "1") {
     fs.writeFileSync(catalogPath, expected, "utf8");
     return;
@@ -47,6 +47,7 @@ test("every tool definition is well-formed", () => {
     }
   }
   for (const blocked of READ_ONLY_BLOCKED_TOOL_NAMES) assert.ok(names.includes(blocked), `read-only list names unknown tool ${blocked}`);
+  assert.ok(names.includes(PLAN_MODE_COMMAND_TOOL_NAME), `Plan mode command tool ${PLAN_MODE_COMMAND_TOOL_NAME} is not a tool`);
 });
 
 test("limits stated in descriptions and schemas match the enforced constants", () => {
