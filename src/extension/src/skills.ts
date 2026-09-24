@@ -46,6 +46,13 @@ export interface SkillEntry {
   readonly file: string;
   /** For workspace skills, SKILL.md relative to its workspace folder, with forward slashes. */
   readonly workspacePath?: string;
+  /**
+   * disable-model-invocation: true. In pi, Claude Code, and DeepSeek Harness such a skill runs
+   * only when the user invokes it (/name); the model never picks it on its own. Over MCP the
+   * user's /name arrives as chat text, so these skills stay loadable by name but are listed apart,
+   * to be loaded only when the user names them.
+   */
+  readonly onRequestOnly: boolean;
 }
 
 export interface SkillDiscoveryOptions {
@@ -66,6 +73,7 @@ export const LOAD_SKILL_TOOL = {
     "Load an Agent Skill: task-specific instructions kept in a SKILL.md file on this machine.",
     "",
     "- When the task matches a skill listed below, load it before starting and follow its instructions.",
+    "- When the user names a skill, for example /deploy, $deploy, or \"use the deploy skill\", load that skill first.",
     "- Returns the SKILL.md instructions, the skill directory, and the other files in it. Relative paths in a skill are relative to that directory.",
     "- Pass file to read another text file of the skill, such as a reference document; run its scripts with run_command.",
     "- Omit name to list the skills again, including ones added after this list was sent.",
@@ -264,7 +272,6 @@ export async function discoverSkills(options: SkillDiscoveryOptions): Promise<Sk
         warnings.push(`${file}: skipped, no YAML frontmatter with name and description`);
         continue;
       }
-      if (isTrue(parsed.fields["disable-model-invocation"])) continue;
       const name = (parsed.fields.name ?? entry.name).trim();
       if (!name || name.length > MAX_SKILL_NAME_LENGTH || /[\s/\\]/.test(name)) {
         warnings.push(`${file}: skipped, invalid name "${name}"`);
@@ -287,6 +294,7 @@ export async function discoverSkills(options: SkillDiscoveryOptions): Promise<Sk
         directory,
         file,
         workspacePath: workspaceRoot ? path.relative(workspaceRoot, file).split(path.sep).join("/") : undefined,
+        onRequestOnly: isTrue(parsed.fields["disable-model-invocation"]),
       };
       byName.set(name, skill);
       skills.push(skill);
@@ -299,19 +307,25 @@ export async function discoverSkills(options: SkillDiscoveryOptions): Promise<Sk
 // Model-facing text
 
 /** The catalog that replaces SKILL_CATALOG_PLACEHOLDER in the load_skill description. */
-export function formatSkillCatalog(skills: readonly SkillEntry[], enabled = true): string {
-  if (!enabled) return "Skills are turned off in the AgentBridge settings; load_skill fails with SKILLS_DISABLED.";
+export function formatSkillCatalog(skills: readonly SkillEntry[]): string {
   if (!skills.length) {
     return "No skills are installed. A skill is a folder with a SKILL.md in .agents/skills of a workspace folder or in ~/.agents/skills.";
   }
   const shown = skills.slice(0, MAX_CATALOG_SKILLS);
-  const lines = ["Available skills:", ...shown.map((skill) => `- ${skill.name}: ${skill.description}`)];
+  const automatic = shown.filter((skill) => !skill.onRequestOnly);
+  const onRequest = shown.filter((skill) => skill.onRequestOnly);
+  const lines: string[] = [];
+  if (automatic.length) lines.push("Available skills:", ...automatic.map((skill) => `- ${skill.name}: ${skill.description}`));
+  if (onRequest.length) {
+    if (lines.length) lines.push("");
+    lines.push("Load these only when the user names them, never on your own:", ...onRequest.map((skill) => `- ${skill.name}: ${skill.description}`));
+  }
   if (skills.length > shown.length) lines.push(`- ... ${skills.length - shown.length} more; call load_skill without name to list them.`);
   return lines.join("\n");
 }
 
-export function renderLoadSkillDescription(skills: readonly SkillEntry[], enabled = true): string {
-  return LOAD_SKILL_TOOL.description.replace(SKILL_CATALOG_PLACEHOLDER, formatSkillCatalog(skills, enabled));
+export function renderLoadSkillDescription(skills: readonly SkillEntry[]): string {
+  return LOAD_SKILL_TOOL.description.replace(SKILL_CATALOG_PLACEHOLDER, formatSkillCatalog(skills));
 }
 
 export interface LoadSkillResult {
@@ -319,26 +333,19 @@ export interface LoadSkillResult {
   readonly structuredContent: Record<string, unknown>;
 }
 
-export interface LoadSkillContext extends SkillDiscoveryOptions {
-  readonly enabled: boolean;
-}
-
 /** Run load_skill. Throws ToolError on failure. */
-export async function loadSkill(input: LoadSkillInput, context: LoadSkillContext): Promise<LoadSkillResult> {
-  if (!context.enabled) {
-    throw new ToolError("SKILLS_DISABLED", "Skills are turned off in the AgentBridge settings.", "Continue without the skill; only the local user can turn skills on.");
-  }
+export async function loadSkill(input: LoadSkillInput, context: SkillDiscoveryOptions): Promise<LoadSkillResult> {
   const { skills } = await discoverSkills(context);
 
   if (!input.name) {
     const lines = [`skills: ${skills.length}`];
     for (const skill of skills) {
-      lines.push(`- ${skill.name} (${skill.source}): ${skill.description}`, `  location: ${skill.file}`);
+      lines.push(`- ${skill.name} (${skill.source}${skill.onRequestOnly ? ", only when the user names it" : ""}): ${skill.description}`, `  location: ${skill.file}`);
     }
     if (!skills.length) lines.push(formatSkillCatalog(skills));
     return {
       text: lines.join("\n"),
-      structuredContent: { skills: skills.map((skill) => ({ name: skill.name, description: skill.description, source: skill.source, location: skill.file })) },
+      structuredContent: { skills: skills.map((skill) => ({ name: skill.name, description: skill.description, source: skill.source, location: skill.file, onRequestOnly: skill.onRequestOnly })) },
     };
   }
 

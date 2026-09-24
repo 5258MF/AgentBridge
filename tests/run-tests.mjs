@@ -1,5 +1,6 @@
 import { build } from "esbuild";
 import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,7 +48,7 @@ try {
   console.log("[test] TypeScript checking test sources...");
   run(process.execPath, [path.join(root, "node_modules", "typescript", "bin", "tsc"), "-p", path.join("tests", "tsconfig.json"), "--noEmit"]);
 
-  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "terminal-lifecycle.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts", "workspace-roots.test.ts", "todo-format.test.ts", "tool-errors.test.ts", "tool-catalog.test.ts", "server-instructions.test.ts", "path-outside.test.ts", "read-only-panel.test.ts", "read-only-notice.test.ts", "prompt-tool-names.test.ts", "plan-mode-commands.test.ts", "image-processing.test.ts", "apply-patch-dirs.test.ts", "apply-patch-replace.test.ts", "skills.test.ts"];
+  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "terminal-lifecycle.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts", "workspace-roots.test.ts", "todo-format.test.ts", "tool-errors.test.ts", "tool-catalog.test.ts", "server-instructions.test.ts", "path-outside.test.ts", "read-only-panel.test.ts", "read-only-notice.test.ts", "prompt-tool-names.test.ts", "plan-mode-commands.test.ts", "image-processing.test.ts", "apply-patch-dirs.test.ts", "apply-patch-replace.test.ts", "skills.test.ts", "agents-md.test.ts"];
   const entries = match ? allEntries.filter((name) => name.replace(/\.test\.ts$/, "") === match) : allEntries;
   if (!entries.length) throw new Error(`No test entry matched ${JSON.stringify(match)}.`);
   const fakeVscode = path.join(testsDir, "helpers", "fake-vscode.ts");
@@ -81,9 +82,14 @@ try {
   });
 
   const bundles = entries.map((entry) => path.join(tempDir, entry.replace(/\.ts$/, ".cjs")));
+  // An empty home, so the developer's own ~/.agents skills and AGENTS.md cannot leak into tests.
+  const testHome = path.join(tempDir, "home");
+  fs.mkdirSync(testHome, { recursive: true });
   run(process.execPath, ["--test", ...bundles], {
     env: {
       ...process.env,
+      HOME: testHome,
+      USERPROFILE: testHome,
       NODE_PATH: path.join(root, "node_modules"),
       ...(updateCatalog ? { AGENTBRIDGE_UPDATE_TOOL_CATALOG: "1" } : {}),
     },

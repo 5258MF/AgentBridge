@@ -241,12 +241,6 @@
           "scope": "application",
           "description": "Automatically start the Bridge after the extension activates."
         },
-        "agentbridge.bridge.skillsEnabled": {
-          "type": "boolean",
-          "default": true,
-          "scope": "application",
-          "description": "Let AI clients discover and load Agent Skills (folders with a SKILL.md) from .agents/skills in each workspace folder and from ~/.agents/skills through the load_skill tool."
-        },
         "agentbridge.bridge.readOnlyMode": {
           "type": "boolean",
           "default": false,

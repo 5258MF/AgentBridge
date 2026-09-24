@@ -30,7 +30,8 @@
 - **跨平台 cloudflared 检测与安装** — Windows 可用 Winget 一键安装，macOS 可用 Homebrew 一键安装；Linux 检测 PATH、`/usr/bin` 与 `/usr/local/bin`，安装仍按 Cloudflare 官方说明手动完成。
 - **托管 shell 支持矩阵** — Windows PowerShell 5.1 / PowerShell 7+（Windows）、bash（Linux）、zsh（macOS）通过每提示符协议钩子完整支持 `run_command`；cmd/sh/fish 会被直接拒绝并返回明确错误，而不是挂到超时。切换 shell 时 AI 看到的运行时语法提示自动更新。
 - **可识别像素的 `read_image_file`** — 返回 MCP `ImageContent` block，让自带 vision 的客户端（ChatGPT、Claude）直接看到图像内容。按文件内容识别 PNG / JPEG / GIF / WebP / BMP；大图自动缩到长边 2000 像素、base64 不超过 4.5 MB（GIF、BMP 转成 PNG），本来就符合要求的图原样发送。原图不限文件大小，超过 6400 万像素的图会被拒绝。SVG 仍走 `read_files` 按文本读。
-- **本地 Agent Skills** — 读取每个工作区根目录下 `.agents/skills` 和用户目录 `~/.agents/skills` 里带 `SKILL.md` 的文件夹（opencode、DeepSeek Harness 等共用的位置）。和这些 harness 一样，AI 一开始只看到每个 skill 的名字和简介（列在 `load_skill` 的工具描述里），任务对得上时再用 `load_skill` 加载正文和附带文件。每次新连接都会重新扫描。可用 `agentbridge.bridge.skillsEnabled` 关闭。
+- **本地 Agent Skills** — 读取每个工作区根目录下 `.agents/skills` 和用户目录 `~/.agents/skills` 里带 `SKILL.md` 的文件夹（opencode、DeepSeek Harness 等共用的位置）。和这些 harness 一样，AI 一开始只看到每个 skill 的名字和简介（列在 `load_skill` 的工具描述里），任务对得上时再用 `load_skill` 加载正文和附带文件。每次新连接都会重新扫描。在对话里点名（如 `/deploy` 或"用 deploy 这个 skill"）即可让 AI 加载指定 skill；标了 `disable-model-invocation: true` 的 skill 只在点名时才加载。
+- **AGENTS.md** — 像 pi、opencode、Codex、DeepSeek Harness 一样自动读取常驻指令：`~/.agents/AGENTS.md`，以及从所在 git 仓库根目录到每个工作区根目录路径上的每个 `AGENTS.md`。内容放进服务端说明；由于有的客户端不会把说明交给 AI，每个连接的第一次工具结果前面也会再附一份。子文件夹里的 `AGENTS.md` 在某次 `read_files` 或 `apply_patch` 第一次碰到该文件夹下的文件时，随结果发送一次。每块上限 32 KB（超出时先舍弃范围更大的文件）。
 - **外链打开方式三选一** — `agentbridge.bridge.openInternalBrowser`（`auto` / `all` / `external`）决定 ChatGPT / Arena 等外链在 VS Code 内置 Simple Browser 还是 OS 默认浏览器中打开。默认 `auto` 还原在编辑器内嵌的体验。
 - **Bridge 面板** — 活动栏视图 + 隧道供应商单选卡 + 状态 hero + 公网入口持续健康监测 + 自动启动 toggle + 会话时间线（含 mini diff）+ 高级卡（界面语言 / Managed Shell / 打开方式 / 复制 MCP 提示词 / 重置 routeToken）。
 - **自动启动** — `agentbridge.bridge.persistentMode` 设为 true，激活插件即起 Bridge。
@@ -129,7 +130,6 @@ Bridge 成功启动后，AgentBridge 会对 Cloudflare Quick 和 Named Tunnel �
 | `managedShell.unix` | string | `""` | `machine-overridable` | 绝对路径或 PATH 可解析名（如 `/bin/zsh` 或 `bash`）；空 = `/bin/bash` 默认（无 bash 时回退 `/bin/sh`） |
 | `openInternalBrowser` | enum | `auto` | `machine-overridable` | `auto` / `all` / `external`；控制外链在 Simple Browser 或 OS 默认浏览器中打开 |
 | `persistentMode` | boolean | `false` | `application` | 插件激活时自动启动 Bridge |
-| `skillsEnabled` | boolean | `true` | `application` | 通过 `load_skill` 提供工作区 `.agents/skills` 和 `~/.agents/skills` 里的 skill；关闭后 `load_skill` 返回 `SKILLS_DISABLED` |
 
 界面语言、Managed Shell 与打开方式的切换入口位于 Bridge 面板的 **高级卡**。
 

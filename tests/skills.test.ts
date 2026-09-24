@@ -96,7 +96,9 @@ test("discovery: workspace roots first, then ~/.agents/skills; first name wins; 
 
   const { skills, warnings } = await discoverSkills({ workspaceRoots: [ws1, ws2], homeDir: home });
   const byName = new Map(skills.map((skill) => [skill.name, skill]));
-  assert.deepEqual(skills.map((skill) => skill.name), ["deploy", "lint", "long", "notes"]);
+  assert.deepEqual(skills.map((skill) => skill.name), ["deploy", "lint", "hidden", "long", "notes"]);
+  assert.equal(byName.get("hidden")?.onRequestOnly, true, "disable-model-invocation skills stay loadable by name");
+  assert.equal(byName.get("notes")?.onRequestOnly, false);
   assert.equal(byName.get("deploy")?.description, "Deploy from workspace one.");
   assert.equal(byName.get("deploy")?.source, "workspace");
   assert.equal(byName.get("deploy")?.workspacePath, ".agents/skills/deploy/SKILL.md");
@@ -124,8 +126,14 @@ test("catalog text and tool definition", async () => {
   const description = renderLoadSkillDescription(skills);
   assert.ok(!description.includes(SKILL_CATALOG_PLACEHOLDER));
   assert.match(description, /\nAvailable skills:\n- deploy: Deploy the app\.$/);
+
+  writeSkill(ws, "grill-me", "name: grill-me\ndescription: 持续追问式访谈。\ndisable-model-invocation: true");
+  const both = renderLoadSkillDescription((await discoverSkills({ workspaceRoots: [ws] })).skills);
+  assert.match(both, /\nAvailable skills:\n- deploy: Deploy the app\.\n\nLoad these only when the user names them, never on your own:\n- grill-me: 持续追问式访谈。$/);
+  const onlyOnRequest = formatSkillCatalog((await discoverSkills({ workspaceRoots: [ws] })).skills.filter((skill) => skill.onRequestOnly));
+  assert.match(onlyOnRequest, /^Load these only when the user names them/);
   assert.match(formatSkillCatalog([]), /^No skills are installed\./);
-  assert.match(formatSkillCatalog(skills, false), /SKILLS_DISABLED/);
+  assert.match(LOAD_SKILL_TOOL.description, /When the user names a skill, for example \/deploy/);
 });
 
 test("load_skill: list, load by name, read a file, and errors", async () => {
@@ -137,12 +145,13 @@ test("load_skill: list, load by name, read a file, and errors", async () => {
     "bin/tool.bin": Buffer.from([0, 1, 2, 3]),
     ".secret": "hidden",
   });
-  writeSkill(home, "notes", "name: notes\ndescription: Notes.");
+  writeSkill(home, "notes", "name: notes\ndescription: Notes.\ndisable-model-invocation: true");
   fs.writeFileSync(path.join(ws, "outside.txt"), "outside");
-  const context = { workspaceRoots: [ws], homeDir: home, enabled: true };
+  const context = { workspaceRoots: [ws], homeDir: home };
 
   const listed = await loadSkill({}, context);
-  assert.match(listed.text, /^skills: 2\n- deploy \(workspace\): Deploy the app\.\n  location: .+SKILL\.md\n- notes \(user\): Notes\./);
+  assert.match(listed.text, /^skills: 2\n- deploy \(workspace\): Deploy the app\.\n  location: .+SKILL\.md\n- notes \(user, only when the user names it\): Notes\./);
+  assert.match((await loadSkill({ name: "notes" }, context)).text, /^skill: notes\n/, "on-request skills load by name");
 
   const loaded = await loadSkill({ name: "deploy" }, context);
   assert.match(loaded.text, /^skill: deploy\nsource: workspace\ndirectory: /);
@@ -165,7 +174,6 @@ test("load_skill: list, load by name, read a file, and errors", async () => {
   await rejectsWithCode(loadSkill({ name: "deploy", file: "bin/tool.bin" }, context), "BINARY_FILE");
   fs.writeFileSync(path.join(dir, "big.txt"), "x".repeat(300 * 1024));
   await rejectsWithCode(loadSkill({ name: "deploy", file: "big.txt" }, context), "FILE_TOO_LARGE");
-  await rejectsWithCode(loadSkill({ name: "deploy" }, { ...context, enabled: false }), "SKILLS_DISABLED");
 
   try {
     fs.symlinkSync(path.join(ws, "outside.txt"), path.join(dir, "link.txt"));
@@ -209,7 +217,7 @@ test("tools/list fills the skill catalog; load_skill calls go through the bridge
   workspace.workspaceFolders = [{ uri: { fsPath: ws } }];
   try {
     const manager = makeManager();
-    (manager as any).skillsHomeDir = home;
+    (manager as any).agentsHomeDir = home;
 
     const tools = await (manager as any).listToolsForClient() as Array<{ name: string; description: string }>;
     assert.deepEqual(tools.map((tool) => tool.name), BRIDGE_TOOL_DEFINITIONS.map((tool) => tool.name));
@@ -233,12 +241,6 @@ test("tools/list fills the skill catalog; load_skill calls go through the bridge
     const missing = await (manager as any).executeToolCall("load_skill", { name: "nope" }, {});
     assert.equal(missing.isError, true);
     assert.match(missing.content[0].text, /^SKILL_NOT_FOUND: No skill named nope\.\nHint: Available skills: deploy, notes\./);
-
-    vscodeTest.setConfig("agentbridge.bridge.skillsEnabled", false);
-    const disabledTools = await (manager as any).listToolsForClient() as Array<{ name: string; description: string }>;
-    assert.match(disabledTools.find((tool) => tool.name === "load_skill")!.description, /Skills are turned off/);
-    const disabled = await (manager as any).executeToolCall("load_skill", {}, {});
-    assert.match(disabled.content[0].text, /^SKILLS_DISABLED: /);
   } finally {
     workspace.workspaceFolders = originalFolders;
   }

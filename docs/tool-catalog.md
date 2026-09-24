@@ -277,6 +277,7 @@ Navigate code by symbols using the language services running in VS Code.
 Load an Agent Skill: task-specific instructions kept in a SKILL.md file on this machine.
 
 - When the task matches a skill listed below, load it before starting and follow its instructions.
+- When the user names a skill, for example /deploy, $deploy, or "use the deploy skill", load that skill first.
 - Returns the SKILL.md instructions, the skill directory, and the other files in it. Relative paths in a skill are relative to that directory.
 - Pass file to read another text file of the skill, such as a reference document; run its scripts with run_command.
 - Omit name to list the skills again, including ones added after this list was sent.

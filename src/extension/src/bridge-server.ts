@@ -15,6 +15,7 @@ import { getManagedShellChoice } from "./ide-tool-broker.js";
 import { managedShellExecutable, managedShellOverrideWarning } from "./ide-tool-broker.js";
 import type { IdeToolBroker } from "./ide-tool-broker.js";
 import { translate } from "./i18n.js";
+import { agentsFileKey, directoryAgentsFiles, discoverAgentsFiles, renderAgentsFiles } from "./agents-md.js";
 import { discoverSkills, LOAD_SKILL_TOOL, loadSkill, parseLoadSkillInput, renderLoadSkillDescription } from "./skills.js";
 import { formatSetTodosResult } from "./todo-format.js";
 import { formatToolError, ToolError } from "./tool-errors.js";
@@ -340,6 +341,10 @@ interface McpSession {
    * server instructions to the model (for example after reconnecting mid-conversation).
    */
   firstCallReminderPending?: boolean;
+  /** True until the first tool call, which repeats the AGENTS.md baseline in its result. */
+  agentsMdBaselinePending?: boolean;
+  /** AGENTS.md files already delivered to this session (agentsFileKey). */
+  agentsMdSent?: Set<string>;
 }
 
 
@@ -410,8 +415,8 @@ export class BridgeManager implements vscode.Disposable {
   private namedTunnelLocalPort = DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT;
   private routeToken = "";
   private readOnlyMode = false;
-  /** Home directory whose .agents/skills holds user skills; tests point it at a temp folder. */
-  private skillsHomeDir: string | undefined = os.homedir();
+  /** Home directory whose .agents folder holds the user's skills and AGENTS.md; tests point it at a temp folder. */
+  private agentsHomeDir: string | undefined = os.homedir();
   private readonly sessions = new Map<string, McpSession>();
   private pendingInitializations = 0;
   private httpServer: HttpServer | undefined;
@@ -2644,7 +2649,8 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   private createSession(ownerServer: HttpServer, ownerGeneration: number, onSessionInitialized?: () => void): { transport: StreamableHTTPServerTransport; server: McpServer } {
-    const instructions = buildServerInstructions(this.readOnlyMode);
+    const agentsBaseline = renderAgentsFiles(discoverAgentsFiles(this.agentsDiscoveryOptions()), "baseline");
+    const instructions = `${buildServerInstructions(this.readOnlyMode)}${agentsBaseline ? `\n\n${agentsBaseline.text}` : ""}`;
     const instructionsReadOnly = this.readOnlyMode;
     const packageVersion = String(this.context.extension.packageJSON.version ?? "").trim() || "0.0.0";
     const server = new McpServer(
@@ -2672,6 +2678,8 @@ export class BridgeManager implements vscode.Disposable {
           activeStreams: 0,
           toldReadOnly: instructionsReadOnly,
           firstCallReminderPending: instructionsReadOnly,
+          agentsMdBaselinePending: true,
+          agentsMdSent: new Set(),
         });
         this.revision += 1;
         this.output.appendLine(`[bridge] new MCP session: ${sid}`);
@@ -2707,15 +2715,14 @@ export class BridgeManager implements vscode.Disposable {
    */
   private async listToolsForClient(): Promise<Array<{ name: string; description: string; inputSchema: object }>> {
     const shell = getManagedShellChoice();
-    const skillsEnabled = this.skillsEnabled();
     let skillsDescription: string;
     try {
-      const { skills, warnings } = skillsEnabled ? await discoverSkills(this.skillDiscoveryOptions()) : { skills: [], warnings: [] };
+      const { skills, warnings } = await discoverSkills(this.agentsDiscoveryOptions());
       for (const warning of warnings) this.output.appendLine(`[bridge-skills] ${warning}`);
-      skillsDescription = renderLoadSkillDescription(skills, skillsEnabled);
+      skillsDescription = renderLoadSkillDescription(skills);
     } catch (error) {
       this.output.appendLine(`[bridge-skills] discovery failed: ${error instanceof Error ? error.message : String(error)}`);
-      skillsDescription = renderLoadSkillDescription([], skillsEnabled);
+      skillsDescription = renderLoadSkillDescription([]);
     }
     return BRIDGE_TOOL_DEFINITIONS.map((tool) => ({
       name: tool.name,
@@ -2728,16 +2735,60 @@ export class BridgeManager implements vscode.Disposable {
     }));
   }
 
-  private skillsEnabled(): boolean {
-    return vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("skillsEnabled", true) !== false;
-  }
-
-  /** Skill roots: .agents/skills in every workspace folder (none open is fine), then ~/.agents/skills. */
-  private skillDiscoveryOptions(): { workspaceRoots: string[]; homeDir?: string } {
+  /**
+   * Where skills and AGENTS.md are looked up: every workspace folder (none open is fine) and the
+   * user's home directory (~/.agents/skills, ~/.agents/AGENTS.md).
+   */
+  private agentsDiscoveryOptions(): { workspaceRoots: string[]; homeDir?: string } {
     return {
       workspaceRoots: vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [],
-      homeDir: this.skillsHomeDir,
+      homeDir: this.agentsHomeDir,
     };
+  }
+
+  /**
+   * The AGENTS.md baseline owed to a session's first tool call, read afresh so edits since
+   * initialize are included. Clients may never show the server instructions to the model, so the
+   * first result repeats them. Marks the delivered files as sent.
+   */
+  private takeAgentsBaseline(sessionId: string | undefined): string | undefined {
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (!session?.agentsMdBaselinePending) return undefined;
+    session.agentsMdBaselinePending = false;
+    const rendered = renderAgentsFiles(discoverAgentsFiles(this.agentsDiscoveryOptions()), "baseline");
+    if (!rendered) return undefined;
+    session.agentsMdSent ??= new Set();
+    for (const file of rendered.included) session.agentsMdSent.add(agentsFileKey(file.path));
+    return `[AgentBridge] ${rendered.text}`;
+  }
+
+  /**
+   * AGENTS.md files in subfolders reached for the first time by a successful read_files or
+   * apply_patch call, rendered for the end of that result. Marks them as sent.
+   */
+  private takeDirectoryAgentsNotice(toolName: string, structuredContent: Record<string, unknown> | undefined, sessionId: string | undefined): string | undefined {
+    if (toolName !== "read_files" && toolName !== "apply_patch") return undefined;
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (!session || !structuredContent || !Array.isArray(structuredContent.files)) return undefined;
+    const touched: string[] = [];
+    for (const item of structuredContent.files as Array<Record<string, unknown>>) {
+      if (!item || typeof item !== "object" || (toolName === "read_files" && item.status !== "success")) continue;
+      for (const key of ["path", "destination_path"] as const) {
+        if (typeof item[key] === "string") touched.push(item[key] as string);
+      }
+    }
+    if (!touched.length) return undefined;
+    session.agentsMdSent ??= new Set();
+    let roots: string[];
+    try {
+      roots = this.workspaceRoots();
+    } catch {
+      return undefined;
+    }
+    const rendered = renderAgentsFiles(directoryAgentsFiles(touched, roots, session.agentsMdSent), "directory");
+    if (!rendered) return undefined;
+    for (const file of rendered.included) session.agentsMdSent.add(agentsFileKey(file.path));
+    return rendered.text;
   }
 
   /**
@@ -2750,8 +2801,15 @@ export class BridgeManager implements vscode.Disposable {
     args: Record<string, unknown>,
     extra: { signal?: AbortSignal; sessionId?: string },
   ): Promise<{ content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean; structuredContent?: Record<string, unknown> }> {
-    const notice = this.takeReadOnlyTransitionNotice(extra.sessionId);
-    const result = await this.executeToolCall(toolName, args, extra);
+    const modeNotice = this.takeReadOnlyTransitionNotice(extra.sessionId);
+    const agentsBaseline = this.takeAgentsBaseline(extra.sessionId);
+    let result = await this.executeToolCall(toolName, args, extra);
+    const directoryAgents = result.isError ? undefined : this.takeDirectoryAgentsNotice(toolName, result.structuredContent, extra.sessionId);
+    if (directoryAgents) result = { ...result, content: [...result.content, { type: "text" as const, text: directoryAgents }] };
+    // The mode notice already ends with "The result of this call follows."
+    const notice = agentsBaseline
+      ? `${agentsBaseline}\n\n${modeNotice ?? "The result of this call follows."}`
+      : modeNotice;
     if (!notice) return result;
     const [first, ...rest] = result.content;
     const content = first?.type === "text"
@@ -2845,7 +2903,7 @@ export class BridgeManager implements vscode.Disposable {
       }
 
       if (toolName === LOAD_SKILL_TOOL.name) {
-        const result = await loadSkill(parseLoadSkillInput(args), { ...this.skillDiscoveryOptions(), enabled: this.skillsEnabled() });
+        const result = await loadSkill(parseLoadSkillInput(args), this.agentsDiscoveryOptions());
         this.finishActivity(
           activityId,
           "completed",
