@@ -9,7 +9,9 @@ import * as vscode from "vscode";
 const TRUSTED_BROWSER_ORIGINS_SETTING = "bridge.trustedBrowserOrigins";
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const SESSION_EVENT_STORE_LIMIT = 512;
-const SESSION_EVENT_STORE_MAX_BYTES = 8 * 1024 * 1024;
+// Replay only matters when a response stream drops mid-delivery. Idle sessions keep this buffer
+// until they expire, so it is kept small: 64 sessions x 2 MiB bounds the worst case at 128 MiB.
+export const SESSION_EVENT_STORE_MAX_BYTES = 2 * 1024 * 1024;
 
 export class BoundedInMemoryEventStore implements EventStore {
   private readonly events = new Map<string, { streamId: string; message: JSONRPCMessage; sizeBytes: number }>();

@@ -8,6 +8,7 @@ import {
   GET_COMMAND_OUTPUT_MAX_WAIT_MS,
   getIdeToolDefinition,
   MAX_RETAINED_FINISHED_COMMANDS,
+  SETTLED_RETAINED_OUTPUT_BYTES,
   RUN_COMMAND_MAX_FOREGROUND_WAIT_MS,
 } from "./ide-tool-definitions.js";
 import { invokeLspTool } from "./lsp-tool.js";
@@ -65,6 +66,8 @@ interface CommandState {
   retainedOutputBytes: number;
   outputStartOffset: number;
   totalOutputBytes: number;
+  /** Highest next_offset returned to the model; output before it has been delivered. */
+  deliveredOffset: number;
   ansiPending: string;
   done: Promise<void>;
   resolveDone(): void;
@@ -109,6 +112,56 @@ let cachedShellWarning: string | null = null;
 
 const MANAGED_SHELL_WINDOWS_SETTING = "managedShell.windows";
 const MANAGED_SHELL_UNIX_SETTING = "managedShell.unix";
+
+/** The retained-output fields of a command, split out so trimming can be tested directly. */
+export type RetainedOutput = Pick<
+  CommandState,
+  "outputChunks" | "outputChunkStarts" | "outputChunkHead" | "outputHeadSkip" | "retainedOutputBytes" | "outputStartOffset" | "totalOutputBytes"
+>;
+
+/**
+ * Drops retained output before absolute offset `keepFrom` (never past the end). Whole chunks are
+ * skipped and the chunk arrays compacted so the dropped buffers can be garbage-collected;
+ * `compactPartialHead` also copies the kept part of a partly-dropped head chunk.
+ */
+export function dropRetainedOutputBefore(output: RetainedOutput, keepFrom: number, compactPartialHead = false): void {
+  const target = Math.min(keepFrom, output.totalOutputBytes);
+  let dropBytes = target - output.outputStartOffset;
+  while (dropBytes > 0 && output.outputChunkHead < output.outputChunks.length) {
+    const head = output.outputChunks[output.outputChunkHead];
+    const drop = Math.min(head.length - output.outputHeadSkip, dropBytes);
+    output.outputHeadSkip += drop;
+    output.retainedOutputBytes -= drop;
+    dropBytes -= drop;
+    if (output.outputHeadSkip >= head.length) {
+      output.outputChunkHead += 1;
+      output.outputHeadSkip = 0;
+    }
+  }
+  if (compactPartialHead && output.outputHeadSkip > 0 && output.outputChunkHead < output.outputChunks.length) {
+    const head = output.outputChunks[output.outputChunkHead];
+    output.outputChunks[output.outputChunkHead] = Buffer.from(head.subarray(output.outputHeadSkip));
+    output.outputChunkStarts[output.outputChunkHead] += output.outputHeadSkip;
+    output.outputHeadSkip = 0;
+  }
+  // Chunks left of the head are unreachable. Compact once they are at least half the array
+  // (amortized O(1) under sustained output), or always when asked to release memory now.
+  if (output.outputChunkHead > 0 && (compactPartialHead || output.outputChunkHead * 2 >= output.outputChunks.length)) {
+    output.outputChunks = output.outputChunks.slice(output.outputChunkHead);
+    output.outputChunkStarts = output.outputChunkStarts.slice(output.outputChunkHead);
+    output.outputChunkHead = 0;
+  }
+  output.outputStartOffset = output.totalOutputBytes - output.retainedOutputBytes;
+}
+
+/**
+ * After a command finishes, shrink its retained output to the last SETTLED_RETAINED_OUTPUT_BYTES,
+ * but never below the first byte the model has not been given yet.
+ */
+export function trimSettledOutput(output: RetainedOutput, deliveredOffset: number, settledBytes = SETTLED_RETAINED_OUTPUT_BYTES): void {
+  const keepFrom = Math.min(deliveredOffset, output.totalOutputBytes - settledBytes);
+  if (keepFrom > output.outputStartOffset) dropRetainedOutputBefore(output, keepFrom, true);
+}
 
 /**
  * Evict oldest finished command states (Map insertion order = start order) until at most
@@ -1408,24 +1461,9 @@ export class TerminalCommandManager implements vscode.Disposable {
     state.outputChunks.push(bytes);
     state.totalOutputBytes += bytes.length;
     state.retainedOutputBytes += bytes.length;
-    while (state.retainedOutputBytes > MAX_CAPTURED_OUTPUT_BYTES) {
-      const head = state.outputChunks[state.outputChunkHead];
-      const drop = Math.min(head.length - state.outputHeadSkip, state.retainedOutputBytes - MAX_CAPTURED_OUTPUT_BYTES);
-      state.outputHeadSkip += drop;
-      state.retainedOutputBytes -= drop;
-      if (state.outputHeadSkip >= head.length) {
-        state.outputChunkHead += 1;
-        state.outputHeadSkip = 0;
-      }
+    if (state.retainedOutputBytes > MAX_CAPTURED_OUTPUT_BYTES) {
+      dropRetainedOutputBefore(state, state.totalOutputBytes - MAX_CAPTURED_OUTPUT_BYTES);
     }
-    // Chunks left of the head are unreachable; compact so the chunk array itself cannot
-    // grow without bound under sustained output.
-    if (state.outputChunkHead > 0 && state.outputChunkHead * 2 >= state.outputChunks.length) {
-      state.outputChunks = state.outputChunks.slice(state.outputChunkHead);
-      state.outputChunkStarts = state.outputChunkStarts.slice(state.outputChunkHead);
-      state.outputChunkHead = 0;
-    }
-    state.outputStartOffset = state.totalOutputBytes - state.retainedOutputBytes;
     notifyCommandWaiters(state);
   }
 
@@ -1438,6 +1476,7 @@ export class TerminalCommandManager implements vscode.Disposable {
     if (state.slot.busyCommandId === state.id) state.slot.busyCommandId = undefined;
     state.resolveDone();
     notifyCommandWaiters(state);
+    trimSettledOutput(state, state.deliveredOffset);
     this.pruneIdleTerminals();
     pruneFinishedCommandStates(this.states, MAX_COMPLETED_STATES);
   }
@@ -1448,7 +1487,8 @@ export class TerminalCommandManager implements vscode.Disposable {
     const actualOffset = Math.max(state.outputStartOffset, Math.min(requestedOffset, state.totalOutputBytes));
     const slice = this.readRetainedSlice(state, actualOffset, limit);
     const nextOffset = actualOffset + slice.length;
-    return {
+    if (nextOffset > state.deliveredOffset) state.deliveredOffset = nextOffset;
+    const snapshot = {
       command_id: state.id,
       terminal_id: state.terminalId,
       terminal_name: state.terminal.name,
@@ -1465,6 +1505,9 @@ export class TerminalCommandManager implements vscode.Disposable {
       output_lost: outputLost,
       has_more: nextOffset < state.totalOutputBytes,
     };
+    // The slice above is already copied into the snapshot string, so trimming now is safe.
+    if (state.status !== "running") trimSettledOutput(state, state.deliveredOffset);
+    return snapshot;
   }
 
   /**
@@ -1546,6 +1589,7 @@ export class TerminalCommandManager implements vscode.Disposable {
       outputChunkHead: 0,
       outputHeadSkip: 0,
       retainedOutputBytes: 0,
+      deliveredOffset: 0,
       outputStartOffset: 0,
       totalOutputBytes: 0,
       ansiPending: "",

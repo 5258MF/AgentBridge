@@ -253,3 +253,54 @@ test("get_command_output returns immediately for a finished command and rejects 
     manager.dispose();
   }
 });
+
+function fieldFrom(text: string, name: string): string {
+  const match = text.match(new RegExp(`^${name}: (.+)$`, "m"));
+  assert.ok(match, `missing ${name} in result:\n${text}`);
+  return match[1];
+}
+
+test("finished command output shrinks to the last 64 KB only after the model has read it", async () => {
+  const { manager, stateOf } = makeWaitManager();
+  try {
+    const id = commandIdFrom(await manager.run({ command: "npm test", background: true }));
+    const state = stateOf(id);
+    const line = `${"x".repeat(1023)}\n`;
+    for (let index = 0; index < 200; index += 1) (manager as any).appendOutput(state, line);
+    const total = 200 * 1024;
+    (manager as any).finishState(state, 0);
+    assert.equal(state.retainedOutputBytes, total, "unread output must survive the finish-time trim");
+
+    const first = await manager.getOutput({ command_id: id, max_bytes: 131072 });
+    assert.equal(fieldFrom(first, "output_lost"), "false");
+    assert.equal(fieldFrom(first, "next_offset"), "131072");
+    assert.equal(state.outputStartOffset, 131072, "delivered output is released once past the settled window");
+
+    const second = await manager.getOutput({ command_id: id, offset: 131072, max_bytes: 131072 });
+    assert.equal(fieldFrom(second, "output_lost"), "false");
+    assert.equal(fieldFrom(second, "next_offset"), String(total));
+    assert.equal(state.retainedOutputBytes, 64 * 1024);
+    assert.equal(state.outputStartOffset, total - 64 * 1024);
+
+    const reread = await manager.getOutput({ command_id: id, offset: 0, max_bytes: 131072 });
+    assert.equal(fieldFrom(reread, "output_lost"), "true");
+    assert.equal(fieldFrom(reread, "next_offset"), String(total));
+  } finally {
+    manager.dispose();
+  }
+});
+
+test("running command output is not trimmed to the settled window", async () => {
+  const { manager, stateOf } = makeWaitManager();
+  try {
+    const id = commandIdFrom(await manager.run({ command: "npm run dev", background: true }));
+    const state = stateOf(id);
+    (manager as any).appendOutput(state, `${"y".repeat(200 * 1024 - 1)}\n`);
+    await manager.getOutput({ command_id: id, max_bytes: 131072 });
+    await manager.getOutput({ command_id: id, offset: 131072, max_bytes: 131072 });
+    assert.equal(state.retainedOutputBytes, 200 * 1024);
+    assert.equal(state.outputStartOffset, 0);
+  } finally {
+    manager.dispose();
+  }
+});

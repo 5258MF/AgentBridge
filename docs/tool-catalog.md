@@ -190,7 +190,7 @@ Read new output and the status of a command started with run_command.
 
 - Pass the previous next_offset as offset to get only new output.
 - To wait for a running command, set wait_ms (at most 60000) instead of calling repeatedly or running sleep: wait_until=exit (default) returns when it finishes, wait_until=output as soon as new output arrives; otherwise it returns at the deadline with wait_result=timeout and the command keeps running.
-- Only the 32 most recent finished commands are kept.
+- Only the 32 most recent finished commands are kept. After a finished command's output has been read, only its last 64 KB stays readable (output_lost=true for earlier offsets).
 ```
 
 | Parameter | Type | Required | Default | Constraints | Description |

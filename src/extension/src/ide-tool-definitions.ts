@@ -23,6 +23,12 @@ export const GET_COMMAND_OUTPUT_MAX_WAIT_MS = 60_000;
 
 /** How many finished command states stay addressable by command_id. */
 export const MAX_RETAINED_FINISHED_COMMANDS = 32;
+/**
+ * Output kept once a command has finished and the model has read up to its end. Unread output is
+ * never dropped by this trim, so a command that finishes before its first read hands over
+ * everything still retained.
+ */
+export const SETTLED_RETAINED_OUTPUT_BYTES = 64 * 1024;
 
 export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
   {
@@ -83,7 +89,7 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
       "",
       "- Pass the previous next_offset as offset to get only new output.",
       `- To wait for a running command, set wait_ms (at most ${GET_COMMAND_OUTPUT_MAX_WAIT_MS}) instead of calling repeatedly or running sleep: wait_until=exit (default) returns when it finishes, wait_until=output as soon as new output arrives; otherwise it returns at the deadline with wait_result=timeout and the command keeps running.`,
-      `- Only the ${MAX_RETAINED_FINISHED_COMMANDS} most recent finished commands are kept.`,
+      `- Only the ${MAX_RETAINED_FINISHED_COMMANDS} most recent finished commands are kept. After a finished command's output has been read, only its last ${SETTLED_RETAINED_OUTPUT_BYTES / 1024} KB stays readable (output_lost=true for earlier offsets).`,
     ].join("\n"),
     inputSchema: {
       type: "object",
