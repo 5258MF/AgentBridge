@@ -7,7 +7,7 @@ import {
   buildServerInstructions,
   planModeBlockError,
   READ_ONLY_BLOCKED_TOOL_NAMES,
-} from "../src/extension/src/bridge-server.js";
+} from "../src/extension/src/server-instructions.js";
 import { enMessages, zhMessages } from "../src/extension/src/i18n.js";
 
 /**

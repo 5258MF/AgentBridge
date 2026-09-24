@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BridgeManager, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/bridge-server.js";
+import { BridgeManager } from "../src/extension/src/bridge-server.js";
+import { READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/server-instructions.js";
 import { BridgePanelProvider } from "../src/extension/src/bridge-panel.js";
 import { vscodeTest } from "./helpers/fake-vscode.js";
 import { createFakeWebviewView, executePanelHtml } from "./helpers/panel-harness.js";

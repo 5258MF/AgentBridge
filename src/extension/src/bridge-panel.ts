@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 import { invalidateManagedShellCache, sanityCheckManagedShellPath } from "./ide-tool-broker.js";
-import { BridgeStartCancelledError, normalizeTrustedBrowserOrigin, READ_ONLY_BLOCKED_TOOL_NAMES, type BridgeManager, type BridgeStatus } from "./bridge-server.js";
+import { BridgeStartCancelledError, type BridgeManager, type BridgeStatus } from "./bridge-server.js";
+import { normalizeTrustedBrowserOrigin } from "./http-helpers.js";
+import { READ_ONLY_BLOCKED_TOOL_NAMES } from "./server-instructions.js";
 import { createTranslator, detectLang, enMessages, readLanguagePreference, translate, zhMessages } from "./i18n.js";
 
 const POLL_INTERVAL_MS = 1500;

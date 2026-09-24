@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { BRIDGE_TOOL_DEFINITIONS, MAX_TODOS, PLAN_MODE_COMMAND_TOOL_NAME, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/bridge-server.js";
+import { BRIDGE_TOOL_DEFINITIONS, MAX_TODOS, PLAN_MODE_COMMAND_TOOL_NAME, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/server-instructions.js";
 import {
   GET_COMMAND_OUTPUT_MAX_WAIT_MS,
   MAX_RETAINED_FINISHED_COMMANDS,

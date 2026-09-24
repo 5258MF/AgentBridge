@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { constantTimeStringEqual, normalizeTrustedBrowserOrigin } from "../src/extension/src/bridge-server.js";
+import { constantTimeStringEqual, normalizeTrustedBrowserOrigin } from "../src/extension/src/http-helpers.js";
 
 test("normalizeTrustedBrowserOrigin accepts exact canonical origins", () => {
   const accepted = [

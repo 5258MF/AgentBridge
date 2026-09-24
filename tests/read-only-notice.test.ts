@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { BridgeManager, buildReadOnlySessionNotice, buildReadOnlyTransitionNotice, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/bridge-server.js";
+import { BridgeManager } from "../src/extension/src/bridge-server.js";
+import { buildReadOnlySessionNotice, buildReadOnlyTransitionNotice, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/server-instructions.js";
 import { vscodeTest } from "./helpers/fake-vscode.js";
 
 /** Any blocked tool; the block applies before argument validation, so empty args are fine. */

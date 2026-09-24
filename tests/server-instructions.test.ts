@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRIDGE_TOOL_DEFINITIONS, BridgeManager, buildServerInstructions, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/bridge-server.js";
+import { BridgeManager } from "../src/extension/src/bridge-server.js";
+import { BRIDGE_TOOL_DEFINITIONS, buildServerInstructions, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/server-instructions.js";
 import { vscodeTest } from "./helpers/fake-vscode.js";
 
 /** The fixed instructions shipped before they became data-driven; normal mode must not change. */
