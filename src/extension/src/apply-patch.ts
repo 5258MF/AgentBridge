@@ -50,6 +50,8 @@ export type PatchAction = "add" | "update" | "delete" | "move";
 export interface AppliedPatchFile {
   action: PatchAction;
   path: string;
+  /** True when Delete File + Add File replaced the whole content in place. */
+  replaced?: boolean;
   destination_path?: string;
   old_version: string | null;
   new_version: string | null;
@@ -102,7 +104,9 @@ interface ParsedHunk {
 type ParsedOperation =
   | { action: "add"; path: string; lines: string[] }
   | { action: "update"; path: string; moveTo?: string; hunks: ParsedHunk[] }
-  | { action: "delete"; path: string };
+  | { action: "delete"; path: string }
+  /** '*** Delete File: X' immediately followed by '*** Add File: X': whole-content replacement. */
+  | { action: "replace"; path: string; lines: string[] };
 
 interface TextFileSnapshot {
   bytes: Buffer;
@@ -149,6 +153,7 @@ interface MutationPlan {
   additions: number;
   deletions: number;
   createDirs?: CreatedDirectory[];
+  replaced?: boolean;
 }
 
 interface StagedWrite {
@@ -503,6 +508,7 @@ function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperatio
     throw new PatchToolError("INVALID_PATCH", `Unsupported patch directive: ${line}`);
   }
 
+  mergeReplacements(operations);
   if (operations.length === 0) throw new PatchToolError("INVALID_PATCH", "Patch contains no file operations.");
   if (operations.length > config.maxOperations) {
     throw new PatchToolError("TOO_MANY_OPERATIONS", `Patch has ${operations.length} operations; maximum is ${config.maxOperations}.`);
@@ -511,7 +517,12 @@ function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperatio
   const touched = new Set<string>();
   for (const operation of operations) {
     const source = operation.path.toLocaleLowerCase();
-    if (touched.has(source)) throw new PatchToolError("INVALID_PATCH", `Patch touches ${operation.path} more than once.`);
+    if (touched.has(source)) {
+      throw new PatchToolError(
+        "INVALID_PATCH",
+        `Patch touches ${operation.path} more than once. To replace a whole file, put '*** Delete File: ${operation.path}' immediately before '*** Add File: ${operation.path}'.`,
+      );
+    }
     touched.add(source);
     if (operation.action === "update" && operation.moveTo) {
       const destination = operation.moveTo.toLocaleLowerCase();
@@ -523,6 +534,17 @@ function parsePatch(patchText: string, config: ApplyPatchConfig): ParsedOperatio
     throw new PatchToolError("TOO_MANY_FILES", `Patch touches ${touched.size} paths; maximum is ${config.maxFiles}.`);
   }
   return operations;
+}
+
+/** Turns '*** Delete File: X' directly followed by '*** Add File: X' into one replace operation. */
+function mergeReplacements(operations: ParsedOperation[]): void {
+  for (let index = 0; index + 1 < operations.length; index += 1) {
+    const current = operations[index]!;
+    const next = operations[index + 1]!;
+    if (current.action === "delete" && next.action === "add" && current.path.toLocaleLowerCase() === next.path.toLocaleLowerCase()) {
+      operations.splice(index, 2, { action: "replace", path: next.path, lines: next.lines });
+    }
+  }
 }
 
 function findSequence(lines: string[], needle: string[], requireEndOfFile: boolean): number {
@@ -625,7 +647,10 @@ async function preflight(
         throw new PatchToolError("PERMISSION_DENIED", `Creating ${operation.path} is not permitted by the current policy.`);
       }
       if (await pathExists(destination.absolutePath)) {
-        throw new PatchToolError("FILE_ALREADY_EXISTS", `${operation.path} already exists.`);
+        throw new PatchToolError(
+          "FILE_ALREADY_EXISTS",
+          `${operation.path} already exists. To replace its whole content, put '*** Delete File: ${operation.path}' immediately before '*** Add File: ${operation.path}' in the same patch; for partial edits use '*** Update File:'.`,
+        );
       }
       const newBytes = encodeText(operation.lines, operation.lines.length > 0, "\n", false);
       plans.push({
@@ -654,6 +679,25 @@ async function preflight(
         "STALE_FILE",
         `${operation.path} changed since it was read. Expected ${expectedVersion}, current ${snapshot.version}. Re-read before patching.`,
       );
+    }
+
+    if (operation.action === "replace") {
+      // In-place replacement keeps the file's line endings and BOM, like Update File.
+      const newBytes = encodeText(operation.lines, operation.lines.length > 0, snapshot.eol, snapshot.bom);
+      plans.push({
+        action: "update",
+        replaced: true,
+        sourcePath: source.absolutePath,
+        sourceDisplay: operation.path,
+        oldBytes: snapshot.bytes,
+        newBytes,
+        oldMode: source.mode,
+        oldVersion: snapshot.version,
+        newVersion: hashBytes(newBytes),
+        additions: operation.lines.length,
+        deletions: snapshot.lines.length,
+      });
+      continue;
     }
 
     if (operation.action === "delete") {
@@ -947,6 +991,7 @@ export async function applyPatch(input: ApplyPatchInput, context: ApplyPatchCont
       const files: AppliedPatchFile[] = locked.plans.map((plan) => ({
         action: plan.action,
         path: plan.sourceDisplay,
+        ...(plan.replaced ? { replaced: true } : {}),
         ...(plan.destinationDisplay ? { destination_path: plan.destinationDisplay } : {}),
         old_version: plan.oldVersion,
         new_version: plan.newVersion,
@@ -994,6 +1039,7 @@ export function formatApplyPatchForModel(result: ApplyPatchResult): string {
       "--- FILE ---",
       `action: ${file.action}`,
       `path: ${JSON.stringify(file.path)}`,
+      ...(file.replaced ? ["replaced: true (whole content)"] : []),
       ...(file.destination_path ? [`destination_path: ${JSON.stringify(file.destination_path)}`] : []),
       `old_version: ${file.old_version ?? "null"}`,
       `new_version: ${file.new_version ?? "null"}`,
