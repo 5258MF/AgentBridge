@@ -46,7 +46,7 @@ try {
   console.log("[test] TypeScript checking test sources...");
   run(process.execPath, [path.join(root, "node_modules", "typescript", "bin", "tsc"), "-p", path.join("tests", "tsconfig.json"), "--noEmit"]);
 
-  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "terminal-lifecycle.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts", "workspace-roots.test.ts", "todo-format.test.ts", "tool-errors.test.ts", "tool-catalog.test.ts", "server-instructions.test.ts", "path-outside.test.ts", "read-only-panel.test.ts", "read-only-notice.test.ts", "prompt-tool-names.test.ts", "plan-mode-commands.test.ts"];
+  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "terminal-lifecycle.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts", "workspace-roots.test.ts", "todo-format.test.ts", "tool-errors.test.ts", "tool-catalog.test.ts", "server-instructions.test.ts", "path-outside.test.ts", "read-only-panel.test.ts", "read-only-notice.test.ts", "prompt-tool-names.test.ts", "plan-mode-commands.test.ts", "image-processing.test.ts"];
   const entries = match ? allEntries.filter((name) => name.replace(/\.test\.ts$/, "") === match) : allEntries;
   if (!entries.length) throw new Error(`No test entry matched ${JSON.stringify(match)}.`);
   const fakeVscode = path.join(testsDir, "helpers", "fake-vscode.ts");
@@ -130,6 +130,9 @@ try {
         const required = [
           "package.json",
           "dist/extension.js",
+          "dist/image-worker.js",
+          "dist/photon_rs_bg.wasm",
+          "dist/photon-node-LICENSE.md",
           "media/icon.png",
           "media/agentbridge.svg",
           "runtime/bin/rg.exe",

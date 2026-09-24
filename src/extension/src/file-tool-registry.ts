@@ -2,6 +2,7 @@ import { applyPatch, formatApplyPatchForModel, type ApplyPatchInput } from "./ap
 import { findFiles, formatFindFilesForModel, type FindFilesInput } from "./find-files.js";
 import { DEFAULT_READ_FILES_CONFIG, formatReadFilesForModel, readFiles, type ReadFilesInput } from "./read-files.js";
 import { formatReadImageFileForModel, readImageFile, type ReadImageFileInput } from "./read-files.js";
+import { formatByteSize, IMAGE_MAX_BASE64_BYTES, IMAGE_MAX_EDGE, IMAGE_MAX_PIXELS } from "./image-processing.js";
 import { formatSearchFilesForModel, searchFiles, type SearchFilesInput } from "./search-files.js";
 
 export const APPLY_PATCH_TOOL = {
@@ -83,12 +84,12 @@ export const READ_FILES_TOOL = {
 export const READ_IMAGE_FILE_TOOL = {
   name: "read_image_file",
   description: [
-    "Read a single raster image file (PNG/JPEG/GIF/WebP/BMP) from the workspace and return an MCP image content block containing the base64-encoded file data.",
+    "Read a single raster image file (PNG/JPEG/GIF/WebP/BMP) from the workspace and return it as an MCP image content block.",
     "Use this to inspect or reason about screenshots, charts, UI designs, exported diagrams, error dialogs, or other raster images.",
-    "Supported MIME types: image/png, image/jpeg, image/gif, image/webp, image/bmp.",
-    "SVG is XML text — use read_files for SVG, not this tool.",
-    "Hard file-size limit: 5 MB. Larger images must be reduced before reading.",
-    "Returns a short text summary (path, MIME, size) followed by one image content item for clients that support image input.",
+    "The format is detected from the file bytes, not the extension. SVG is XML text — use read_files for SVG, not this tool.",
+    `There is no file-size limit, but images above ${IMAGE_MAX_PIXELS / 1_000_000} megapixels are rejected.`,
+    `Images whose longer edge exceeds ${IMAGE_MAX_EDGE}px, or whose base64 data would exceed ${formatByteSize(IMAGE_MAX_BASE64_BYTES)}, are downscaled and re-encoded (PNG for PNG/GIF/BMP sources when it fits, otherwise JPEG). GIF returns the first frame as PNG, BMP is converted to PNG, and JPEG EXIF orientation is applied. Images that already fit are sent byte-for-byte.`,
+    "Returns a short text summary followed by one image content item. The summary gives the source and sent format and size and, when the image was downscaled, the scale factor for mapping coordinates back to the source file.",
     "Paths are workspace-relative; absolute paths are accepted only when they resolve inside the workspace.",
   ].join(" "),
   inputSchema: {
@@ -442,7 +443,17 @@ export async function invokeFileTool(
     if (result.status === "success" && result.success) {
       return {
         text: formatReadImageFileForModel(result),
-        structuredContent: { status: "success", path: result.path, mimeType: result.success.mimeType, sizeBytes: result.success.sizeBytes },
+        structuredContent: {
+          status: "success",
+          path: result.path,
+          mimeType: result.success.mimeType,
+          sizeBytes: result.success.sizeBytes,
+          width: result.success.width,
+          height: result.success.height,
+          unchanged: result.success.unchanged,
+          source: result.success.source,
+          notes: result.success.notes,
+        },
         images: [{ base64: result.success.base64, mimeType: result.success.mimeType, sizeBytes: result.success.sizeBytes }],
       };
     }

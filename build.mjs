@@ -1,10 +1,14 @@
-// AgentBridge build script: produces a single CJS bundle for VS Code.
-//   dist/extension.js   AgentBridge extension (external vscode)
+// AgentBridge build script: produces CJS bundles for VS Code.
+//   dist/extension.js          AgentBridge extension (external vscode)
+//   dist/image-worker.js       read_image_file decode/resize worker (Photon)
+//   dist/photon_rs_bg.wasm     Photon WebAssembly module, loaded by the worker
+//                              from its own directory (__dirname)
 // Windows loads the bundled rg.exe from runtime/bin/. Other platforms use a
 // PATH-resolved rg when available and otherwise use the built-in Node fallback.
 import { build, context, transformSync } from "esbuild";
 import path from "node:path";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -28,10 +32,23 @@ const packagedRipgrepPlugin = {
   },
 };
 
+const require = createRequire(import.meta.url);
+const photonDir = path.dirname(require.resolve("@silvia-odwyer/photon-node/package.json"));
+
+// Photon's CJS entry reads photon_rs_bg.wasm from __dirname, which is dist/ once
+// bundled. Without this copy every image that needs resizing would fail at runtime.
+function copyPhotonAssets() {
+  const distDir = path.join(root, "dist");
+  fs.mkdirSync(distDir, { recursive: true });
+  fs.copyFileSync(path.join(photonDir, "photon_rs_bg.wasm"), path.join(distDir, "photon_rs_bg.wasm"));
+  fs.copyFileSync(path.join(photonDir, "LICENSE.md"), path.join(distDir, "photon-node-LICENSE.md"));
+}
+
 const config = {
   entryPoints: [path.join(root, "src/extension/src/extension.ts")],
   outfile: path.join(root, "dist/extension.js"),
-  external: ["vscode"],
+  // Photon is only loaded by dist/image-worker.js; keep it out of the extension bundle.
+  external: ["vscode", "@silvia-odwyer/photon-node"],
   bundle: true,
   platform: "node",
   target: "node20",
@@ -41,12 +58,27 @@ const config = {
   plugins: [packagedRipgrepPlugin],
 };
 
+const workerConfig = {
+  entryPoints: [path.join(root, "src/extension/src/image-worker.ts")],
+  outfile: path.join(root, "dist/image-worker.js"),
+  bundle: true,
+  platform: "node",
+  target: "node20",
+  format: "cjs",
+  sourcemap: true,
+  logLevel: "info",
+};
+
+copyPhotonAssets();
+
 if (watch) {
   const ctx = await context(config);
-  await ctx.watch();
+  const workerCtx = await context(workerConfig);
+  await Promise.all([ctx.watch(), workerCtx.watch()]);
   console.log("[build] watching for changes...");
 } else {
   await build(config);
+  await build(workerConfig);
   // Regression check: the webview script is embedded in the HTML template string.
   // esbuild evaluates escapes like \n inside the template, which can split string
   // literals in the emitted script. Verify the extracted <script> body compiles.
@@ -58,5 +90,8 @@ if (watch) {
   }
   const webviewScript = bundle.slice(open + 8, close);
   transformSync(webviewScript, { loader: "js" });
-  console.log("[build] done: dist/extension.js (webview script syntax OK)");
+  if (bundle.includes("photon_rs_bg.wasm")) {
+    throw new Error("[build] Photon must not be bundled into dist/extension.js");
+  }
+  console.log("[build] done: dist/extension.js (webview script syntax OK), dist/image-worker.js, dist/photon_rs_bg.wasm");
 }

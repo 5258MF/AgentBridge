@@ -28,7 +28,7 @@
 - **3 种公共隧道供应商** — Cloudflare Quick Tunnel（默认，零配置）、Cloudflare Named Tunnel（固定主机名）、ngrok（保留域名）。
 - **跨平台 cloudflared 检测与安装** — Windows 可用 Winget 一键安装，macOS 可用 Homebrew 一键安装；Linux 检测 PATH、`/usr/bin` 与 `/usr/local/bin`，安装仍按 Cloudflare 官方说明手动完成。
 - **托管 shell 支持矩阵** — Windows PowerShell 5.1 / PowerShell 7+（Windows）、bash（Linux）、zsh（macOS）通过每提示符协议钩子完整支持 `run_command`；cmd/sh/fish 会被直接拒绝并返回明确错误，而不是挂到超时。切换 shell 时 AI 看到的运行时语法提示自动更新。
-- **可识别像素的 `read_image_file`** — 返回 MCP `ImageContent` block（PNG / JPEG / GIF / WebP / BMP，上限 5 MiB），让自带 vision 的客户端（ChatGPT、Claude）直接看到图像内容。SVG 仍走 `read_files` 按文本读。
+- **可识别像素的 `read_image_file`** — 返回 MCP `ImageContent` block，让自带 vision 的客户端（ChatGPT、Claude）直接看到图像内容。按文件内容识别 PNG / JPEG / GIF / WebP / BMP；大图自动缩到长边 2000 像素、base64 不超过 4.5 MB（GIF、BMP 转成 PNG），本来就符合要求的图原样发送。原图不限文件大小，超过 6400 万像素的图会被拒绝。SVG 仍走 `read_files` 按文本读。
 - **外链打开方式三选一** — `agentbridge.bridge.openInternalBrowser`（`auto` / `all` / `external`）决定 ChatGPT / Arena 等外链在 VS Code 内置 Simple Browser 还是 OS 默认浏览器中打开。默认 `auto` 还原在编辑器内嵌的体验。
 - **Bridge 面板** — 活动栏视图 + 隧道供应商单选卡 + 状态 hero + 公网入口持续健康监测 + 自动启动 toggle + 会话时间线（含 mini diff）+ 高级卡（界面语言 / Managed Shell / 打开方式 / 复制 MCP 提示词 / 重置 routeToken）。
 - **自动启动** — `agentbridge.bridge.persistentMode` 设为 true，激活插件即起 Bridge。

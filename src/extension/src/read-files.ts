@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { open, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { prepareImageForModel } from "./image-runner.js";
+import { formatByteSize, preflightImage, type PreparedImageSource } from "./image-processing.js";
 
 export interface ReadFileRequest {
   path: string;
@@ -569,6 +571,8 @@ export type ImageFileErrorCode =
   | "PERMISSION_DENIED"
   | "UNSUPPORTED_IMAGE_TYPE"
   | "IMAGE_TOO_LARGE"
+  | "IMAGE_DECODE_FAILED"
+  | "IMAGE_PROCESSING_FAILED"
   | "IO_ERROR"
   | "ABORTED";
 
@@ -579,9 +583,17 @@ export interface ReadImageFileInput {
 export interface ReadImageFileSuccess {
   path: string;
   absolutePath: string;
+  /** MIME type of the image that is sent (may differ from the source after conversion). */
   mimeType: string;
   base64: string;
+  /** Byte size of the image that is sent. */
   sizeBytes: number;
+  width: number;
+  height: number;
+  /** True when the original file bytes are sent unchanged. */
+  unchanged: boolean;
+  source: PreparedImageSource;
+  notes: string[];
 }
 
 export interface ReadImageFileResult {
@@ -591,26 +603,24 @@ export interface ReadImageFileResult {
   error?: { code: ImageFileErrorCode; message: string };
 }
 
-export const READ_IMAGE_FILE_SIZE_LIMIT = 5 * 1024 * 1024;
+/** Bytes read first to reject non-images and oversized images before reading the whole file. */
+const IMAGE_PROBE_BYTES = 512 * 1024;
 
-export const IMAGE_MIME_BY_EXT: Readonly<Record<string, string>> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  bmp: "image/bmp",
-};
-
-function lookupImageMime(filePath: string): string | undefined {
-  const ext = path.extname(filePath).slice(1).toLowerCase();
-  return IMAGE_MIME_BY_EXT[ext];
+async function readFilePrefix(absolutePath: string, bytes: number): Promise<Buffer> {
+  const handle = await open(absolutePath, "r");
+  try {
+    const buffer = Buffer.alloc(bytes);
+    const { bytesRead } = await handle.read(buffer, 0, bytes, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
 }
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+function readErrorResult(requestedPath: string, err: unknown, action: string): ReadImageFileResult {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === "EACCES" || code === "EPERM") return { status: "error", path: requestedPath, error: { code: "PERMISSION_DENIED", message: `Permission denied while ${action} the file.` } };
+  return { status: "error", path: requestedPath, error: { code: "IO_ERROR", message: `${action} failed: ${(err as Error).message ?? String(err)}` } };
 }
 
 export async function readImageFile(
@@ -632,9 +642,8 @@ export async function readImageFile(
     return { status: "error", path: requestedPath, error: { code: "IO_ERROR", message: err instanceof Error ? err.message : String(err) } };
   }
 
-  if (context.signal?.aborted) {
-    return { status: "error", path: requestedPath, error: { code: "ABORTED", message: "Operation aborted." } };
-  }
+  const aborted = (): ReadImageFileResult => ({ status: "error", path: requestedPath, error: { code: "ABORTED", message: "Operation aborted." } });
+  if (context.signal?.aborted) return aborted();
 
   let stats: import("node:fs").Stats;
   try {
@@ -648,57 +657,52 @@ export async function readImageFile(
   if (!stats.isFile()) {
     return { status: "error", path: requestedPath, error: { code: "NOT_A_FILE", message: "Path is not a regular file (directories, sockets and devices are not supported)." } };
   }
-  if (stats.size > READ_IMAGE_FILE_SIZE_LIMIT) {
-    return {
-      status: "error",
-      path: requestedPath,
-      error: {
-        code: "IMAGE_TOO_LARGE",
-        message: `Image is ${formatBytes(stats.size)}, which exceeds the ${formatBytes(READ_IMAGE_FILE_SIZE_LIMIT)} hard limit. Downsample the file out-of-band and retry.`,
-      },
-    };
-  }
 
-  const mimeType = lookupImageMime(absolutePath);
-  if (!mimeType) {
-    return {
-      status: "error",
-      path: requestedPath,
-      error: {
-        code: "UNSUPPORTED_IMAGE_TYPE",
-        message: `Unsupported image extension. Supported: ${Object.keys(IMAGE_MIME_BY_EXT).join(", ")}. For SVG (XML text) use read_files instead.`,
-      },
-    };
-  }
-
-  if (context.signal?.aborted) {
-    return { status: "error", path: requestedPath, error: { code: "ABORTED", message: "Operation aborted." } };
-  }
-
+  // There is no file-size limit. The header probe rejects non-images and images above
+  // the pixel limit before the whole file is read into memory.
   let buffer: Buffer;
   try {
-    buffer = await readFile(absolutePath);
+    const probe = await readFilePrefix(absolutePath, Math.min(stats.size, IMAGE_PROBE_BYTES));
+    const pre = preflightImage(probe);
+    const probeIsWholeFile = probe.byteLength >= stats.size;
+    if (pre.kind === "error" && (pre.code !== "IMAGE_DECODE_FAILED" || probeIsWholeFile)) {
+      return { status: "error", path: requestedPath, error: { code: pre.code, message: pre.message } };
+    }
+    if (context.signal?.aborted) return aborted();
+    buffer = probeIsWholeFile ? probe : await readFile(absolutePath);
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "EACCES" || code === "EPERM") return { status: "error", path: requestedPath, error: { code: "PERMISSION_DENIED", message: "Permission denied while reading the file." } };
-    return { status: "error", path: requestedPath, error: { code: "IO_ERROR", message: `readFile failed: ${(err as Error).message ?? String(err)}` } };
+    return readErrorResult(requestedPath, err, "reading");
   }
 
-  if (context.signal?.aborted) {
-    return { status: "error", path: requestedPath, error: { code: "ABORTED", message: "Operation aborted." } };
-  }
+  if (context.signal?.aborted) return aborted();
 
+  const prepared = await prepareImageForModel(buffer, context.signal);
+  if (!prepared.ok) {
+    return { status: "error", path: requestedPath, error: { code: prepared.code, message: prepared.message } };
+  }
+  if (context.signal?.aborted) return aborted();
+
+  const image = prepared.image;
   return {
     status: "success",
     path: requestedPath,
     success: {
       path: requestedPath,
       absolutePath,
-      mimeType,
-      base64: buffer.toString("base64"),
-      sizeBytes: buffer.byteLength,
+      mimeType: image.mimeType,
+      base64: image.data.toString("base64"),
+      sizeBytes: image.data.byteLength,
+      width: image.width,
+      height: image.height,
+      unchanged: image.unchanged,
+      source: image.source,
+      notes: image.notes,
     },
   };
+}
+
+function imageFormatLabel(mimeType: string): string {
+  return mimeType.replace(/^image\//, "").toUpperCase();
 }
 
 export function formatReadImageFileForModel(result: ReadImageFileResult): string {
@@ -706,7 +710,22 @@ export function formatReadImageFileForModel(result: ReadImageFileResult): string
     return `read_image_file ${result.path}\n  ERROR ${result.error?.code ?? "UNKNOWN"}: ${result.error?.message ?? ""}`;
   }
   const s = result.success!;
-  return `read_image_file ${result.path}\n  mime    ${s.mimeType}\n  size    ${formatBytes(s.sizeBytes)}\n  base64  ${formatBytes(s.base64.length)}\n  status  ok`;
+  const lines = [
+    `read_image_file ${result.path}`,
+    `  source  ${imageFormatLabel(s.source.mimeType)} ${s.source.width}×${s.source.height}, ${formatByteSize(s.source.bytes)}`,
+  ];
+  if (s.unchanged) {
+    lines.push(`  sent    original file unchanged (base64 ${formatByteSize(s.base64.length)})`);
+  } else {
+    lines.push(`  sent    ${imageFormatLabel(s.mimeType)} ${s.width}×${s.height}, ${formatByteSize(s.sizeBytes)} (base64 ${formatByteSize(s.base64.length)})`);
+  }
+  if (s.width !== s.source.width) {
+    const scale = s.width / s.source.width;
+    lines.push(`  scale   ${scale.toFixed(3)} (divide coordinates measured in this image by ${scale.toFixed(3)} to map them to the source file)`);
+  }
+  for (const note of s.notes) lines.push(`  note    ${note}`);
+  lines.push("  status  ok");
+  return lines.join("\n");
 }
 
 

@@ -25,3 +25,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Photon (@silvia-odwyer/photon-node)
+
+The `read_image_file` tool uses [Photon](https://github.com/silvia-odwyer/photon) by Silvia O'Dwyer to decode, resize, and re-encode images. `dist/image-worker.js` contains Photon's JavaScript bindings and `dist/photon_rs_bg.wasm` is Photon's WebAssembly module. Photon is licensed under the Apache License, Version 2.0; the full license text ships as `dist/photon-node-LICENSE.md` and is available at https://www.apache.org/licenses/LICENSE-2.0.
