@@ -50,6 +50,21 @@ test("every tool definition is well-formed", () => {
   assert.ok(names.includes(PLAN_MODE_COMMAND_TOOL_NAME), `Plan mode command tool ${PLAN_MODE_COMMAND_TOOL_NAME} is not a tool`);
 });
 
+test("every parameter has a description and descriptions start with a one-line summary", () => {
+  function visit(toolName: string, schema: any, prefix: string): void {
+    for (const [name, property] of Object.entries<any>(schema.properties ?? {})) {
+      assert.ok(typeof property.description === "string" && property.description.length > 0, `${toolName}: parameter ${prefix}${name} has no description`);
+      if (property.type === "array" && property.items?.type === "object") visit(toolName, property.items, `${prefix}${name}[].`);
+    }
+  }
+  for (const definition of BRIDGE_TOOL_DEFINITIONS) {
+    visit(definition.name, definition.inputSchema, "");
+    const [summary, blank] = definition.description.split("\n");
+    assert.ok(summary.length > 0 && summary.length <= 160, `${definition.name}: first line should be a short summary`);
+    if (definition.description.includes("\n")) assert.equal(blank, "", `${definition.name}: blank line after the summary`);
+  }
+});
+
 test("limits stated in descriptions and schemas match the enforced constants", () => {
   const maxFiles = DEFAULT_READ_FILES_CONFIG.maxFilesPerCall;
   const readFiles = tool("read_files");

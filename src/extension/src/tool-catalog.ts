@@ -107,7 +107,9 @@ export function renderToolCatalog(tools: readonly CatalogTool[], options: Catalo
       `<a id="${tool.name}"></a>`,
       `## \`${tool.name}\``,
       "",
+      "```text",
       tool.description,
+      "```",
       "",
     );
     if (rows.length) {

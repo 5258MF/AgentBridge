@@ -26,23 +26,51 @@ This is exactly what MCP clients receive from `tools/list`. In `run_command`, `$
 <a id="apply_patch"></a>
 ## `apply_patch`
 
-Apply a structured multi-file patch directly inside the current workspace. Use this as the primary workspace edit tool. Prefer one apply_patch call containing related file edits instead of many small write calls. Patch syntax starts with '*** Begin Patch' and ends with '*** End Patch'. Supported directives are '*** Update File:', optional immediate '*** Move to:', '*** Add File:', and '*** Delete File:'. Update hunks start with '@@' and use unchanged lines prefixed by one space, removed lines prefixed by '-', and added lines prefixed by '+'. Add File and Move to create missing parent directories inside the workspace. To replace the whole content of an existing file, put '*** Delete File: <path>' immediately followed by '*** Add File: <path>' in one patch; it is applied as a single in-place replacement that keeps the file's line endings and honors expected_versions. Add File alone fails with FILE_ALREADY_EXISTS on an existing file. Update hunk old/context lines must match exactly and uniquely. If context is stale or ambiguous the patch fails without partial application; re-read the file and regenerate the patch. When read_files has returned version hashes for files you are modifying, pass them in expected_versions keyed by file path. A mismatch returns STALE_FILE instead of editing a file that changed after it was read. Returns the actual unified diff produced by the applied workspace changes.
+```text
+Create, edit, move, or delete workspace files with a patch.
+
+*** Begin Patch
+*** Add File: src/util.ts
++export const answer = 42;
+*** Update File: src/app.ts
+*** Move to: src/main.ts
+@@
+ function greet() {
+-  print("Hi")
++  print("Hello")
+*** Delete File: old.txt
+*** End Patch
+
+- Put related edits to several files in one patch.
+- In Update hunks, context lines start with a space, removed lines with -, added lines with +. Old and context lines must match the file exactly and only once, or nothing is applied; re-read the file and regenerate the patch.
+- To replace a whole file, write *** Delete File: X immediately followed by *** Add File: X; the file keeps its line endings. Add File alone fails with FILE_ALREADY_EXISTS on an existing file.
+- Missing parent directories are created.
+- Pass the version hashes returned by read_files in expected_versions; a file changed since it was read fails with STALE_FILE instead of being edited.
+- Returns the applied unified diff.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `patch` | string | yes |  | min length 1 | Structured patch text using *** Begin Patch / *** End Patch and Add/Update/Delete/Move directives. |
-| `expected_versions` | map<string, string> | no |  | values match `^sha256:` | Optional map from existing file paths to sha256:... versions previously returned by read_files. Strongly recommended whenever those versions are available. |
+| `patch` | string | yes |  | min length 1 | Patch text from *** Begin Patch to *** End Patch. |
+| `expected_versions` | map<string, string> | no |  | values match `^sha256:` | Map from file path to the sha256:... version returned by read_files for that file. Recommended whenever available. |
 
 <a id="find_files"></a>
 ## `find_files`
 
-Find files by path/name glob patterns inside the current workspace; this does not search file contents. Use find_files when you know a filename, extension, or path shape but not the exact path. Use search_files when you need to search file contents. Batch independent file patterns together in the patterns array (at most 20 patterns) instead of making separate calls. Patterns are evaluated within path, which defaults to the workspace root. Results are files only, never directories. By default matching is case-insensitive, ignored/common generated directories and hidden paths are skipped, and results are sorted by modification time newest first. Use exclude for additional path globs, include_hidden/no_ignore only when those files are intentionally needed, and sort='path_asc' when deterministic path order matters. Results are hard-bounded: at most 5000 candidate paths are collected internally before sorting, and by default only 100 paths are returned (hard maximum 500). If truncated=true, narrow path/patterns before increasing max_results.
+```text
+Find workspace files whose paths match glob patterns. Matches names and paths, not contents; use search_files for contents.
+
+- Pass several patterns in one call (at most 20), e.g. ["**/*.test.ts", "**/package.json"].
+- Returns files only, never directories, newest first by default; sort=path_asc gives a stable order.
+- Matching is case-insensitive by default. Ignored, generated, and hidden paths are skipped unless no_ignore or include_hidden is set.
+- Returns 100 paths by default (max_results up to 500). If truncated=true, narrow path or patterns first.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `patterns` | array<string> | yes |  | min items 1; max items 20 | One or more glob patterns to find in a single call, e.g. ['**/*-files.ts', '**/mcp-server.ts']. |
+| `patterns` | array<string> | yes |  | min items 1; max items 20 | Glob patterns matched against paths under path. |
 | `path` | string | no |  |  | Optional directory scope relative to the workspace root. Defaults to '.'. |
-| `exclude` | array<string> | no |  | max items 50 | Optional glob patterns to exclude from the result. |
+| `exclude` | array<string> | no |  | max items 50 | Glob patterns for paths to leave out. |
 | `case_sensitive` | boolean | no |  |  | Whether glob matching is case-sensitive. Defaults to false. |
 | `no_ignore` | boolean | no |  |  | Set true to bypass ignore files/common generated-directory excludes. Defaults to false. |
 | `include_hidden` | boolean | no |  |  | Set true to include hidden files/directories. Defaults to false. |
@@ -52,11 +80,19 @@ Find files by path/name glob patterns inside the current workspace; this does no
 <a id="read_files"></a>
 ## `read_files`
 
-Read one or more UTF-8 text files from the current workspace. Batch independent files together in one call, at most 20 files per call; split larger batches into several calls. For small files, omit start_line/end_line to read the complete file. For large files, results may be truncated and include next_start_line. A satisfied explicit range can still report has_more=true when the file continues afterward. Use 1-based inclusive start_line/end_line for targeted reads. Files at or above the very-large-file threshold require an explicit range. Smaller files may still be automatically truncated by per-file line/byte/token budgets; prefer search_files before targeted reads when location is unknown.
+```text
+Read UTF-8 text files from the workspace. Each file comes back with line numbers and a version hash.
+
+- Read several files in one call, at most 20 files per call.
+- Omit start_line/end_line to read a whole file; set them (1-based, inclusive) to read part of a large file.
+- Long files are cut off at about 2000 lines or 64 KB per file; continue from next_start_line. Files of 2 MB or more need an explicit range.
+- Pass the version hashes to apply_patch expected_versions so a file changed in the meantime is not overwritten.
+- When you do not know where something is, use search_files first instead of reading many files.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `files` | array<object> | yes |  | min items 1; max items 20 | Files to read. Independent files should be requested together. |
+| `files` | array<object> | yes |  | min items 1; max items 20 | Files to read in this call. |
 | `files[].path` | string | yes |  |  | File path relative to the workspace root. |
 | `files[].start_line` | integer | no |  | min 1 | Optional 1-based inclusive first line. |
 | `files[].end_line` | integer | no |  | min 1 | Optional 1-based inclusive last line. |
@@ -64,16 +100,32 @@ Read one or more UTF-8 text files from the current workspace. Batch independent 
 <a id="read_image_file"></a>
 ## `read_image_file`
 
-Read a single raster image file (PNG/JPEG/GIF/WebP/BMP) from the workspace and return it as an MCP image content block. Use this to inspect or reason about screenshots, charts, UI designs, exported diagrams, error dialogs, or other raster images. The format is detected from the file bytes, not the extension. SVG is XML text — use read_files for SVG, not this tool. There is no file-size limit, but images above 64 megapixels are rejected. Images whose longer edge exceeds 2000px, or whose base64 data would exceed 4.50 MB, are downscaled and re-encoded (PNG for PNG/GIF/BMP sources when it fits, otherwise JPEG). GIF returns the first frame as PNG, BMP is converted to PNG, and JPEG EXIF orientation is applied. Images that already fit are sent byte-for-byte. Returns a short text summary followed by one image content item. The summary gives the source and sent format and size and, when the image was downscaled, the scale factor for mapping coordinates back to the source file. Paths are workspace-relative; absolute paths are accepted only when they resolve inside the workspace.
+```text
+Read a raster image (PNG, JPEG, GIF, WebP, BMP) from the workspace and show it to you.
+
+- For screenshots, charts, UI mockups, and diagrams. For SVG use read_files.
+- Large images are downscaled to a 2000 px long edge and at most 4.50 MB of base64; small images are sent unchanged. Images over 64 megapixels are rejected.
+- The text before the image gives the source and sent size; if scaled, divide coordinates by the reported scale to map them to the source file.
+- GIF shows only its first frame.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `path` | string | yes |  | min length 1 | Workspace-relative image file path (or absolute path that resolves inside the workspace). |
+| `path` | string | yes |  | min length 1 | Image path, relative to the workspace root. |
 
 <a id="search_files"></a>
 ## `search_files`
 
-Search UTF-8 text file contents inside the current workspace and return bounded path/line/snippet matches. Use this to locate relevant code before calling read_files. Literal search is the default; set is_regex=true only when regular-expression semantics are required. Omit case_sensitive for smart-case (lowercase patterns are case-insensitive; uppercase makes the search case-sensitive). Use path to narrow the directory/file scope and include/exclude glob arrays to filter files. context_lines returns nearby lines for disambiguation; keep it small because search is for locating code, not reading whole files. Results are hard-bounded by per-file/global/output budgets. If truncated=true, narrow the query and search again. By default ignored/common generated directories and hidden paths are skipped.
+```text
+Search text file contents in the workspace. Returns matching lines with paths and line numbers.
+
+- Literal text by default; set is_regex=true for a regular expression.
+- Smart case by default: an all-lowercase pattern ignores case, any uppercase letter makes it case-sensitive.
+- Narrow with path and include/exclude globs, e.g. include=["**/*.ts"].
+- Returns up to 100 matches (max_results up to 500; 20 per file by default) with 1 line of context (context_lines up to 5). If truncated=true, narrow the search.
+- Ignored, generated, and hidden paths are skipped unless no_ignore or include_hidden is set.
+- Read the surrounding code with read_files; use lsp for definitions and references.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
@@ -92,81 +144,125 @@ Search UTF-8 text file contents inside the current workspace and return bounded 
 <a id="list_directory"></a>
 ## `list_directory`
 
-List the immediate contents of a workspace directory. Use this to understand what is in a known directory; use find_files when searching by filename/path pattern. Depth is intentionally limited to 1 or 2.
+```text
+List the entries of a workspace directory.
+
+- depth 1 (default) or 2; for deeper or pattern-based discovery use find_files.
+- Dot entries and generated or ignored directories (node_modules, dist, .git) are hidden unless include_hidden or no_ignore is set.
+- Returns up to 200 entries by default (max_entries up to 500).
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
 | `path` | string | no |  |  | Workspace-relative directory path. Defaults to the workspace root. |
-| `depth` | integer | no | `1` | one of: `1`, `2` | Directory depth to list. Keep this small; use find_files for recursive discovery. |
+| `depth` | integer | no | `1` | one of: `1`, `2` | 1 lists the directory itself; 2 also lists its subdirectories. |
 | `include_hidden` | boolean | no | `false` |  | Include dot-prefixed entries. |
 | `no_ignore` | boolean | no | `false` |  | Include common generated/ignored directories such as node_modules, dist and .git. |
-| `max_entries` | integer | no | `200` | min 1; max 500 | Maximum returned entries. |
+| `max_entries` | integer | no | `200` | min 1; max 500 | Maximum entries returned. |
 
 <a id="run_command"></a>
 ## `run_command`
 
-Run a shell command in an AgentBridge-managed persistent real PTY that is independent of the user's terminal profiles and VS Code Shell Integration. ${RUNTIME_SHELL_DESCRIPTION}. ${RUNTIME_SHELL_SYNTAX_HINT} Shell state such as environment variables, functions and the current directory persists when the same terminal is reused. Omit cwd to continue from the most recently used idle AgentBridge terminal's current directory; a new terminal starts at the workspace root. Interactive input, resize, and TTY-aware CLI behavior are supported. Concurrent commands may use additional managed terminals, up to 8 live terminals total; when all are busy, additional run_command calls fail until a terminal becomes available or a stuck command is terminated. Explicitly choose background=true for long-running servers/watchers and background=false for commands whose result should be awaited. Returns a command_id for later output inspection or interactive input.
+```text
+Run a shell command in a persistent terminal managed by AgentBridge: ${RUNTIME_SHELL_DESCRIPTION}.
+
+- Set background explicitly: false to wait for the result, true for servers and watchers that keep running (returns at once with a command_id).
+- A foreground command still running after timeout_ms (default and maximum 90000) returns status=running with a command_id; it is not killed. Continue with get_command_output.
+- Terminal state (cwd, environment variables, functions) persists between calls. Omit cwd to continue in the last idle terminal's directory; a new terminal starts at the workspace root.
+- Up to 8 terminals run at once; when all are busy the call fails until one finishes or is terminated.
+- Interactive programs work; answer prompts with send_command_input.
+- Syntax: ${RUNTIME_SHELL_SYNTAX_HINT}
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `command` | string | yes |  | min length 1 | Shell command to run. |
-| `cwd` | string | no |  |  | Optional workspace-relative working directory. When omitted, reuse the most recently used idle AgentBridge terminal and continue from its current directory; a new terminal starts at the workspace root. |
-| `background` | boolean | yes |  |  | Whether this is expected to keep running. Must be chosen explicitly. |
-| `timeout_ms` | integer | no | `90000` | min 1000; max 90000 | For foreground commands, maximum time to wait before returning status=running. The command is not killed on timeout; continue with get_command_output using the returned command_id and wait_ms. Capped below common proxy response deadlines. |
+| `command` | string | yes |  | min length 1 | Command line to run. |
+| `cwd` | string | no |  |  | Working directory relative to the workspace root. Omit to continue in the last idle terminal's directory. |
+| `background` | boolean | yes |  |  | true for commands that keep running (servers, watchers); false to wait for the result. |
+| `timeout_ms` | integer | no | `90000` | min 1000; max 90000 | Foreground only: how long to wait before returning status=running. The command keeps running. |
 
 <a id="get_command_output"></a>
 ## `get_command_output`
 
-Read new output and status from a previously started run_command using its command_id. Pass the previous next_offset as offset to avoid repeating old output. To wait for a still-running command, set wait_ms (at most 60000) instead of calling this tool repeatedly: with wait_until=exit (default) it returns as soon as the command finishes, with wait_until=output as soon as any output past offset arrives, otherwise at the deadline with wait_result=timeout while the command keeps running. Do not poll in a tight loop and do not run sleep commands to wait. Only the 32 most recent finished commands are retained.
+```text
+Read new output and the status of a command started with run_command.
+
+- Pass the previous next_offset as offset to get only new output.
+- To wait for a running command, set wait_ms (at most 60000) instead of calling repeatedly or running sleep: wait_until=exit (default) returns when it finishes, wait_until=output as soon as new output arrives; otherwise it returns at the deadline with wait_result=timeout and the command keeps running.
+- Only the 32 most recent finished commands are kept.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `command_id` | string | yes |  | min length 1 |  |
-| `offset` | integer | no | `0` | min 0 | Absolute UTF-8 byte offset into captured output. |
-| `max_bytes` | integer | no | `32768` | min 1; max 131072 |  |
-| `wait_ms` | integer | no | `0` | min 0; max 60000 | Optional time to block while the command is still running. 0 returns immediately. The result then includes wait_result (exited, output, timeout, or cancelled) and waited_ms. |
-| `wait_until` | string | no | `"exit"` | one of: `exit`, `output` | With wait_ms: exit returns when the command finishes; output returns as soon as new output past offset arrives (useful for servers and watchers). |
+| `command_id` | string | yes |  | min length 1 | Id returned by run_command. |
+| `offset` | integer | no | `0` | min 0 | Byte offset to read from; pass the previous next_offset. |
+| `max_bytes` | integer | no | `32768` | min 1; max 131072 | Maximum output bytes returned in this call. |
+| `wait_ms` | integer | no | `0` | min 0; max 60000 | How long to wait while the command is running; 0 returns immediately. The result then includes wait_result and waited_ms. |
+| `wait_until` | string | no | `"exit"` | one of: `exit`, `output` | exit: return when the command finishes. output: return as soon as new output arrives (useful for servers). |
 
 <a id="send_command_input"></a>
 ## `send_command_input`
 
-Send text to a running managed terminal for prompts, REPLs, or other interactive input. A newline is appended by default. To request Ctrl+C, send \u0003 with append_newline=false. Ctrl+C is cooperative and may leave the command running; check with get_command_output and use terminate_command when a hard stop is required.
+```text
+Type input into a running command's terminal: answers to prompts, REPL lines, or control keys.
+
+- A newline is appended unless append_newline=false.
+- Ctrl+C: input="\u0003" with append_newline=false. It may not stop the command; check with get_command_output and use terminate_command for a hard stop.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `command_id` | string | yes |  | min length 1 |  |
-| `input` | string | yes |  |  |  |
-| `append_newline` | boolean | no | `true` |  |  |
+| `command_id` | string | yes |  | min length 1 | Id returned by run_command. |
+| `input` | string | yes |  |  | Text to send. Use \u0003 for Ctrl+C. |
+| `append_newline` | boolean | no | `true` |  | Press Enter after the input. |
 
 <a id="terminate_command"></a>
 ## `terminate_command`
 
-Hard-stop a running AgentBridge command by terminating its managed shell and closing that terminal. Terminal-local state such as cwd, environment changes, and history is discarded. Use when cooperative Ctrl+C did not stop the command and get_command_output still reports status=running. To try Ctrl+C first, call send_command_input with input="\u0003" and append_newline=false. Calling this for an already-finished command is idempotent and returns its current status.
+```text
+Force-stop a running command by closing its terminal.
+
+- Use when Ctrl+C through send_command_input did not stop it.
+- The terminal's state (cwd, environment variables, history) is lost.
+- Safe to call on a finished command; it returns the current status.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `command_id` | string | yes |  | min length 1 |  |
+| `command_id` | string | yes |  | min length 1 | Id returned by run_command. |
 
 <a id="get_diagnostics"></a>
 ## `get_diagnostics`
 
-Read current diagnostics from VS Code and active language services, including unsaved editor state when providers report it. Use after edits/builds to inspect errors and warnings structurally instead of parsing compiler output when diagnostics are available.
+```text
+Read the errors and warnings VS Code currently reports (the Problems panel), including for unsaved edits.
+
+- Use after edits or builds instead of parsing compiler output.
+- Filter with path and severity; returns up to 100 results by default (max_results up to 500).
+- Language services may only report files they have analyzed; run the build or tests to check everything.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `path` | string | no |  |  | Optional workspace-relative file or directory scope. |
-| `severity` | array<string> | no |  | items one of: `error`, `warning`, `information`, `hint`; unique items | Optional severity filter. Defaults to all severities. |
-| `max_results` | integer | no | `100` | min 1; max 500 |  |
+| `path` | string | no |  |  | File or directory to limit results to, relative to the workspace root. |
+| `severity` | array<string> | no |  | items one of: `error`, `warning`, `information`, `hint`; unique items | Severities to include. Defaults to all. |
+| `max_results` | integer | no | `100` | min 1; max 500 | Maximum diagnostics returned. |
 
 <a id="lsp"></a>
 ## `lsp`
 
-Navigate code semantically through the language services already active in VS Code. Use this for code symbols rather than text search: workspace/document symbols, go-to-definition, references, implementations, and hover/type information. Results include provider_state, project_anchor, project_anchor_source, warmup_performed, and semantic_result_inconclusive metadata so empty semantic results and heuristic warm-up anchors are not over-interpreted. Use search_files for raw text and read_files after lsp locates the relevant implementation.
+```text
+Navigate code by symbols using the language services running in VS Code.
+
+- operation: workspace_symbols (needs query), document_symbols (needs path), or definition, references, implementation, hover (need path, line, and column, all 1-based).
+- Use search_files for plain text and read_files to read the code lsp finds.
+- An empty result can mean the language service is not ready or does not cover the file; check provider_state and semantic_result_inconclusive before concluding a symbol does not exist.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `operation` | string | yes |  | one of: `workspace_symbols`, `document_symbols`, `definition`, `references`, `implementation`, `hover` | Semantic operation to execute through VS Code language feature providers. |
-| `path` | string | no |  |  | Workspace source path. Workspace-relative is preferred; absolute paths are accepted only when they remain inside the workspace. Required for document_symbols/definition/references/implementation/hover. Optional for workspace_symbols as a project/file/directory anchor to activate the relevant language project before semantic search. |
+| `operation` | string | yes |  | one of: `workspace_symbols`, `document_symbols`, `definition`, `references`, `implementation`, `hover` | What to look up. |
+| `path` | string | no |  |  | Source file relative to the workspace root. Required except for workspace_symbols, where it optionally points at the project to search. |
 | `line` | integer | no |  | min 1 | 1-based source line. Required for definition/references/implementation/hover. |
 | `column` | integer | no |  | min 1 | 1-based UTF-16 source column. Required for definition/references/implementation/hover. |
 | `query` | string | no |  |  | Symbol query. Required for workspace_symbols. |
@@ -176,23 +272,35 @@ Navigate code semantically through the language services already active in VS Co
 <a id="set_todos"></a>
 ## `set_todos`
 
-Set the complete durable task list for the current remote-agent job in AgentBridge. Use this for multi-step work so the local user can see what is done, in progress, and still pending. Send the full list whenever the plan changes; keep at most one item in_progress and at most 24 items. Use report_progress for transient details about the current step instead of creating tool-call-sized todos. Send an empty list to clear task state. The result echoes the stored list.
+```text
+Show your task list for the current job to the user in the AgentBridge panel.
+
+- Send the complete list each time it changes, at most 24 items with at most one in_progress.
+- Use goal-level items, not one per tool call; use report_progress for what you are doing right now.
+- An empty list clears it. The result echoes the stored list.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `todos` | array<object> | yes |  | max items 24 | Complete ordered todo snapshot for the current job. |
+| `todos` | array<object> | yes |  | max items 24 | The complete, ordered task list. |
 | `todos[].id` | string | yes |  | min length 1; max length 80 | Stable id reused across later set_todos updates. |
 | `todos[].title` | string | yes |  | min length 1; max length 400 | Goal-level task title, not an individual tool call. |
-| `todos[].status` | string | yes |  | one of: `pending`, `in_progress`, `completed` |  |
+| `todos[].status` | string | yes |  | one of: `pending`, `in_progress`, `completed` | Task state. |
 
 <a id="report_progress"></a>
 ## `report_progress`
 
-Report concise transient progress from the remote MCP agent to the AgentBridge UI. For multi-step work, maintain durable task state with set_todos and use report_progress for what you are doing right now. todo_id is optional: when omitted, AgentBridge automatically associates progress with the sole in_progress todo. This tool does not modify workspace files.
+```text
+Show a short status update in the AgentBridge panel about what you are doing now.
+
+- Use it at meaningful steps of long work, not after every tool call.
+- todo_id links the update to a set_todos item; when omitted it attaches to the single in_progress item.
+- Does not change any files.
+```
 
 | Parameter | Type | Required | Default | Constraints | Description |
 |---|---|---|---|---|---|
-| `message` | string | yes |  | min length 1; max length 2000 | Human-readable progress update. |
-| `phase` | string | no |  | max length 160 | Optional short phase label, such as Reading, Editing, Testing, or Done. |
-| `percent` | integer | no |  | min 0; max 100 | Optional completion estimate from 0 to 100 for the current activity/todo. |
-| `todo_id` | string | no |  | min length 1; max length 80 | Optional todo id from set_todos. Omit when there is exactly one in_progress todo; AgentBridge will link it automatically. |
+| `message` | string | yes |  | min length 1; max length 2000 | One or two sentences for the user. |
+| `phase` | string | no |  | max length 160 | Short label such as Reading, Editing, Testing, or Done. |
+| `percent` | integer | no |  | min 0; max 100 | Completion estimate for the current task. |
+| `todo_id` | string | no |  | min length 1; max length 80 | Id of the set_todos item this update belongs to. |

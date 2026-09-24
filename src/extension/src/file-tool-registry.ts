@@ -8,27 +8,39 @@ import { formatSearchFilesForModel, searchFiles, type SearchFilesInput } from ".
 export const APPLY_PATCH_TOOL = {
   name: "apply_patch",
   description: [
-    "Apply a structured multi-file patch directly inside the current workspace.",
-    "Use this as the primary workspace edit tool. Prefer one apply_patch call containing related file edits instead of many small write calls.",
-    "Patch syntax starts with '*** Begin Patch' and ends with '*** End Patch'. Supported directives are '*** Update File:', optional immediate '*** Move to:', '*** Add File:', and '*** Delete File:'. Update hunks start with '@@' and use unchanged lines prefixed by one space, removed lines prefixed by '-', and added lines prefixed by '+'.",
-    "Add File and Move to create missing parent directories inside the workspace.",
-    "To replace the whole content of an existing file, put '*** Delete File: <path>' immediately followed by '*** Add File: <path>' in one patch; it is applied as a single in-place replacement that keeps the file's line endings and honors expected_versions. Add File alone fails with FILE_ALREADY_EXISTS on an existing file.",
-    "Update hunk old/context lines must match exactly and uniquely. If context is stale or ambiguous the patch fails without partial application; re-read the file and regenerate the patch.",
-    "When read_files has returned version hashes for files you are modifying, pass them in expected_versions keyed by file path. A mismatch returns STALE_FILE instead of editing a file that changed after it was read.",
-    "Returns the actual unified diff produced by the applied workspace changes.",
-  ].join(" "),
+    "Create, edit, move, or delete workspace files with a patch.",
+    "",
+    "*** Begin Patch",
+    "*** Add File: src/util.ts",
+    "+export const answer = 42;",
+    "*** Update File: src/app.ts",
+    "*** Move to: src/main.ts",
+    "@@",
+    " function greet() {",
+    "-  print(\"Hi\")",
+    "+  print(\"Hello\")",
+    "*** Delete File: old.txt",
+    "*** End Patch",
+    "",
+    "- Put related edits to several files in one patch.",
+    "- In Update hunks, context lines start with a space, removed lines with -, added lines with +. Old and context lines must match the file exactly and only once, or nothing is applied; re-read the file and regenerate the patch.",
+    "- To replace a whole file, write *** Delete File: X immediately followed by *** Add File: X; the file keeps its line endings. Add File alone fails with FILE_ALREADY_EXISTS on an existing file.",
+    "- Missing parent directories are created.",
+    "- Pass the version hashes returned by read_files in expected_versions; a file changed since it was read fails with STALE_FILE instead of being edited.",
+    "- Returns the applied unified diff.",
+  ].join("\n"),
   inputSchema: {
     type: "object",
     properties: {
       patch: {
         type: "string",
         minLength: 1,
-        description: "Structured patch text using *** Begin Patch / *** End Patch and Add/Update/Delete/Move directives.",
+        description: "Patch text from *** Begin Patch to *** End Patch.",
       },
       expected_versions: {
         type: "object",
         additionalProperties: { type: "string", pattern: "^sha256:" },
-        description: "Optional map from existing file paths to sha256:... versions previously returned by read_files. Strongly recommended whenever those versions are available.",
+        description: "Map from file path to the sha256:... version returned by read_files for that file. Recommended whenever available.",
       },
     },
     required: ["patch"],
@@ -39,14 +51,14 @@ export const APPLY_PATCH_TOOL = {
 export const READ_FILES_TOOL = {
   name: "read_files",
   description: [
-    "Read one or more UTF-8 text files from the current workspace.",
-    `Batch independent files together in one call, at most ${DEFAULT_READ_FILES_CONFIG.maxFilesPerCall} files per call; split larger batches into several calls.`,
-    "For small files, omit start_line/end_line to read the complete file.",
-    "For large files, results may be truncated and include next_start_line.",
-    "A satisfied explicit range can still report has_more=true when the file continues afterward.",
-    "Use 1-based inclusive start_line/end_line for targeted reads.",
-    "Files at or above the very-large-file threshold require an explicit range. Smaller files may still be automatically truncated by per-file line/byte/token budgets; prefer search_files before targeted reads when location is unknown.",
-  ].join(" "),
+    "Read UTF-8 text files from the workspace. Each file comes back with line numbers and a version hash.",
+    "",
+    `- Read several files in one call, at most ${DEFAULT_READ_FILES_CONFIG.maxFilesPerCall} files per call.`,
+    "- Omit start_line/end_line to read a whole file; set them (1-based, inclusive) to read part of a large file.",
+    `- Long files are cut off at about ${DEFAULT_READ_FILES_CONFIG.maxLinesPerFile} lines or ${DEFAULT_READ_FILES_CONFIG.maxBytesPerFile / 1024} KB per file; continue from next_start_line. Files of ${DEFAULT_READ_FILES_CONFIG.veryLargeFileBytes / (1024 * 1024)} MB or more need an explicit range.`,
+    "- Pass the version hashes to apply_patch expected_versions so a file changed in the meantime is not overwritten.",
+    "- When you do not know where something is, use search_files first instead of reading many files.",
+  ].join("\n"),
   inputSchema: {
     type: "object",
     properties: {
@@ -54,7 +66,7 @@ export const READ_FILES_TOOL = {
         type: "array",
         minItems: 1,
         maxItems: DEFAULT_READ_FILES_CONFIG.maxFilesPerCall,
-        description: "Files to read. Independent files should be requested together.",
+        description: "Files to read in this call.",
         items: {
           type: "object",
           properties: {
@@ -86,21 +98,20 @@ export const READ_FILES_TOOL = {
 export const READ_IMAGE_FILE_TOOL = {
   name: "read_image_file",
   description: [
-    "Read a single raster image file (PNG/JPEG/GIF/WebP/BMP) from the workspace and return it as an MCP image content block.",
-    "Use this to inspect or reason about screenshots, charts, UI designs, exported diagrams, error dialogs, or other raster images.",
-    "The format is detected from the file bytes, not the extension. SVG is XML text — use read_files for SVG, not this tool.",
-    `There is no file-size limit, but images above ${IMAGE_MAX_PIXELS / 1_000_000} megapixels are rejected.`,
-    `Images whose longer edge exceeds ${IMAGE_MAX_EDGE}px, or whose base64 data would exceed ${formatByteSize(IMAGE_MAX_BASE64_BYTES)}, are downscaled and re-encoded (PNG for PNG/GIF/BMP sources when it fits, otherwise JPEG). GIF returns the first frame as PNG, BMP is converted to PNG, and JPEG EXIF orientation is applied. Images that already fit are sent byte-for-byte.`,
-    "Returns a short text summary followed by one image content item. The summary gives the source and sent format and size and, when the image was downscaled, the scale factor for mapping coordinates back to the source file.",
-    "Paths are workspace-relative; absolute paths are accepted only when they resolve inside the workspace.",
-  ].join(" "),
+    "Read a raster image (PNG, JPEG, GIF, WebP, BMP) from the workspace and show it to you.",
+    "",
+    "- For screenshots, charts, UI mockups, and diagrams. For SVG use read_files.",
+    `- Large images are downscaled to a ${IMAGE_MAX_EDGE} px long edge and at most ${formatByteSize(IMAGE_MAX_BASE64_BYTES)} of base64; small images are sent unchanged. Images over ${IMAGE_MAX_PIXELS / 1_000_000} megapixels are rejected.`,
+    "- The text before the image gives the source and sent size; if scaled, divide coordinates by the reported scale to map them to the source file.",
+    "- GIF shows only its first frame.",
+  ].join("\n"),
   inputSchema: {
     type: "object",
     properties: {
       path: {
         type: "string",
         minLength: 1,
-        description: "Workspace-relative image file path (or absolute path that resolves inside the workspace).",
+        description: "Image path, relative to the workspace root.",
       },
     },
     required: ["path"],
@@ -111,14 +122,13 @@ export const READ_IMAGE_FILE_TOOL = {
 export const FIND_FILES_TOOL = {
   name: "find_files",
   description: [
-    "Find files by path/name glob patterns inside the current workspace; this does not search file contents.",
-    "Use find_files when you know a filename, extension, or path shape but not the exact path. Use search_files when you need to search file contents.",
-    "Batch independent file patterns together in the patterns array (at most 20 patterns) instead of making separate calls.",
-    "Patterns are evaluated within path, which defaults to the workspace root. Results are files only, never directories.",
-    "By default matching is case-insensitive, ignored/common generated directories and hidden paths are skipped, and results are sorted by modification time newest first.",
-    "Use exclude for additional path globs, include_hidden/no_ignore only when those files are intentionally needed, and sort='path_asc' when deterministic path order matters.",
-    "Results are hard-bounded: at most 5000 candidate paths are collected internally before sorting, and by default only 100 paths are returned (hard maximum 500). If truncated=true, narrow path/patterns before increasing max_results.",
-  ].join(" "),
+    "Find workspace files whose paths match glob patterns. Matches names and paths, not contents; use search_files for contents.",
+    "",
+    "- Pass several patterns in one call (at most 20), e.g. [\"**/*.test.ts\", \"**/package.json\"].",
+    "- Returns files only, never directories, newest first by default; sort=path_asc gives a stable order.",
+    "- Matching is case-insensitive by default. Ignored, generated, and hidden paths are skipped unless no_ignore or include_hidden is set.",
+    "- Returns 100 paths by default (max_results up to 500). If truncated=true, narrow path or patterns first.",
+  ].join("\n"),
   inputSchema: {
     type: "object",
     properties: {
@@ -127,7 +137,7 @@ export const FIND_FILES_TOOL = {
         minItems: 1,
         maxItems: 20,
         items: { type: "string", minLength: 1 },
-        description: "One or more glob patterns to find in a single call, e.g. ['**/*-files.ts', '**/mcp-server.ts'].",
+        description: "Glob patterns matched against paths under path.",
       },
       path: {
         type: "string",
@@ -137,7 +147,7 @@ export const FIND_FILES_TOOL = {
         type: "array",
         maxItems: 50,
         items: { type: "string", minLength: 1 },
-        description: "Optional glob patterns to exclude from the result.",
+        description: "Glob patterns for paths to leave out.",
       },
       case_sensitive: {
         type: "boolean",
@@ -171,15 +181,15 @@ export const FIND_FILES_TOOL = {
 export const SEARCH_FILES_TOOL = {
   name: "search_files",
   description: [
-    "Search UTF-8 text file contents inside the current workspace and return bounded path/line/snippet matches.",
-    "Use this to locate relevant code before calling read_files.",
-    "Literal search is the default; set is_regex=true only when regular-expression semantics are required.",
-    "Omit case_sensitive for smart-case (lowercase patterns are case-insensitive; uppercase makes the search case-sensitive).",
-    "Use path to narrow the directory/file scope and include/exclude glob arrays to filter files.",
-    "context_lines returns nearby lines for disambiguation; keep it small because search is for locating code, not reading whole files.",
-    "Results are hard-bounded by per-file/global/output budgets. If truncated=true, narrow the query and search again.",
-    "By default ignored/common generated directories and hidden paths are skipped.",
-  ].join(" "),
+    "Search text file contents in the workspace. Returns matching lines with paths and line numbers.",
+    "",
+    "- Literal text by default; set is_regex=true for a regular expression.",
+    "- Smart case by default: an all-lowercase pattern ignores case, any uppercase letter makes it case-sensitive.",
+    "- Narrow with path and include/exclude globs, e.g. include=[\"**/*.ts\"].",
+    "- Returns up to 100 matches (max_results up to 500; 20 per file by default) with 1 line of context (context_lines up to 5). If truncated=true, narrow the search.",
+    "- Ignored, generated, and hidden paths are skipped unless no_ignore or include_hidden is set.",
+    "- Read the surrounding code with read_files; use lsp for definitions and references.",
+  ].join("\n"),
   inputSchema: {
     type: "object",
     properties: {

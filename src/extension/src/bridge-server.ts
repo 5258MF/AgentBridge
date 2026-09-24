@@ -274,7 +274,13 @@ const INSTRUCTION_LINES: readonly InstructionLine[] = [
 
 export const SET_TODOS_TOOL = {
   name: "set_todos",
-  description: `Set the complete durable task list for the current remote-agent job in AgentBridge. Use this for multi-step work so the local user can see what is done, in progress, and still pending. Send the full list whenever the plan changes; keep at most one item in_progress and at most ${MAX_TODOS} items. Use report_progress for transient details about the current step instead of creating tool-call-sized todos. Send an empty list to clear task state. The result echoes the stored list.`,
+  description: [
+    "Show your task list for the current job to the user in the AgentBridge panel.",
+    "",
+    `- Send the complete list each time it changes, at most ${MAX_TODOS} items with at most one in_progress.`,
+    "- Use goal-level items, not one per tool call; use report_progress for what you are doing right now.",
+    "- An empty list clears it. The result echoes the stored list.",
+  ].join("\n"),
   inputSchema: {
     type: "object",
     required: ["todos"],
@@ -282,14 +288,14 @@ export const SET_TODOS_TOOL = {
       todos: {
         type: "array",
         maxItems: MAX_TODOS,
-        description: "Complete ordered todo snapshot for the current job.",
+        description: "The complete, ordered task list.",
         items: {
           type: "object",
           required: ["id", "title", "status"],
           properties: {
             id: { type: "string", minLength: 1, maxLength: 80, description: "Stable id reused across later set_todos updates." },
             title: { type: "string", minLength: 1, maxLength: 400, description: "Goal-level task title, not an individual tool call." },
-            status: { type: "string", enum: ["pending", "in_progress", "completed"] },
+            status: { type: "string", enum: ["pending", "in_progress", "completed"], description: "Task state." },
           },
           additionalProperties: false,
         },
@@ -301,15 +307,21 @@ export const SET_TODOS_TOOL = {
 
 export const REPORT_PROGRESS_TOOL = {
   name: "report_progress",
-  description: "Report concise transient progress from the remote MCP agent to the AgentBridge UI. For multi-step work, maintain durable task state with set_todos and use report_progress for what you are doing right now. todo_id is optional: when omitted, AgentBridge automatically associates progress with the sole in_progress todo. This tool does not modify workspace files.",
+  description: [
+    "Show a short status update in the AgentBridge panel about what you are doing now.",
+    "",
+    "- Use it at meaningful steps of long work, not after every tool call.",
+    "- todo_id links the update to a set_todos item; when omitted it attaches to the single in_progress item.",
+    "- Does not change any files.",
+  ].join("\n"),
   inputSchema: {
     type: "object",
     required: ["message"],
     properties: {
-      message: { type: "string", minLength: 1, maxLength: 2000, description: "Human-readable progress update." },
-      phase: { type: "string", maxLength: 160, description: "Optional short phase label, such as Reading, Editing, Testing, or Done." },
-      percent: { type: "integer", minimum: 0, maximum: 100, description: "Optional completion estimate from 0 to 100 for the current activity/todo." },
-      todo_id: { type: "string", minLength: 1, maxLength: 80, description: "Optional todo id from set_todos. Omit when there is exactly one in_progress todo; AgentBridge will link it automatically." },
+      message: { type: "string", minLength: 1, maxLength: 2000, description: "One or two sentences for the user." },
+      phase: { type: "string", maxLength: 160, description: "Short label such as Reading, Editing, Testing, or Done." },
+      percent: { type: "integer", minimum: 0, maximum: 100, description: "Completion estimate for the current task." },
+      todo_id: { type: "string", minLength: 1, maxLength: 80, description: "Id of the set_todos item this update belongs to." },
     },
     additionalProperties: false,
   },

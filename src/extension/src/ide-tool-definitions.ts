@@ -29,15 +29,21 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "list_directory",
     vscodeToolName: "agentbridge_list_directory",
     capability: "read",
-    description: "List the immediate contents of a workspace directory. Use this to understand what is in a known directory; use find_files when searching by filename/path pattern. Depth is intentionally limited to 1 or 2.",
+    description: [
+      "List the entries of a workspace directory.",
+      "",
+      "- depth 1 (default) or 2; for deeper or pattern-based discovery use find_files.",
+      "- Dot entries and generated or ignored directories (node_modules, dist, .git) are hidden unless include_hidden or no_ignore is set.",
+      "- Returns up to 200 entries by default (max_entries up to 500).",
+    ].join("\n"),
     inputSchema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Workspace-relative directory path. Defaults to the workspace root." },
-        depth: { type: "integer", enum: [1, 2], default: 1, description: "Directory depth to list. Keep this small; use find_files for recursive discovery." },
+        depth: { type: "integer", enum: [1, 2], default: 1, description: "1 lists the directory itself; 2 also lists its subdirectories." },
         include_hidden: { type: "boolean", default: false, description: "Include dot-prefixed entries." },
         no_ignore: { type: "boolean", default: false, description: "Include common generated/ignored directories such as node_modules, dist and .git." },
-        max_entries: { type: "integer", minimum: 1, maximum: 500, default: 200, description: "Maximum returned entries." }
+        max_entries: { type: "integer", minimum: 1, maximum: 500, default: 200, description: "Maximum entries returned." }
       },
       additionalProperties: false
     }
@@ -46,15 +52,24 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "run_command",
     vscodeToolName: "agentbridge_run_command",
     capability: "execute",
-    description: "Run a shell command in an AgentBridge-managed persistent real PTY that is independent of the user's terminal profiles and VS Code Shell Integration. ${RUNTIME_SHELL_DESCRIPTION}. ${RUNTIME_SHELL_SYNTAX_HINT} Shell state such as environment variables, functions and the current directory persists when the same terminal is reused. Omit cwd to continue from the most recently used idle AgentBridge terminal's current directory; a new terminal starts at the workspace root. Interactive input, resize, and TTY-aware CLI behavior are supported. Concurrent commands may use additional managed terminals, up to 8 live terminals total; when all are busy, additional run_command calls fail until a terminal becomes available or a stuck command is terminated. Explicitly choose background=true for long-running servers/watchers and background=false for commands whose result should be awaited. Returns a command_id for later output inspection or interactive input.",
+    description: [
+      "Run a shell command in a persistent terminal managed by AgentBridge: ${RUNTIME_SHELL_DESCRIPTION}.",
+      "",
+      "- Set background explicitly: false to wait for the result, true for servers and watchers that keep running (returns at once with a command_id).",
+      `- A foreground command still running after timeout_ms (default and maximum ${RUN_COMMAND_MAX_FOREGROUND_WAIT_MS}) returns status=running with a command_id; it is not killed. Continue with get_command_output.`,
+      "- Terminal state (cwd, environment variables, functions) persists between calls. Omit cwd to continue in the last idle terminal's directory; a new terminal starts at the workspace root.",
+      "- Up to 8 terminals run at once; when all are busy the call fails until one finishes or is terminated.",
+      "- Interactive programs work; answer prompts with send_command_input.",
+      "- Syntax: ${RUNTIME_SHELL_SYNTAX_HINT}",
+    ].join("\n"),
     inputSchema: {
       type: "object",
       required: ["command", "background"],
       properties: {
-        command: { type: "string", minLength: 1, description: "Shell command to run." },
-        cwd: { type: "string", description: "Optional workspace-relative working directory. When omitted, reuse the most recently used idle AgentBridge terminal and continue from its current directory; a new terminal starts at the workspace root." },
-        background: { type: "boolean", description: "Whether this is expected to keep running. Must be chosen explicitly." },
-        timeout_ms: { type: "integer", minimum: 1000, maximum: RUN_COMMAND_MAX_FOREGROUND_WAIT_MS, default: RUN_COMMAND_MAX_FOREGROUND_WAIT_MS, description: "For foreground commands, maximum time to wait before returning status=running. The command is not killed on timeout; continue with get_command_output using the returned command_id and wait_ms. Capped below common proxy response deadlines." }
+        command: { type: "string", minLength: 1, description: "Command line to run." },
+        cwd: { type: "string", description: "Working directory relative to the workspace root. Omit to continue in the last idle terminal's directory." },
+        background: { type: "boolean", description: "true for commands that keep running (servers, watchers); false to wait for the result." },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: RUN_COMMAND_MAX_FOREGROUND_WAIT_MS, default: RUN_COMMAND_MAX_FOREGROUND_WAIT_MS, description: "Foreground only: how long to wait before returning status=running. The command keeps running." }
       },
       additionalProperties: false
     }
@@ -63,16 +78,22 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "get_command_output",
     vscodeToolName: "agentbridge_get_command_output",
     capability: "execute",
-    description: `Read new output and status from a previously started run_command using its command_id. Pass the previous next_offset as offset to avoid repeating old output. To wait for a still-running command, set wait_ms (at most ${GET_COMMAND_OUTPUT_MAX_WAIT_MS}) instead of calling this tool repeatedly: with wait_until=exit (default) it returns as soon as the command finishes, with wait_until=output as soon as any output past offset arrives, otherwise at the deadline with wait_result=timeout while the command keeps running. Do not poll in a tight loop and do not run sleep commands to wait. Only the ${MAX_RETAINED_FINISHED_COMMANDS} most recent finished commands are retained.`,
+    description: [
+      "Read new output and the status of a command started with run_command.",
+      "",
+      "- Pass the previous next_offset as offset to get only new output.",
+      `- To wait for a running command, set wait_ms (at most ${GET_COMMAND_OUTPUT_MAX_WAIT_MS}) instead of calling repeatedly or running sleep: wait_until=exit (default) returns when it finishes, wait_until=output as soon as new output arrives; otherwise it returns at the deadline with wait_result=timeout and the command keeps running.`,
+      `- Only the ${MAX_RETAINED_FINISHED_COMMANDS} most recent finished commands are kept.`,
+    ].join("\n"),
     inputSchema: {
       type: "object",
       required: ["command_id"],
       properties: {
-        command_id: { type: "string", minLength: 1 },
-        offset: { type: "integer", minimum: 0, default: 0, description: "Absolute UTF-8 byte offset into captured output." },
-        max_bytes: { type: "integer", minimum: 1, maximum: 131072, default: 32768 },
-        wait_ms: { type: "integer", minimum: 0, maximum: GET_COMMAND_OUTPUT_MAX_WAIT_MS, default: 0, description: "Optional time to block while the command is still running. 0 returns immediately. The result then includes wait_result (exited, output, timeout, or cancelled) and waited_ms." },
-        wait_until: { type: "string", enum: ["exit", "output"], default: "exit", description: "With wait_ms: exit returns when the command finishes; output returns as soon as new output past offset arrives (useful for servers and watchers)." }
+        command_id: { type: "string", minLength: 1, description: "Id returned by run_command." },
+        offset: { type: "integer", minimum: 0, default: 0, description: "Byte offset to read from; pass the previous next_offset." },
+        max_bytes: { type: "integer", minimum: 1, maximum: 131072, default: 32768, description: "Maximum output bytes returned in this call." },
+        wait_ms: { type: "integer", minimum: 0, maximum: GET_COMMAND_OUTPUT_MAX_WAIT_MS, default: 0, description: "How long to wait while the command is running; 0 returns immediately. The result then includes wait_result and waited_ms." },
+        wait_until: { type: "string", enum: ["exit", "output"], default: "exit", description: "exit: return when the command finishes. output: return as soon as new output arrives (useful for servers)." }
       },
       additionalProperties: false
     }
@@ -81,14 +102,19 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "send_command_input",
     vscodeToolName: "agentbridge_send_command_input",
     capability: "execute",
-    description: "Send text to a running managed terminal for prompts, REPLs, or other interactive input. A newline is appended by default. To request Ctrl+C, send \\u0003 with append_newline=false. Ctrl+C is cooperative and may leave the command running; check with get_command_output and use terminate_command when a hard stop is required.",
+    description: [
+      "Type input into a running command's terminal: answers to prompts, REPL lines, or control keys.",
+      "",
+      "- A newline is appended unless append_newline=false.",
+      "- Ctrl+C: input=\"\\u0003\" with append_newline=false. It may not stop the command; check with get_command_output and use terminate_command for a hard stop.",
+    ].join("\n"),
     inputSchema: {
       type: "object",
       required: ["command_id", "input"],
       properties: {
-        command_id: { type: "string", minLength: 1 },
-        input: { type: "string" },
-        append_newline: { type: "boolean", default: true }
+        command_id: { type: "string", minLength: 1, description: "Id returned by run_command." },
+        input: { type: "string", description: "Text to send. Use \\u0003 for Ctrl+C." },
+        append_newline: { type: "boolean", default: true, description: "Press Enter after the input." }
       },
       additionalProperties: false
     }
@@ -97,12 +123,18 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "terminate_command",
     vscodeToolName: "agentbridge_terminate_command",
     capability: "execute",
-    description: "Hard-stop a running AgentBridge command by terminating its managed shell and closing that terminal. Terminal-local state such as cwd, environment changes, and history is discarded. Use when cooperative Ctrl+C did not stop the command and get_command_output still reports status=running. To try Ctrl+C first, call send_command_input with input=\"\\u0003\" and append_newline=false. Calling this for an already-finished command is idempotent and returns its current status.",
+    description: [
+      "Force-stop a running command by closing its terminal.",
+      "",
+      "- Use when Ctrl+C through send_command_input did not stop it.",
+      "- The terminal's state (cwd, environment variables, history) is lost.",
+      "- Safe to call on a finished command; it returns the current status.",
+    ].join("\n"),
     inputSchema: {
       type: "object",
       required: ["command_id"],
       properties: {
-        command_id: { type: "string", minLength: 1 }
+        command_id: { type: "string", minLength: 1, description: "Id returned by run_command." }
       },
       additionalProperties: false
     }
@@ -111,18 +143,24 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "get_diagnostics",
     vscodeToolName: "agentbridge_get_diagnostics",
     capability: "read",
-    description: "Read current diagnostics from VS Code and active language services, including unsaved editor state when providers report it. Use after edits/builds to inspect errors and warnings structurally instead of parsing compiler output when diagnostics are available.",
+    description: [
+      "Read the errors and warnings VS Code currently reports (the Problems panel), including for unsaved edits.",
+      "",
+      "- Use after edits or builds instead of parsing compiler output.",
+      "- Filter with path and severity; returns up to 100 results by default (max_results up to 500).",
+      "- Language services may only report files they have analyzed; run the build or tests to check everything.",
+    ].join("\n"),
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Optional workspace-relative file or directory scope." },
+        path: { type: "string", description: "File or directory to limit results to, relative to the workspace root." },
         severity: {
           type: "array",
           items: { type: "string", enum: ["error", "warning", "information", "hint"] },
           uniqueItems: true,
-          description: "Optional severity filter. Defaults to all severities."
+          description: "Severities to include. Defaults to all."
         },
-        max_results: { type: "integer", minimum: 1, maximum: 500, default: 100 }
+        max_results: { type: "integer", minimum: 1, maximum: 500, default: 100, description: "Maximum diagnostics returned." }
       },
       additionalProperties: false
     }
@@ -131,7 +169,13 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
     name: "lsp",
     vscodeToolName: "agentbridge_lsp",
     capability: "read",
-    description: "Navigate code semantically through the language services already active in VS Code. Use this for code symbols rather than text search: workspace/document symbols, go-to-definition, references, implementations, and hover/type information. Results include provider_state, project_anchor, project_anchor_source, warmup_performed, and semantic_result_inconclusive metadata so empty semantic results and heuristic warm-up anchors are not over-interpreted. Use search_files for raw text and read_files after lsp locates the relevant implementation.",
+    description: [
+      "Navigate code by symbols using the language services running in VS Code.",
+      "",
+      "- operation: workspace_symbols (needs query), document_symbols (needs path), or definition, references, implementation, hover (need path, line, and column, all 1-based).",
+      "- Use search_files for plain text and read_files to read the code lsp finds.",
+      "- An empty result can mean the language service is not ready or does not cover the file; check provider_state and semantic_result_inconclusive before concluding a symbol does not exist.",
+    ].join("\n"),
     inputSchema: {
       type: "object",
       required: ["operation"],
@@ -139,9 +183,9 @@ export const IDE_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = [
         operation: {
           type: "string",
           enum: ["workspace_symbols", "document_symbols", "definition", "references", "implementation", "hover"],
-          description: "Semantic operation to execute through VS Code language feature providers."
+          description: "What to look up."
         },
-        path: { type: "string", description: "Workspace source path. Workspace-relative is preferred; absolute paths are accepted only when they remain inside the workspace. Required for document_symbols/definition/references/implementation/hover. Optional for workspace_symbols as a project/file/directory anchor to activate the relevant language project before semantic search." },
+        path: { type: "string", description: "Source file relative to the workspace root. Required except for workspace_symbols, where it optionally points at the project to search." },
         line: { type: "integer", minimum: 1, description: "1-based source line. Required for definition/references/implementation/hover." },
         column: { type: "integer", minimum: 1, description: "1-based UTF-16 source column. Required for definition/references/implementation/hover." },
         query: { type: "string", description: "Symbol query. Required for workspace_symbols." },
