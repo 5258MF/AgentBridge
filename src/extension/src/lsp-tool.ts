@@ -10,6 +10,15 @@ const WORKSPACE_SYMBOL_WARMUP_MAX_CANDIDATES = 64;
 const WORKSPACE_SYMBOL_WARMUP_MAX_DOCUMENTS = 3;
 const WORKSPACE_SYMBOL_SOURCE_EXTENSIONS = "{ts,tsx,js,jsx,mts,cts,mjs,cjs,py,pyi,go,rs,java,kt,kts,cs,c,cc,cpp,cxx,h,hpp,hxx,rb,php,swift,scala,lua}";
 const WORKSPACE_SYMBOL_EXCLUDE_GLOB = "{**/.git/**,**/.carrier/**,**/node_modules/**,**/dist/**,**/build/**,**/coverage/**,**/.next/**,**/target/**,**/vendor/**}";
+/**
+ * Backoff before re-running a query that came back empty for a document this call had to open.
+ * Through the public API a language server that is still loading the project answers with the
+ * same empty array as "nothing here", so a cold call waits at most ~2.6 s for a real answer.
+ */
+const COLD_START_RETRY_DELAYS_MS: readonly number[] = [300, 800, 1500];
+const EMPTY_SEMANTIC_RESULT_NOTE = "note: An empty result does not prove absence. The language provider may still be loading this project, or none covers this file. Retry shortly, or fall back to search_files/read_files.";
+
+let coldStartRetryDelaysMs: readonly number[] = COLD_START_RETRY_DELAYS_MS;
 
 type LspOperation =
   | "workspace_symbols"
@@ -30,6 +39,14 @@ interface LspProviderMetadata {
   projectAnchorSource: LspProjectAnchorSource;
   warmupPerformed: boolean;
   semanticResultInconclusive: boolean;
+}
+
+interface ColdStartRetryResult<T> {
+  results: T[];
+  /** Result count of the first query, before any retry. */
+  initialResults: number;
+  /** Queries run after the first one; 0 when the first answer was used. */
+  retryAttempts: number;
 }
 
 interface LspLocationRow {
@@ -183,11 +200,19 @@ async function warmWorkspaceSymbolProjects(query: string, anchor?: { relative: s
   return opened;
 }
 
-async function resolvePosition(input: Record<string, unknown>): Promise<{ root: string; relative: string; uri: vscode.Uri; position: vscode.Position; languageId: string }> {
+async function resolvePosition(input: Record<string, unknown>): Promise<{
+  root: string;
+  relative: string;
+  uri: vscode.Uri;
+  position: vscode.Position;
+  languageId: string;
+  documentWasOpen: boolean;
+}> {
   const file = await resolveWorkspaceFile(asString(input.path));
   if (!Number.isInteger(input.line) || Number(input.line) < 1) throw new Error("line must be a 1-based integer >= 1");
   if (!Number.isInteger(input.column) || Number(input.column) < 1) throw new Error("column must be a 1-based integer >= 1");
 
+  const documentWasOpen = isDocumentOpen(file.uri);
   const document = await vscode.workspace.openTextDocument(file.uri);
   const lineIndex = Number(input.line) - 1;
   if (lineIndex >= document.lineCount) {
@@ -203,6 +228,65 @@ async function resolvePosition(input: Record<string, unknown>): Promise<{ root: 
     ...file,
     position: new vscode.Position(lineIndex, character),
     languageId: document.languageId,
+    documentWasOpen,
+  };
+}
+
+/** Whether VS Code already had this document open before the current call. */
+function isDocumentOpen(uri: vscode.Uri): boolean {
+  const key = uri.toString();
+  return vscode.workspace.textDocuments.some((document) => document.uri.toString() === key);
+}
+
+function delay(ms: number, token?: vscode.CancellationToken): Promise<void> {
+  return new Promise((resolve) => {
+    if (token?.isCancellationRequested) {
+      resolve();
+      return;
+    }
+    let subscription: vscode.Disposable | undefined;
+    const timer = setTimeout(() => {
+      subscription?.dispose();
+      resolve();
+    }, ms);
+    subscription = token?.onCancellationRequested(() => {
+      clearTimeout(timer);
+      subscription?.dispose();
+      resolve();
+    });
+  });
+}
+
+/**
+ * Runs a semantic query and, only when it returns nothing for a document this call had to open,
+ * runs it again after each backoff step until it returns something. A document that was already
+ * open is known to its language server, so an empty answer there is returned at once.
+ */
+async function queryWithColdStartRetry<T>(
+  query: () => Thenable<T[] | undefined>,
+  documentWasOpen: boolean,
+  token?: vscode.CancellationToken,
+): Promise<ColdStartRetryResult<T>> {
+  let results = await query() ?? [];
+  const initialResults = results.length;
+  let retryAttempts = 0;
+  if (initialResults > 0 || documentWasOpen) return { results, initialResults, retryAttempts };
+  for (const ms of coldStartRetryDelaysMs) {
+    await delay(ms, token);
+    if (token?.isCancellationRequested) break;
+    retryAttempts += 1;
+    results = await query() ?? [];
+    if (results.length > 0) break;
+  }
+  return { results, initialResults, retryAttempts };
+}
+
+/** Test hook: replaces the cold-start backoff and returns a function that restores the previous one. */
+export function setLspColdStartRetryDelaysForTests(delays: readonly number[]): () => void {
+  const previous = coldStartRetryDelaysMs;
+  coldStartRetryDelaysMs = [...delays];
+  return () => {
+    coldStartRetryDelaysMs = previous;
   };
 }
 
@@ -292,15 +376,26 @@ function resultProviderMetadata(
   resultCount: number,
   projectAnchor?: string,
   projectAnchorSource: LspProjectAnchorSource = projectAnchor ? "explicit" : "none",
+  warmupPerformed = false,
 ): LspProviderMetadata {
   return {
     providerState: resultCount > 0 ? "ready" : "unknown",
     providerStateBasis: resultCount > 0 ? "semantic_results" : "public_api_ambiguous_empty_result",
     projectAnchor,
     projectAnchorSource,
-    warmupPerformed: false,
+    warmupPerformed,
     semanticResultInconclusive: resultCount === 0,
   };
+}
+
+/** Retry metadata for the document-scoped operations, in the same terms as workspace_symbols. */
+function coldStartRetryLines(documentWasOpen: boolean, retry: ColdStartRetryResult<unknown>): string[] {
+  return [
+    `document_already_open: ${documentWasOpen}`,
+    `initial_results: ${retry.initialResults}`,
+    `retry_attempts: ${retry.retryAttempts}`,
+    `provider_state_before_retry: ${retry.retryAttempts > 0 ? "warming" : "null"}`,
+  ];
 }
 
 function emitEnvelope(
@@ -358,6 +453,7 @@ async function locationOperation(
   operation: "definition" | "references" | "implementation",
   input: Record<string, unknown>,
   maxResults: number,
+  token?: vscode.CancellationToken,
 ): Promise<string> {
   const source = await resolvePosition(input);
   const command = operation === "definition"
@@ -365,9 +461,13 @@ async function locationOperation(
     : operation === "references"
       ? "vscode.executeReferenceProvider"
       : "vscode.executeImplementationProvider";
-  const raw = await vscode.commands.executeCommand<Array<vscode.Location | vscode.LocationLink> | undefined>(command, source.uri, source.position);
-  let rows = (raw ?? []).map(locationRow);
-  const providerMetadata = resultProviderMetadata(rows.length, source.relative);
+  const retry = await queryWithColdStartRetry(
+    () => vscode.commands.executeCommand<Array<vscode.Location | vscode.LocationLink> | undefined>(command, source.uri, source.position),
+    source.documentWasOpen,
+    token,
+  );
+  let rows = retry.results.map(locationRow);
+  const providerMetadata = resultProviderMetadata(rows.length, source.relative, "explicit", retry.retryAttempts > 0);
 
   if (operation === "references" && !asBoolean(input.include_declaration, true) && rows.length > 0) {
     const definitions = await vscode.commands.executeCommand<Array<vscode.Location | vscode.LocationLink> | undefined>(
@@ -383,8 +483,10 @@ async function locationOperation(
     `source: ${JSON.stringify(source.relative)}`,
     `position: ${positionText(source.position)}`,
     `language_id: ${JSON.stringify(source.languageId)}`,
+    ...coldStartRetryLines(source.documentWasOpen, retry),
     ...providerMetadataLines(providerMetadata),
     ...(operation === "references" ? [`include_declaration: ${asBoolean(input.include_declaration, true)}`] : []),
+    ...(providerMetadata.semanticResultInconclusive ? [EMPTY_SEMANTIC_RESULT_NOTE] : []),
   ]);
 }
 
@@ -447,14 +549,21 @@ async function workspaceSymbols(input: Record<string, unknown>, maxResults: numb
   ], blocks, symbols.length, maxResults);
 }
 
-async function documentSymbols(input: Record<string, unknown>, maxResults: number): Promise<string> {
+async function documentSymbols(input: Record<string, unknown>, maxResults: number, token?: vscode.CancellationToken): Promise<string> {
   const file = await resolveWorkspaceFile(asString(input.path));
   const roots = await canonicalWorkspaceRoots();
+  const documentWasOpen = isDocumentOpen(file.uri);
   const document = await vscode.workspace.openTextDocument(file.uri);
-  const symbols = await vscode.commands.executeCommand<Array<vscode.SymbolInformation | vscode.DocumentSymbol> | undefined>(
-    "vscode.executeDocumentSymbolProvider",
-    file.uri,
-  ) ?? [];
+  const retry = await queryWithColdStartRetry(
+    () => vscode.commands.executeCommand<Array<vscode.SymbolInformation | vscode.DocumentSymbol> | undefined>(
+      "vscode.executeDocumentSymbolProvider",
+      file.uri,
+    ),
+    documentWasOpen,
+    token,
+  );
+  const symbols = retry.results;
+  const providerMetadata = resultProviderMetadata(symbols.length, file.relative, "explicit", retry.retryAttempts > 0);
   const blocks = symbols.map((symbol, index) => {
     if ("location" in symbol) {
       const display = uriDisplay(roots, symbol.location.uri);
@@ -482,13 +591,21 @@ async function documentSymbols(input: Record<string, unknown>, maxResults: numbe
   return emitEnvelope("document_symbols", [
     `path: ${JSON.stringify(file.relative)}`,
     `language_id: ${JSON.stringify(document.languageId)}`,
-    ...providerMetadataLines(resultProviderMetadata(symbols.length, file.relative)),
+    ...coldStartRetryLines(documentWasOpen, retry),
+    ...providerMetadataLines(providerMetadata),
+    ...(providerMetadata.semanticResultInconclusive ? [EMPTY_SEMANTIC_RESULT_NOTE] : []),
   ], blocks, symbols.length, maxResults);
 }
 
-async function hover(input: Record<string, unknown>, maxResults: number): Promise<string> {
+async function hover(input: Record<string, unknown>, maxResults: number, token?: vscode.CancellationToken): Promise<string> {
   const source = await resolvePosition(input);
-  const hovers = await vscode.commands.executeCommand<vscode.Hover[] | undefined>("vscode.executeHoverProvider", source.uri, source.position) ?? [];
+  const retry = await queryWithColdStartRetry(
+    () => vscode.commands.executeCommand<vscode.Hover[] | undefined>("vscode.executeHoverProvider", source.uri, source.position),
+    source.documentWasOpen,
+    token,
+  );
+  const hovers = retry.results;
+  const providerMetadata = resultProviderMetadata(hovers.length, source.relative, "explicit", retry.retryAttempts > 0);
   let contentTruncated = false;
   const blocks = hovers.map((item, index) => {
     const bounded = boundedText(item.contents.map(markdownText).filter(Boolean).join("\n\n"), MAX_HOVER_ITEM_CHARS);
@@ -505,12 +622,14 @@ async function hover(input: Record<string, unknown>, maxResults: number): Promis
     `source: ${JSON.stringify(source.relative)}`,
     `position: ${positionText(source.position)}`,
     `language_id: ${JSON.stringify(source.languageId)}`,
-    ...providerMetadataLines(resultProviderMetadata(hovers.length, source.relative)),
+    ...coldStartRetryLines(source.documentWasOpen, retry),
+    ...providerMetadataLines(providerMetadata),
     `content_truncated: ${contentTruncated}`,
+    ...(providerMetadata.semanticResultInconclusive ? [EMPTY_SEMANTIC_RESULT_NOTE] : []),
   ], blocks, hovers.length, maxResults);
 }
 
-export async function invokeLspTool(input: Record<string, unknown>): Promise<string> {
+export async function invokeLspTool(input: Record<string, unknown>, token?: vscode.CancellationToken): Promise<string> {
   const operation = asString(input.operation) as LspOperation;
   const validOperations = new Set<LspOperation>([
     "workspace_symbols",
@@ -526,11 +645,11 @@ export async function invokeLspTool(input: Record<string, unknown>): Promise<str
   const maxResults = asInteger(input.max_results, operationDefaultMax(operation), 1, HARD_MAX_RESULTS);
   switch (operation) {
     case "workspace_symbols": return workspaceSymbols(input, maxResults);
-    case "document_symbols": return documentSymbols(input, maxResults);
-    case "definition": return locationOperation("definition", input, maxResults);
-    case "references": return locationOperation("references", input, maxResults);
-    case "implementation": return locationOperation("implementation", input, maxResults);
-    case "hover": return hover(input, maxResults);
+    case "document_symbols": return documentSymbols(input, maxResults, token);
+    case "definition": return locationOperation("definition", input, maxResults, token);
+    case "references": return locationOperation("references", input, maxResults, token);
+    case "implementation": return locationOperation("implementation", input, maxResults, token);
+    case "hover": return hover(input, maxResults, token);
   }
 }
 

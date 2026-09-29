@@ -1978,7 +1978,7 @@ export class IdeToolBroker implements vscode.Disposable {
       case "send_command_input": return this.terminalResult(name, input, this.terminalManager.sendInput(input));
       case "terminate_command": return this.terminalResult(name, input, this.terminalManager.terminate(input));
       case "get_diagnostics": return toolResult(getDiagnostics(input));
-      case "lsp": return toolResult(await invokeLspTool(input));
+      case "lsp": return toolResult(await invokeLspTool(input, token));
       default: throw new ToolError("UNKNOWN_TOOL", `Unsupported IDE tool: ${name}`);
     }
   }

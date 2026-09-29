@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 type ConfigChangeListener = (event: { affectsConfiguration(section: string): boolean }) => void;
 
 const config = new Map<string, unknown>();
@@ -10,6 +12,9 @@ const information: string[] = [];
 const registeredCommands = new Map<string, (...args: any[]) => any>();
 const terminalCloseListeners = new Set<(terminal: any) => void>();
 const terminals: Array<{ name: string; show(preserveFocus?: boolean): void; dispose(): void }> = [];
+type ExecuteCommandHandler = (id: string, ...args: any[]) => unknown;
+let executeCommandHandler: ExecuteCommandHandler | undefined;
+const textDocuments: Array<{ uri: { toString(): string } }> = [];
 
 function fullKey(section: string, key: string): string {
   return section ? `${section}.${key}` : key;
@@ -38,6 +43,8 @@ export const vscodeTest = {
     registeredCommands.clear();
     terminalCloseListeners.clear();
     terminals.length = 0;
+    executeCommandHandler = undefined;
+    textDocuments.length = 0;
     config.set("agentbridge.language", "en");
     config.set("agentbridge.bridge.tunnelProvider", "cloudflare");
     config.set("agentbridge.bridge.tunnelProtocol", "auto");
@@ -59,6 +66,12 @@ export const vscodeTest = {
   setUpdateHandler(handler: typeof updateHandler): void {
     updateHandler = handler;
   },
+  /** Answers `commands.executeCommand` (e.g. the `vscode.execute*Provider` commands) until reset. */
+  setExecuteCommandHandler(handler: ExecuteCommandHandler | undefined): void {
+    executeCommandHandler = handler;
+  },
+  /** Documents VS Code reports as open; `openTextDocument` on a file adds to it, as in VS Code. */
+  textDocuments,
   getCommand<T extends (...args: any[]) => any>(id: string): T {
     const command = registeredCommands.get(id);
     if (!command) throw new Error(`Command not registered: ${id}`);
@@ -171,8 +184,20 @@ export const workspace = {
   updateWorkspaceFolders(): boolean {
     return true;
   },
+  textDocuments,
   async openTextDocument(input: unknown) {
-    return { uri: input };
+    const fsPath = (input as { fsPath?: unknown } | undefined)?.fsPath;
+    if (typeof fsPath !== "string") return { uri: input };
+    const uri = input as { toString(): string };
+    const lines = readFileSync(fsPath, "utf8").split(/\r?\n/);
+    const document = {
+      uri,
+      languageId: /\.[cm]?tsx?$/.test(fsPath) ? "typescript" : "plaintext",
+      lineCount: lines.length,
+      lineAt: (line: number) => ({ text: lines[line] ?? "" }),
+    };
+    if (!textDocuments.some((open) => open.uri.toString() === uri.toString())) textDocuments.push(document);
+    return document;
   },
 };
 
@@ -249,8 +274,8 @@ export const window = {
 };
 
 export const commands = {
-  async executeCommand(): Promise<undefined> {
-    return undefined;
+  async executeCommand(id: string, ...args: any[]): Promise<any> {
+    return executeCommandHandler?.(id, ...args);
   },
   registerCommand(id: string, callback: (...args: any[]) => any) {
     registeredCommands.set(id, callback);
