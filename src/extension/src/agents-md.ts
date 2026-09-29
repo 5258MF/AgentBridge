@@ -3,7 +3,8 @@
  * and DeepSeek Harness do.
  *
  * Baseline, sent when a session starts (broad to specific):
- *   1. ~/.agents/AGENTS.md (the user's own rules, next to ~/.agents/skills)
+ *   1. ~/.agents/AGENTS.md (the user's own rules, next to ~/.agents/skills), then
+ *      ~/.agentbridge/AGENTS.md (rules only for AgentBridge)
  *   2. for each workspace folder, every AGENTS.md from the enclosing git repository root down to
  *      the workspace folder (only the workspace folder itself when it is not inside a repository)
  * Directory files: an AGENTS.md in a subfolder of a workspace folder applies to files under it.
@@ -20,6 +21,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { AGENTBRIDGE_HOME_DIR } from "./agentbridge-home.js";
 
 export const AGENTS_FILE_NAME = "AGENTS.md";
 /** ~/.agents holds the user's AGENTS.md, as ~/.agents/skills holds the user's skills. */
@@ -41,7 +43,7 @@ export interface AgentsFile {
 
 export interface AgentsDiscoveryOptions {
   readonly workspaceRoots: readonly string[];
-  /** The user's home directory; ~/.agents/AGENTS.md lives under it. Omit to skip it. */
+  /** The user's home directory; ~/.agents/AGENTS.md and ~/.agentbridge/AGENTS.md live under it. Omit to skip them. */
   readonly homeDir?: string;
 }
 
@@ -103,7 +105,10 @@ export function discoverAgentsFiles(options: AgentsDiscoveryOptions): AgentsFile
     seen.add(key);
     files.push({ path: path.resolve(file), content, scope });
   };
-  if (options.homeDir) add(path.join(options.homeDir, USER_AGENTS_DIR, AGENTS_FILE_NAME), "user");
+  if (options.homeDir) {
+    add(path.join(options.homeDir, USER_AGENTS_DIR, AGENTS_FILE_NAME), "user");
+    add(path.join(options.homeDir, AGENTBRIDGE_HOME_DIR, AGENTS_FILE_NAME), "user");
+  }
   for (const root of options.workspaceRoots) {
     for (const dir of projectDirectories(root)) add(path.join(dir, AGENTS_FILE_NAME), "project");
   }

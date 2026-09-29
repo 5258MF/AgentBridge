@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { ensureAgentBridgeHome } from "../src/extension/src/agentbridge-home.js";
 import { BridgeManager } from "../src/extension/src/bridge-server.js";
 import { BRIDGE_TOOL_DEFINITIONS, READ_ONLY_BLOCKED_TOOL_NAMES } from "../src/extension/src/server-instructions.js";
 import {
@@ -15,6 +16,7 @@ import {
   parseSkillFrontmatter,
   renderLoadSkillDescription,
   SKILL_CATALOG_PLACEHOLDER,
+  skillRoots,
 } from "../src/extension/src/skills.js";
 import { vscodeTest, workspace } from "./helpers/fake-vscode.js";
 
@@ -113,6 +115,61 @@ test("discovery: workspace roots first, then ~/.agents/skills; first name wins; 
 
   const none = await discoverSkills({ workspaceRoots: [tempDir()], homeDir: undefined });
   assert.deepEqual(none, { skills: [], warnings: [] }, "missing skill folders are not an error");
+});
+
+function writeSkillAt(skillsRoot: string, folder: string, description: string): void {
+  fs.mkdirSync(path.join(skillsRoot, folder), { recursive: true });
+  fs.writeFileSync(path.join(skillsRoot, folder, "SKILL.md"), `---\nname: ${folder}\ndescription: ${description}\n---\n\nBody.\n`);
+}
+
+test("discovery: .agentbridge/skills before .agents/skills, workspace folders before the home directory", async () => {
+  const ws = tempDir();
+  const home = tempDir();
+  assert.deepEqual(skillRoots({ workspaceRoots: [ws], homeDir: home }).map((root) => [path.relative(root.source === "workspace" ? ws : home, root.root), root.source]), [
+    [path.join(".agentbridge", "skills"), "workspace"],
+    [path.join(".agents", "skills"), "workspace"],
+    [path.join(".agentbridge", "skills"), "user"],
+    [path.join(".agents", "skills"), "user"],
+  ]);
+
+  // "shared" exists in all four roots, "user-tool" in both home roots, "ws-tool" in both workspace roots.
+  for (const [base, dir] of [[ws, ".agentbridge"], [ws, ".agents"], [home, ".agentbridge"], [home, ".agents"]] as const) {
+    writeSkillAt(path.join(base, dir, "skills"), "shared", `From ${base === ws ? "workspace" : "home"} ${dir}.`);
+  }
+  writeSkillAt(path.join(ws, ".agentbridge", "skills"), "ws-tool", "Workspace AgentBridge.");
+  writeSkillAt(path.join(ws, ".agents", "skills"), "ws-tool", "Workspace shared.");
+  writeSkillAt(path.join(home, ".agentbridge", "skills"), "user-tool", "Home AgentBridge.");
+  writeSkillAt(path.join(home, ".agents", "skills"), "user-tool", "Home shared.");
+  writeSkillAt(path.join(home, ".agents", "skills"), "only-shared", "Only in ~/.agents.");
+  writeSkillAt(path.join(home, ".agentbridge", "skills", ".system"), "codex-style", "Hidden folders are not scanned.");
+
+  const { skills, warnings } = await discoverSkills({ workspaceRoots: [ws], homeDir: home });
+  const byName = new Map(skills.map((skill) => [skill.name, skill]));
+  assert.deepEqual([...byName.keys()].sort(), ["only-shared", "shared", "user-tool", "ws-tool"]);
+  assert.equal(byName.get("shared")?.description, "From workspace .agentbridge.");
+  assert.equal(byName.get("shared")?.workspacePath, ".agentbridge/skills/shared/SKILL.md");
+  assert.equal(byName.get("ws-tool")?.description, "Workspace AgentBridge.");
+  assert.equal(byName.get("user-tool")?.description, "Home AgentBridge.");
+  assert.equal(byName.get("user-tool")?.source, "user");
+  assert.equal(byName.get("only-shared")?.description, "Only in ~/.agents.");
+  assert.equal(warnings.filter((warning) => warning.includes("already provided")).length, 5, "every shadowed copy is reported");
+
+  const loaded = await loadSkill({ name: "user-tool" }, { workspaceRoots: [ws], homeDir: home });
+  assert.equal(loaded.structuredContent.directory, path.join(home, ".agentbridge", "skills", "user-tool"));
+});
+
+test("ensureAgentBridgeHome creates ~/.agentbridge/skills once and never throws", async () => {
+  const home = tempDir();
+  const skillsDir = path.join(home, ".agentbridge", "skills");
+  assert.deepEqual(await ensureAgentBridgeHome(home), { skillsDir, created: true });
+  assert.ok(fs.statSync(skillsDir).isDirectory());
+  assert.deepEqual(await ensureAgentBridgeHome(home), { skillsDir, created: false }, "an existing folder is left alone");
+
+  const blocked = tempDir();
+  fs.writeFileSync(path.join(blocked, ".agentbridge"), "a file where the folder should be");
+  const result = await ensureAgentBridgeHome(blocked);
+  assert.equal(result.created, false);
+  assert.ok(result.error, "the failure is reported, not thrown");
 });
 
 test("catalog text and tool definition", async () => {

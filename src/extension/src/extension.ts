@@ -1,5 +1,7 @@
 import fs from "node:fs";
+import os from "node:os";
 import * as vscode from "vscode";
+import { ensureAgentBridgeHome } from "./agentbridge-home.js";
 import { BridgeManager, BridgeStartCancelledError, type BridgeStatus } from "./bridge-server.js";
 import { BridgePanelProvider } from "./bridge-panel.js";
 import { IdeToolBroker, invalidateManagedShellCache } from "./ide-tool-broker.js";
@@ -53,6 +55,11 @@ export function activate(context: vscode.ExtensionContext): void {
   const bridge = new BridgeManager(context, output, ideToolBroker);
   activeBridge = bridge;
   const bridgeReady = bridge.initialize();
+  // ~/.agentbridge/skills, so users see where AgentBridge-only skills go. Never blocks activation.
+  void ensureAgentBridgeHome(os.homedir()).then((home) => {
+    if (home.created) output.appendLine(`[agentbridge-home] created ${home.skillsDir}`);
+    else if (home.error) output.appendLine(`[agentbridge-home] could not create ${home.skillsDir}: ${home.error}`);
+  });
 
   // Status bar item — the primary UI in regular VS Code (no Carrier Bridge panel).
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);

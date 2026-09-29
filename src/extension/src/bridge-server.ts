@@ -432,7 +432,7 @@ export class BridgeManager implements vscode.Disposable {
   private namedTunnelLocalPort = DEFAULT_CLOUDFLARE_NAMED_LOCAL_PORT;
   private routeToken = "";
   private readOnlyMode = false;
-  /** Home directory whose .agents folder holds the user's skills and AGENTS.md; tests point it at a temp folder. */
+  /** Home directory whose .agentbridge and .agents folders hold the user's skills and AGENTS.md; tests point it at a temp folder. */
   private agentsHomeDir: string | undefined = os.homedir();
   private readonly sessions = new Map<string, McpSession>();
   private pendingInitializations = 0;
@@ -2754,7 +2754,7 @@ export class BridgeManager implements vscode.Disposable {
 
   /**
    * Where skills and AGENTS.md are looked up: every workspace folder (none open is fine) and the
-   * user's home directory (~/.agents/skills, ~/.agents/AGENTS.md).
+   * user's home directory (~/.agentbridge and ~/.agents: skills/ and AGENTS.md).
    */
   private agentsDiscoveryOptions(): { workspaceRoots: string[]; homeDir?: string } {
     return {

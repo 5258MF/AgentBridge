@@ -8,16 +8,25 @@
  * bodies through load_skill. load_skill reads only inside discovered skill folders, so user
  * skills outside the workspace do not open the rest of the disk to read_files.
  *
- * Roots, in priority order (the first skill with a given name wins):
- *   1. <workspace folder>/.agents/skills, for each workspace folder in order
- *   2. ~/.agents/skills
- * Only direct children are skills (<root>/<name>/SKILL.md); nested SKILL.md files are ignored.
+ * Roots, in priority order (the first skill with a given name wins). As in pi (~/.pi/agent/skills)
+ * and DeepSeek Harness (.dsh/skills), AgentBridge's own folders come before the shared .agents
+ * folders at each level:
+ *   1. <workspace folder>/.agentbridge/skills, then <workspace folder>/.agents/skills, for each
+ *      workspace folder in order
+ *   2. ~/.agentbridge/skills
+ *   3. ~/.agents/skills
+ * A missing root is skipped. Only direct children are skills (<root>/<name>/SKILL.md); nested
+ * SKILL.md files and hidden folders (such as Codex's .system) are ignored.
  */
 import { promises as fsp } from "node:fs";
 import path from "node:path";
+import { AGENTBRIDGE_SKILLS_DIR_SEGMENTS } from "./agentbridge-home.js";
 import { ToolError } from "./tool-errors.js";
 
+/** The shared location read by pi, opencode, DeepSeek Harness, and other agents. */
 export const SKILLS_DIR_SEGMENTS = [".agents", "skills"] as const;
+/** Skill folders under a workspace folder or the home directory, in priority order. */
+export const SKILL_DIRS: ReadonlyArray<readonly string[]> = [AGENTBRIDGE_SKILLS_DIR_SEGMENTS, SKILLS_DIR_SEGMENTS];
 export const SKILL_FILE_NAME = "SKILL.md";
 /** Agent Skills spec limits. */
 export const MAX_SKILL_NAME_LENGTH = 64;
@@ -57,7 +66,7 @@ export interface SkillEntry {
 
 export interface SkillDiscoveryOptions {
   readonly workspaceRoots: readonly string[];
-  /** The user's home directory; ~/.agents/skills lives under it. Omit to skip user skills. */
+  /** The user's home directory; ~/.agentbridge/skills and ~/.agents/skills live under it. Omit to skip user skills. */
   readonly homeDir?: string;
 }
 
@@ -77,7 +86,7 @@ export const LOAD_SKILL_TOOL = {
     "- Returns the SKILL.md instructions, the skill directory, and the other files in it. Relative paths in a skill are relative to that directory.",
     "- Pass file to read another text file of the skill, such as a reference document; run its scripts with run_command.",
     "- Omit name to list the skills again, including ones added after this list was sent.",
-    "- Skills come from .agents/skills in each workspace folder and from ~/.agents/skills; a workspace skill wins over a user skill with the same name.",
+    "- Skills come from .agentbridge/skills and .agents/skills in each workspace folder, then ~/.agentbridge/skills and ~/.agents/skills; when two share a name, the one found first wins.",
     "",
     SKILL_CATALOG_PLACEHOLDER,
   ].join("\n"),
@@ -226,8 +235,9 @@ function isTrue(value: string | undefined): boolean {
 
 export function skillRoots(options: SkillDiscoveryOptions): Array<{ root: string; source: SkillSource; workspaceRoot?: string }> {
   const roots: Array<{ root: string; source: SkillSource; workspaceRoot?: string }> = options.workspaceRoots
-    .map((workspaceRoot) => ({ root: path.join(workspaceRoot, ...SKILLS_DIR_SEGMENTS), source: "workspace" as const, workspaceRoot }));
-  if (options.homeDir) roots.push({ root: path.join(options.homeDir, ...SKILLS_DIR_SEGMENTS), source: "user" });
+    .flatMap((workspaceRoot) => SKILL_DIRS.map((segments) => ({ root: path.join(workspaceRoot, ...segments), source: "workspace" as const, workspaceRoot })));
+  const homeDir = options.homeDir;
+  if (homeDir) roots.push(...SKILL_DIRS.map((segments) => ({ root: path.join(homeDir, ...segments), source: "user" as const })));
   return roots;
 }
 
@@ -309,7 +319,7 @@ export async function discoverSkills(options: SkillDiscoveryOptions): Promise<Sk
 /** The catalog that replaces SKILL_CATALOG_PLACEHOLDER in the load_skill description. */
 export function formatSkillCatalog(skills: readonly SkillEntry[]): string {
   if (!skills.length) {
-    return "No skills are installed. A skill is a folder with a SKILL.md in .agents/skills of a workspace folder or in ~/.agents/skills.";
+    return "No skills are installed. A skill is a folder with a SKILL.md in .agentbridge/skills or .agents/skills of a workspace folder, or in ~/.agentbridge/skills or ~/.agents/skills.";
   }
   const shown = skills.slice(0, MAX_CATALOG_SKILLS);
   const automatic = shown.filter((skill) => !skill.onRequestOnly);

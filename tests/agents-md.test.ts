@@ -66,6 +66,20 @@ test("baseline: ~/.agents/AGENTS.md, then git root down to the workspace folder"
   assert.deepEqual(discoverAgentsFiles({ workspaceRoots: [loose, loose], homeDir: path.join(base, "nobody") }), []);
 });
 
+test("baseline: ~/.agentbridge/AGENTS.md follows ~/.agents/AGENTS.md", () => {
+  const { ws, home } = fixture();
+  write(path.join(home, ".agentbridge", "AGENTS.md"), "agentbridge rules");
+  const files = discoverAgentsFiles({ workspaceRoots: [ws], homeDir: home });
+  assert.deepEqual(files.slice(0, 2).map((file) => [file.scope, file.content, path.relative(home, file.path)]), [
+    ["user", "user rules", path.join(".agents", "AGENTS.md")],
+    ["user", "agentbridge rules", path.join(".agentbridge", "AGENTS.md")],
+  ]);
+  assert.equal(files[2]?.content, "repo rules", "project files still follow the user files");
+
+  fs.rmSync(path.join(home, ".agents", "AGENTS.md"));
+  assert.deepEqual(discoverAgentsFiles({ workspaceRoots: [], homeDir: home }).map((file) => file.content), ["agentbridge rules"], "either file works alone");
+});
+
 test("directory files: subfolders of the workspace, broad to specific, once", () => {
   const { ws } = fixture();
   write(path.join(ws, "pkg", "AGENTS.md"), "pkg rules");

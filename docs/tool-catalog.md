@@ -281,7 +281,7 @@ Load an Agent Skill: task-specific instructions kept in a SKILL.md file on this 
 - Returns the SKILL.md instructions, the skill directory, and the other files in it. Relative paths in a skill are relative to that directory.
 - Pass file to read another text file of the skill, such as a reference document; run its scripts with run_command.
 - Omit name to list the skills again, including ones added after this list was sent.
-- Skills come from .agents/skills in each workspace folder and from ~/.agents/skills; a workspace skill wins over a user skill with the same name.
+- Skills come from .agentbridge/skills and .agents/skills in each workspace folder, then ~/.agentbridge/skills and ~/.agents/skills; when two share a name, the one found first wins.
 
 ${RUNTIME_SKILL_CATALOG}
 ```
