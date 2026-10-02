@@ -1,6 +1,8 @@
 # Change Log
 
-## Unreleased
+## 0.1.17 (2026-10-02)
+
+- **Compact panel layout** — the workspace card now emphasizes Start/Stop, with a compact connection toolbar and consistent status badges. Tunnel providers use short selectable rows; the current provider's description and expandable setup requirements replace three fully expanded descriptions. Advanced settings use collapsible groups and show the available tool count; language switches retain expanded groups, including refreshes deferred until drafts are saved, and pause editing Origin/tunnel drafts until the switch finishes. Trusted Origin lists have a larger multiline editor, inline save controls, and expandable formatting rules; long entries stay on one line and scroll within the editor. Folded todos show the current task and completion progress, activity icons reflect call status, and compact connection statistics leave more room for activity history. Section headings match the MCP card, with consistent icons, spacing, and controls across light/dark themes and narrow sidebars.
 
 - **MCP lifecycle and credential protection** — HTTP shutdown now sends a bounded session DELETE, including SDK initialization failures, while Windows process-tree cleanup also covers SDK-initiated closure. Expired HTTP sessions recover for later calls without replaying failed operations; generation checks prevent overlapping manual/automatic reconnects. Per-request HTTP cancellation closes JSON/SSE streams and blocks cancelled SSE resumption while retaining active requests and shared notifications. HTTP redirects are rejected to keep custom credentials at the configured address. Credential redaction handles short values, multiline values, split UTF-8 stderr, and stale credential lookups; the editor schema rejects whitespace-only fields.
 

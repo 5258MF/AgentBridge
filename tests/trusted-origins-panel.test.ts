@@ -118,6 +118,89 @@ test("host save replies with effective configuration after a concurrent external
   assert.equal(saved.revision, 1);
 });
 
+test("switching language keeps expanded settings and Origin formatting rules open", async () => {
+  vscodeTest.reset();
+  vscodeTest.setConfig("agentbridge.language", "en");
+  const provider = new BridgePanelProvider(bridgeStub(), Promise.resolve());
+  const view = createFakeWebviewView();
+  provider.resolveWebviewView(view);
+  view.webview.receive({
+    type: "setLanguage", value: "zh-CN", advancedOpen: true,
+    expandedSections: ["securitySettingsSection", "exposedToolsSection", "trustedBrowserOriginsRules"],
+  });
+  await flushMicrotasks(16);
+  assert.match(view.webview.html, /<html lang="zh-CN">/);
+  for (const id of ["advancedCard", "securitySettingsSection", "exposedToolsSection", "trustedBrowserOriginsRules"]) {
+    const tag = view.webview.html.match(new RegExp(`<details[^>]*id="${id}"[^>]*>`))?.[0] ?? "";
+    assert.match(tag, /\sopen(?:\s|>)/, `${id} stays open after the language changes`);
+  }
+  const shellTag = view.webview.html.match(/<details[^>]*id="managedShellSection"[^>]*>/)?.[0] ?? "";
+  assert.doesNotMatch(shellTag, /\sopen(?:\s|>)/, "a closed section stays closed");
+});
+
+test("a language refresh deferred by an Origin draft restores sections after saving", async () => {
+  vscodeTest.reset();
+  vscodeTest.setConfig("agentbridge.language", "en");
+  const updateStarted = deferred<void>();
+  const updateGate = deferred<void>();
+  vscodeTest.setUpdateHandler(async ({ key, apply }) => {
+    if (key === "agentbridge.language") {
+      updateStarted.resolve();
+      await updateGate.promise;
+    }
+    apply();
+  });
+  const provider = new BridgePanelProvider(bridgeStub(), Promise.resolve());
+  const view = createFakeWebviewView();
+  provider.resolveWebviewView(view);
+  const before = view.webview.html;
+  view.webview.receive({
+    type: "setLanguage", value: "zh-CN", advancedOpen: true,
+    expandedSections: ["securitySettingsSection", "trustedBrowserOriginsRules"],
+  });
+  await updateStarted.promise;
+  view.webview.receive({ type: "trustedBrowserOriginsDirtyChanged", dirty: true });
+  await flushMicrotasks();
+  updateGate.resolve();
+  await flushMicrotasks(16);
+  assert.equal(view.webview.html, before, "the old page is retained while the user has an unsaved draft");
+
+  view.webview.receive({ type: "setTrustedBrowserOrigins", origins: ["https://draft.example"] });
+  await flushMicrotasks(16);
+  assert.match(view.webview.html, /<html lang="zh-CN">/);
+  assert.match(view.webview.html, /https:\/\/draft\.example/);
+  for (const id of ["advancedCard", "securitySettingsSection", "trustedBrowserOriginsRules"]) {
+    const tag = view.webview.html.match(new RegExp(`<details[^>]*id="${id}"[^>]*>`))?.[0] ?? "";
+    assert.match(tag, /\sopen(?:\s|>)/, `${id} stays open after the deferred refresh`);
+  }
+});
+
+test("language changes prevent new drafts and restore editing if the update fails", () => {
+  const harness = renderHarness();
+  harness.dispatchMessage({
+    type: "status", persistentMode: false,
+    status: {
+      state: "stopped", tunnelProvider: "cloudflare-named", tunnelChecked: true,
+      tunnelInstalled: true, tunnelConfigValid: true, configuredNamedDomain: "mcp.example.com",
+      namedTunnelLocalPort: 48271, namedTunnelTokenConfigured: true,
+      toolNames: [], todos: [], activities: [], sessions: [], revision: 1,
+    },
+  });
+  const inputs = ["trustedBrowserOriginsInput", "namedDomainInput", "namedTokenInput", "namedPortInput"];
+  for (const id of inputs) assert.equal(harness.element(id).disabled, false);
+  const language = harness.element("languageSelect");
+  language.value = "zh-CN";
+  language.dispatch("change");
+  assert.equal(harness.posted.at(-1)?.type, "setLanguage");
+  for (const id of inputs) assert.equal(harness.element(id).disabled, true, `${id} cannot accept a new draft during the refresh`);
+  const saveCalls = harness.posted.filter((message: any) => message?.type === "setTrustedBrowserOrigins").length;
+  harness.element("trustedBrowserOriginsSaveButton").dispatch("click");
+  assert.equal(harness.posted.filter((message: any) => message?.type === "setTrustedBrowserOrigins").length, saveCalls);
+  harness.dispatchMessage({ type: "operationFinished", operation: "setLanguage", succeeded: false });
+  for (const id of inputs) assert.equal(harness.element(id).disabled, false, `${id} is editable again after failure`);
+  assert.equal(language.value, "auto");
+});
+
 test("panel treats BridgeStartCancelledError as cancellation but reports ordinary errors", async () => {
   vscodeTest.reset();
   const cancelledProvider = new BridgePanelProvider(bridgeStub({

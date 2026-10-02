@@ -175,15 +175,7 @@
   function activityIconChar(activity) {
     if (activity.status === 'error') return '✕';
     if (activity.status === 'running') return '◌';
-    switch (activity.presentation && activity.presentation.kind) {
-      case 'files': return '🗎';
-      case 'search': return '⌕';
-      case 'edit': return '✎';
-      case 'terminal': return '⌨';
-      case 'diagnostics': return '⚠';
-      case 'lsp': return 'ƒ';
-      default: return '⚙';
-    }
+    return '✓';
   }
 
   function el(tag, className, text) {
@@ -212,7 +204,22 @@
     summary.appendChild(el('strong', null, t('todosTitle')));
     const count = todos.filter((t) => t.status === 'completed').length;
     summary.appendChild(el('span', 'agentbridge-todos-count', count + ' / ' + todos.length));
+    const chevron = el('span', 'agentbridge-section-arrow');
+    chevron.setAttribute('aria-hidden', 'true');
+    summary.appendChild(chevron);
+    const current = todos.find((todo) => todo.status === 'in_progress');
+    if (current) {
+      const preview = el('span', 'agentbridge-todos-current', t('current') + ' · ' + current.title);
+      preview.title = current.title;
+      summary.appendChild(preview);
+    }
     details.appendChild(summary);
+    const completion = el('span', 'agentbridge-todos-completion');
+    completion.setAttribute('aria-hidden', 'true');
+    const fill = el('span');
+    fill.style.width = (count / todos.length * 100) + '%';
+    completion.appendChild(fill);
+    summary.appendChild(completion);
     const body = el('div', 'agentbridge-todos-body');
     for (const todo of todos) {
       const row = el('div', 'agentbridge-todo ' + todo.status);
@@ -776,6 +783,7 @@
     }
 
     $('toolsContainer').textContent = '';
+    $('toolsCount').textContent = t('toolCountLabel', status.toolNames.length);
     for (const tool of status.toolNames) {
       const badge = document.createElement('span');
       const bridgeOnly = tool === 'get_todos' || tool === 'set_todos' || tool === 'report_progress';
@@ -792,6 +800,11 @@
     $('quickProvider').setAttribute('aria-checked', String(isQuick));
     $('namedProvider').setAttribute('aria-checked', String(isNamed));
     $('ngrokProvider').setAttribute('aria-checked', String(isNgrok));
+    const providerText = isNgrok ? 'ngrok' : isNamed ? 'named' : 'quick';
+    $('providerDescription').textContent = t(providerText + 'Summary');
+    $('providerAddressFact').textContent = t(providerText + 'FactAddr');
+    $('providerLimitFact').textContent = t(providerText + 'FactLimit');
+    $('providerConfigFact').textContent = t(providerText + 'FactConfig');
     $('domainField').style.display = isNgrok ? '' : 'none';
     $('namedConfiguration').style.display = isNamed ? '' : 'none';
     if (!domainInputDirty && document.activeElement !== $('domainInput')) {
@@ -878,13 +891,13 @@
     $('quickProvider').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
     $('namedProvider').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
     $('ngrokProvider').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
-    $('domainInput').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNgrok;
-    $('namedDomainInput').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed;
-    $('namedTokenInput').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed;
-    $('namedPortInput').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed;
+    $('domainInput').disabled = !statusLoaded || tunnelOperationBusy || languageChanging || running || starting || !isNgrok;
+    $('namedDomainInput').disabled = !statusLoaded || tunnelOperationBusy || languageChanging || running || starting || !isNamed;
+    $('namedTokenInput').disabled = !statusLoaded || tunnelOperationBusy || languageChanging || running || starting || !isNamed;
+    $('namedPortInput').disabled = !statusLoaded || tunnelOperationBusy || languageChanging || running || starting || !isNamed;
     $('copyOriginButton').disabled = !statusLoaded || !$('namedOriginValue').value;
-    $('saveNamedTunnelButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed || !$('namedDomainInput').value.trim() || !Number.isInteger(Number($('namedPortInput').value));
-    $('clearNamedTunnelTokenButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !isNamed || lastStatus.namedTunnelTokenConfigured !== true;
+    $('saveNamedTunnelButton').disabled = !statusLoaded || tunnelOperationBusy || languageChanging || running || starting || !isNamed || !$('namedDomainInput').value.trim() || !Number.isInteger(Number($('namedPortInput').value));
+    $('clearNamedTunnelTokenButton').disabled = !statusLoaded || tunnelOperationBusy || languageChanging || running || starting || !isNamed || lastStatus.namedTunnelTokenConfigured !== true;
     $('checkButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting;
     $('checkPublicHealthButton').disabled = !statusLoaded || busy || !running || lastStatus.publicHealthAvailable !== true || publicHealthCheckPending || lastStatus.publicHealthChecking === true;
     $('installCloudflaredButton').disabled = !statusLoaded || tunnelOperationBusy || running || starting || !canAutoInstallCloudflared || !(isQuick || isNamed) || lastStatus.tunnelInstalled !== false || lastStatus.cloudflaredInstallerAvailability !== 'available';
@@ -905,8 +918,8 @@
     $('tunnelProtocolQuic').disabled = !statusLoaded || busy;
     $('tunnelProtocolHttp2').disabled = !statusLoaded || busy;
     $('languageSelect').disabled = !statusLoaded || tunnelOperationBusy || languageChanging;
-    $('trustedBrowserOriginsInput').disabled = !statusLoaded || busy;
-    $('trustedBrowserOriginsSaveButton').disabled = !statusLoaded || busy;
+    $('trustedBrowserOriginsInput').disabled = !statusLoaded || busy || languageChanging;
+    $('trustedBrowserOriginsSaveButton').disabled = !statusLoaded || busy || languageChanging;
     updateSessionStartStopControl(lastStatus);
   }
 
@@ -1032,7 +1045,9 @@
     const expanded = group.hasAttribute('hidden');
     group.toggleAttribute('hidden', !expanded);
     $('moreSitesButton').setAttribute('aria-expanded', String(expanded));
-    $('moreSitesButton').textContent = expanded ? t('moreSitesOpen') : t('moreSites');
+    const label = expanded ? t('moreSitesOpen') : t('moreSites');
+    $('moreSitesButton').title = label;
+    $('moreSitesButton').setAttribute('aria-label', label);
   });
   $('copyPromptButton').addEventListener('click', () => vscode.postMessage({ type: 'copyPrompt' }));
   $('checkButton').addEventListener('click', () => {
@@ -1140,10 +1155,11 @@
     }
     languageChanging = true;
     updateControls();
-    vscode.postMessage({ type: 'setLanguage', value: nextLanguage, advancedOpen: $('advancedCard').open });
+    const expandedSections = [...document.querySelectorAll('#advancedCard details[id][open]')].map((section) => section.id);
+    vscode.postMessage({ type: 'setLanguage', value: nextLanguage, advancedOpen: $('advancedCard').open, expandedSections });
   });
   $('trustedBrowserOriginsSaveButton').addEventListener('click', () => {
-    if (busy) return;
+    if (busy || languageChanging) return;
     const origins = $('trustedBrowserOriginsInput').value
       .split(String.fromCharCode(10))
       .map((value) => value.trim())
@@ -1240,7 +1256,7 @@
     if (event.target && event.target.tagName === 'DETAILS' && event.target.classList.contains('agentbridge-todos')) {
       todoExpanded = event.target.open;
     }
-  });
+  }, true);
 
   window.addEventListener('message', (event) => {
     const message = event.data;

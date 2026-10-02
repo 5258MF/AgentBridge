@@ -95,10 +95,16 @@ const BUSY_PANEL_MESSAGE_TYPES = new Set([
   "setExternalMcpCredential",
 ]);
 
+const ADVANCED_SECTION_IDS = new Set([
+  "securitySettingsSection", "exposedToolsSection", "managedShellSection",
+  "tunnelTransportSection", "openModeSection", "trustedBrowserOriginsRules",
+]);
+
 export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
   private keepAdvancedOpenOnLanguageChange = false;
+  private keepAdvancedSectionsOpenOnLanguageChange: string[] = [];
   private namedTunnelInputDirty = false;
   private trustedBrowserOriginsInputDirty = false;
   private pendingLanguageRefresh = false;
@@ -115,6 +121,8 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
+    this.keepAdvancedOpenOnLanguageChange = false;
+    this.keepAdvancedSectionsOpenOnLanguageChange = [];
     this.namedTunnelInputDirty = false;
     this.trustedBrowserOriginsInputDirty = false;
     this.pendingLanguageRefresh = false;
@@ -157,14 +165,16 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       }
       if (!event.affectsConfiguration("agentbridge.language")) return;
       const advancedOpen = this.keepAdvancedOpenOnLanguageChange;
-      this.keepAdvancedOpenOnLanguageChange = false;
+      const advancedSectionsOpen = this.keepAdvancedSectionsOpenOnLanguageChange;
       if (this.namedTunnelInputDirty || this.trustedBrowserOriginsInputDirty) {
         this.pendingLanguageRefresh = true;
         return;
       }
+      this.keepAdvancedOpenOnLanguageChange = false;
+      this.keepAdvancedSectionsOpenOnLanguageChange = [];
       this.pendingLanguageRefresh = false;
       this.pendingTrustedBrowserOriginsRefresh = false;
-      webviewView.webview.html = this.renderHtml(advancedOpen);
+      webviewView.webview.html = this.renderHtml(advancedOpen, advancedSectionsOpen);
     });
     if (webviewView.visible) this.startPolling();
     webviewView.onDidChangeVisibility(() => {
@@ -176,6 +186,8 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       configurationSubscription.dispose();
       if (this.view !== webviewView) return;
       this.view = undefined;
+      this.keepAdvancedOpenOnLanguageChange = false;
+      this.keepAdvancedSectionsOpenOnLanguageChange = [];
       this.namedTunnelInputDirty = false;
       this.trustedBrowserOriginsInputDirty = false;
       this.pendingLanguageRefresh = false;
@@ -187,9 +199,13 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private flushDeferredConfigurationRefresh(sourceWebview: vscode.Webview): void {
     if (this.view?.webview !== sourceWebview) return;
     if (this.pendingLanguageRefresh && !this.namedTunnelInputDirty && !this.trustedBrowserOriginsInputDirty) {
+      const advancedOpen = this.keepAdvancedOpenOnLanguageChange;
+      const advancedSectionsOpen = this.keepAdvancedSectionsOpenOnLanguageChange;
+      this.keepAdvancedOpenOnLanguageChange = false;
+      this.keepAdvancedSectionsOpenOnLanguageChange = [];
       this.pendingLanguageRefresh = false;
       this.pendingTrustedBrowserOriginsRefresh = false;
-      sourceWebview.html = this.renderHtml();
+      sourceWebview.html = this.renderHtml(advancedOpen, advancedSectionsOpen);
       return;
     }
     if (this.pendingTrustedBrowserOriginsRefresh && !this.trustedBrowserOriginsInputDirty) {
@@ -535,10 +551,14 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
         if (v !== "auto" && v !== "zh-CN" && v !== "en") throw new Error("Invalid AgentBridge language value.");
         if (readLanguagePreference() === v) return;
         this.keepAdvancedOpenOnLanguageChange = message.advancedOpen === true;
+        this.keepAdvancedSectionsOpenOnLanguageChange = Array.isArray(message.expandedSections) && message.expandedSections.length <= ADVANCED_SECTION_IDS.size
+          ? message.expandedSections.filter((id): id is string => typeof id === "string" && ADVANCED_SECTION_IDS.has(id))
+          : [];
         try {
           await vscode.workspace.getConfiguration("agentbridge").update("language", v, vscode.ConfigurationTarget.Global);
         } catch (error) {
           this.keepAdvancedOpenOnLanguageChange = false;
+          this.keepAdvancedSectionsOpenOnLanguageChange = [];
           throw error;
         }
         return;
@@ -608,12 +628,13 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
-private renderHtml(advancedOpen = false): string {
+private renderHtml(advancedOpen = false, advancedSectionsOpen: readonly string[] = []): string {
     const lang = detectLang();
     const languagePreference = readLanguagePreference();
     const trustedBrowserOrigins = readConfiguredTrustedBrowserOrigins();
     const t = createTranslator(lang);
     const dict = lang === "zh" ? zhMessages : enMessages;
+    const sectionOpen = (id: string) => advancedSectionsOpen.includes(id) ? " open" : "";
     return /* html */ `<!DOCTYPE html>
  <html lang="${lang === "zh" ? "zh-CN" : "en"}">
  <head>
@@ -635,17 +656,20 @@ ${PANEL_CSS}</style>
   <div id="configSection">
   <div class="agentbridge-card agentbridge-hero">
     <div class="agentbridge-card-header">
-      <h2>AgentBridge</h2>
-      <span style="display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; align-items:center;">
+      <div class="agentbridge-brand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 6H6a4 4 0 0 0-4 4v4a4 4 0 0 0 4 4h2m8-12h2a4 4 0 0 1 4 4v4a4 4 0 0 1-4 4h-2M8 12h8" stroke-linecap="round"/><path d="m10 9-3 3 3 3m4-6 3 3-3 3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <h2>AgentBridge</h2>
+      </div>
         <span class="agentbridge-mode-switch" role="radiogroup" aria-label="${escapeHtml(t("modeSwitchLabel"))}">
           <button class="agentbridge-mode-plan" id="modePlanButton" role="radio" aria-checked="false" type="button" title="${escapeHtml(t("modePlanTitle") + [...READ_ONLY_BLOCKED_TOOL_NAMES].join(", "))}" disabled>${t("modePlan")}</button>
           <button class="agentbridge-mode-build" id="modeBuildButton" role="radio" aria-checked="true" type="button" title="${escapeHtml(t("modeBuildTitle"))}" disabled>${t("modeBuild")}</button>
         </span>
-        <span class="agentbridge-state state-stopped" id="stateBadge">…</span>
-      </span>
     </div>
     <p class="agentbridge-hero-description">${t("heroDescription")}</p>
-    <div class="agentbridge-status-details" id="stateDetails">${t("loadingBridgeStatus")}</div>
+    <div class="agentbridge-hero-status" role="status">
+      <span class="agentbridge-state state-stopped" id="stateBadge">…</span>
+      <div class="agentbridge-status-details" id="stateDetails">${t("loadingBridgeStatus")}</div>
+    </div>
     <div class="agentbridge-address-notice" id="readOnlyNotice" role="status" style="display:none"></div>
     <div class="agentbridge-open-folder-group" id="openFolderGroup" style="display:none">
       <p class="agentbridge-open-folder-hint">${t("openFolderHint")}</p>
@@ -661,9 +685,9 @@ ${PANEL_CSS}</style>
     <div class="agentbridge-address-notice" id="addressNotice" style="display:none"></div>
     <div class="agentbridge-controls agentbridge-hero-actions">
       <button class="primary" id="startStopButton" disabled>${t("startBridge")}</button>
-      <button class="secondary" id="openChatGptButton">${t("openChatGpt")}</button>
-      <button class="secondary" id="copyPromptButton">${t("copyPrompt")}</button>
-      <button class="secondary agentbridge-more-sites-toggle" id="moreSitesButton" type="button" aria-expanded="false">${t("moreSites")}</button>
+      <button class="secondary" id="openChatGptButton" title="${t("openChatGpt")}" aria-label="${t("openChatGpt")}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M9 2h5v5m0-5L7 9M6 3H3a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-3" stroke-linecap="round" stroke-linejoin="round"/></svg><span>ChatGPT</span></button>
+      <button class="secondary" id="copyPromptButton" title="${t("copyPrompt")}" aria-label="${t("copyPrompt")}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="5" y="5" width="8" height="9" rx="1.5"/><path d="M10 5V3a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h2" stroke-linecap="round"/></svg><span>${t("copyPromptShort")}</span></button>
+      <button class="secondary agentbridge-more-sites-toggle" id="moreSitesButton" type="button" title="${t("moreSites")}" aria-label="${t("moreSites")}" aria-expanded="false" aria-controls="moreSitesGroup"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="13" cy="8" r="1.2"/></svg></button>
     </div>
     <div class="agentbridge-more-sites" id="moreSitesGroup" hidden>
       <button class="secondary" id="openArenaButton">${t("openArena")}</button>
@@ -672,17 +696,19 @@ ${PANEL_CSS}</style>
       <button class="secondary" id="openQwenButton">${t("openQwen")}</button>
     </div>
     <div class="agentbridge-security-note">
-      <span>⚠</span><span>${t("securityNote")}</span>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M8 1.5 13 3.5V8c0 3-5 6.5-5 6.5S3 11 3 8V3.5L8 1.5Z" stroke-linejoin="round"/><path d="M8 5v3m0 2h.01" stroke-linecap="round"/></svg><span>${t("securityNote")}</span>
     </div>
   </div>
 
   <details class="agentbridge-card agentbridge-connection-card" id="connectionCard">
-    <summary>
+    <summary class="agentbridge-section-heading">
+      <span class="agentbridge-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 15 15 9m-5-3 2-2a5 5 0 0 1 7 7l-2 2m-7 0-2 2a5 5 0 0 1-7-7l2-2" stroke-linecap="round"/></svg></span>
       <div class="agentbridge-connection-summary-main">
         <h3>${t("connectionSettings")}</h3>
         <div class="agentbridge-connection-details" id="connectionDetails">${t("checkingTunnelSettings")}</div>
       </div>
       <span class="agentbridge-state state-stopped" id="connectionBadge">${t("checking")}</span>
+      <svg class="agentbridge-section-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg>
     </summary>
     <div class="agentbridge-connection-body">
       <div class="agentbridge-public-health-row" id="publicHealthPanel" style="display:none">
@@ -696,45 +722,41 @@ ${PANEL_CSS}</style>
       </div>
       <div class="agentbridge-field">
         <label class="agentbridge-label">${t("tunnelMode")}</label>
-        <div class="agentbridge-provider-choices" role="radiogroup">
-          <button class="agentbridge-provider-choice" data-provider="cloudflare" role="radio" id="quickProvider" type="button" disabled>
-            <div class="agentbridge-provider-header">
-              <span class="agentbridge-provider-title">${t("quickTitle")}</span>
-              <span class="agentbridge-provider-badge">${t("defaultZeroConfig")}</span>
-            </div>
-            <div class="agentbridge-provider-summary">${t("quickSummary")}</div>
-            <ul class="agentbridge-provider-facts">
-              <li>${t("quickFactAddr")}</li>
-              <li>${t("quickFactLimit")}</li>
-              <li>${t("quickFactConfig")}</li>
-            </ul>
+        <div class="agentbridge-provider-choices" role="radiogroup" aria-label="${t("tunnelMode")}">
+          <button class="agentbridge-provider-choice" data-provider="cloudflare" role="radio" id="quickProvider" type="button" title="${t("quickTitle")}" disabled>
+            <span class="agentbridge-provider-radio" aria-hidden="true"></span>
+            <span class="agentbridge-provider-content">
+              <span class="agentbridge-provider-header"><span class="agentbridge-provider-title">${t("quickChoiceTitle")}</span><span class="agentbridge-provider-badge">${t("temporaryAddress")}</span></span>
+              <span class="agentbridge-provider-caption">${t("quickChoiceHelp")}</span>
+            </span>
           </button>
-          <button class="agentbridge-provider-choice" data-provider="cloudflare-named" role="radio" id="namedProvider" type="button" disabled>
-            <div class="agentbridge-provider-header">
-              <span class="agentbridge-provider-title">${t("namedTitle")}</span>
-              <span class="agentbridge-provider-badge">${t("fixedAddress")}</span>
-            </div>
-            <div class="agentbridge-provider-summary">${t("namedSummary")}</div>
-            <ul class="agentbridge-provider-facts">
-              <li>${t("namedFactAddr")}</li>
-              <li>${t("namedFactLimit")}</li>
-              <li>${t("namedFactConfig")}</li>
-            </ul>
+          <button class="agentbridge-provider-choice" data-provider="cloudflare-named" role="radio" id="namedProvider" type="button" title="${t("namedTitle")}" disabled>
+            <span class="agentbridge-provider-radio" aria-hidden="true"></span>
+            <span class="agentbridge-provider-content">
+              <span class="agentbridge-provider-header"><span class="agentbridge-provider-title">${t("namedChoiceTitle")}</span><span class="agentbridge-provider-badge">${t("fixedAddress")}</span></span>
+              <span class="agentbridge-provider-caption">${t("namedChoiceHelp")}</span>
+            </span>
           </button>
-          <button class="agentbridge-provider-choice" data-provider="ngrok" role="radio" id="ngrokProvider" type="button" disabled>
-            <div class="agentbridge-provider-header">
-              <span class="agentbridge-provider-title">${t("ngrokTitle")}</span>
-              <span class="agentbridge-provider-badge">${t("fixedAddress")}</span>
-            </div>
-            <div class="agentbridge-provider-summary">${t("ngrokSummary")}</div>
-            <ul class="agentbridge-provider-facts">
-              <li>${t("ngrokFactAddr")}</li>
-              <li>${t("ngrokFactLimit")}</li>
-              <li>${t("ngrokFactConfig")}</li>
-            </ul>
+          <button class="agentbridge-provider-choice" data-provider="ngrok" role="radio" id="ngrokProvider" type="button" title="${t("ngrokTitle")}" disabled>
+            <span class="agentbridge-provider-radio" aria-hidden="true"></span>
+            <span class="agentbridge-provider-content">
+              <span class="agentbridge-provider-header"><span class="agentbridge-provider-title">${t("ngrokChoiceTitle")}</span><span class="agentbridge-provider-badge">${t("fixedAddress")}</span></span>
+              <span class="agentbridge-provider-caption">${t("ngrokChoiceHelp")}</span>
+            </span>
           </button>
         </div>
-        <div class="agentbridge-help">${t("stopBeforeSwitch")}</div>
+        <div class="agentbridge-provider-info">
+          <p class="agentbridge-provider-summary" id="providerDescription">${t("quickSummary")}</p>
+          <details class="agentbridge-provider-notes">
+            <summary>${t("tunnelDetails")}</summary>
+            <ul class="agentbridge-provider-facts">
+              <li id="providerAddressFact">${t("quickFactAddr")}</li>
+              <li id="providerLimitFact">${t("quickFactLimit")}</li>
+              <li id="providerConfigFact">${t("quickFactConfig")}</li>
+            </ul>
+          </details>
+        </div>
+        <div class="agentbridge-provider-switch-hint">${t("stopBeforeSwitch")}</div>
       </div>
 
       <div class="agentbridge-field" id="domainField">
@@ -887,7 +909,11 @@ ${PANEL_CSS}</style>
   </details>
 
   <details class="agentbridge-card agentbridge-advanced-card" id="advancedCard"${advancedOpen ? " open" : ""}>
-    <summary><h3>${t("advancedSettings")}</h3></summary>
+    <summary class="agentbridge-section-heading">
+      <span class="agentbridge-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6h16M4 12h16M4 18h16" stroke-linecap="round"/><circle cx="9" cy="6" r="2" fill="var(--vscode-editorWidget-background)"/><circle cx="15" cy="12" r="2" fill="var(--vscode-editorWidget-background)"/><circle cx="8" cy="18" r="2" fill="var(--vscode-editorWidget-background)"/></svg></span>
+      <h3>${t("advancedSettings")}</h3>
+      <svg class="agentbridge-section-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg>
+    </summary>
     <div class="agentbridge-advanced-body">
       <div class="agentbridge-field" style="margin-top:0;">
         <label class="agentbridge-label" for="languageSelect">${t("interfaceLanguage")}</label>
@@ -902,60 +928,70 @@ ${PANEL_CSS}</style>
         <div class="agentbridge-label">${t("transportProtocol")}</div>
         <div class="agentbridge-static-value">Streamable HTTP</div>
       </div>
-      <div class="agentbridge-advanced-section">
-        <h4>${t("securityAccess")}</h4>
+      <details class="agentbridge-advanced-section" id="securitySettingsSection"${sectionOpen("securitySettingsSection")}>
+        <summary><h4>${t("securityAccess")}</h4></summary>
         <p class="agentbridge-help">${t("securityHelp")}</p>
         <div class="agentbridge-controls">
           <button class="secondary" id="rotateButton" disabled>${t("rotateEndpoint")}</button>
         </div>
-        <div class="agentbridge-field" style="margin-top:12px;">
-          <label class="agentbridge-label" for="trustedBrowserOriginsInput">${t("trustedBrowserOrigins")}</label>
-          <textarea id="trustedBrowserOriginsInput" rows="3" placeholder="${escapeHtml(t("trustedBrowserOriginsPlaceholder"))}" style="width:100%; box-sizing:border-box; resize:vertical; padding:6px 8px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent)); border-radius:2px; font-family:var(--vscode-editor-font-family);" disabled>${escapeHtml(trustedBrowserOrigins.join("\n"))}</textarea>
-          <div class="agentbridge-help">${t("trustedBrowserOriginsHelp")}</div>
-          <div class="agentbridge-controls" style="margin-top:8px;">
-            <button class="secondary" id="trustedBrowserOriginsSaveButton" disabled>${t("saveTrustedBrowserOrigins")}</button>
+        <div class="agentbridge-field agentbridge-origins-field">
+          <div class="agentbridge-origins-heading">
+            <label class="agentbridge-label" for="trustedBrowserOriginsInput">${t("trustedBrowserOrigins")}</label>
+            <span class="agentbridge-setting-count">${t("trustedBrowserOriginsPerLine")}</span>
           </div>
-          <div class="agentbridge-help" id="trustedBrowserOriginsStatus" style="display:none; margin-top:6px;"></div>
+          <div class="agentbridge-help" id="trustedBrowserOriginsHint">${t("trustedBrowserOriginsBatchHint")}</div>
+          <div class="agentbridge-origins-editor">
+            <textarea class="agentbridge-textarea" id="trustedBrowserOriginsInput" rows="5" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="trustedBrowserOriginsHint" placeholder="${escapeHtml(t("trustedBrowserOriginsPlaceholder"))}" disabled>${escapeHtml(trustedBrowserOrigins.join("\n"))}</textarea>
+            <div class="agentbridge-origins-toolbar">
+              <span>${t("trustedBrowserOriginsLocalOnly")}</span>
+              <button class="primary" id="trustedBrowserOriginsSaveButton" disabled>${t("saveTrustedBrowserOrigins")}</button>
+            </div>
+          </div>
+          <details class="agentbridge-origins-rules" id="trustedBrowserOriginsRules"${sectionOpen("trustedBrowserOriginsRules")}>
+            <summary>${t("trustedBrowserOriginsRules")}</summary>
+            <p class="agentbridge-help">${t("trustedBrowserOriginsHelp")}</p>
+          </details>
+          <div class="agentbridge-help agentbridge-origins-status" id="trustedBrowserOriginsStatus" role="status" style="display:none;"></div>
         </div>
-      </div>
-      <div class="agentbridge-advanced-section">
-        <h4>${t("exposedTools")}</h4>
+      </details>
+      <details class="agentbridge-advanced-section" id="exposedToolsSection"${sectionOpen("exposedToolsSection")}>
+        <summary><h4>${t("exposedTools")}</h4><span class="agentbridge-setting-count" id="toolsCount"></span></summary>
         <div class="agentbridge-tools" id="toolsContainer"></div>
-      </div>
-      <div class="agentbridge-advanced-section">
-        <h4>${t("managedShell")}</h4>
+      </details>
+      <details class="agentbridge-advanced-section" id="managedShellSection"${sectionOpen("managedShellSection")}>
+        <summary><h4>${t("managedShell")}</h4></summary>
         <p class="agentbridge-help">${t("managedShellHelp")}</p>
         <div class="agentbridge-static-row">
           <div class="agentbridge-label">${t("current")}</div>
           <div class="agentbridge-static-value" id="managedShellCurrentLabel">${t("reading")}</div>
         </div>
         <div class="agentbridge-controls" style="display:flex; flex-direction:column; gap:8px; margin-top:8px;">
-          <input id="managedShellInput" type="text" placeholder="${t("managedShellPlaceholder")}" style="width:100%; box-sizing:border-box; padding:6px 8px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent)); border-radius:2px;" disabled />
+          <input class="agentbridge-input" id="managedShellInput" type="text" placeholder="${t("managedShellPlaceholder")}" disabled />
           <div style="display:flex; gap:8px;">
             <button class="secondary" id="managedShellSaveButton" disabled>${t("save")}</button>
             <button class="secondary" id="managedShellResetButton" disabled>${t("resetToDefault")}</button>
           </div>
           <div id="managedShellWarning" style="color:var(--vscode-errorForeground); display:none; font-size:11px; line-height:1.4;"></div>
         </div>
-      </div>
-      <div class="agentbridge-advanced-section">
-        <h4>${t("tunnelTransportSection")}</h4>
+      </details>
+      <details class="agentbridge-advanced-section" id="tunnelTransportSection"${sectionOpen("tunnelTransportSection")}>
+        <summary><h4>${t("tunnelTransportSection")}</h4></summary>
         <p class="agentbridge-help">${t("tunnelTransportHelp")}</p>
         <div class="agentbridge-controls" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">
           <button class="secondary agentbridge-oib-radio" id="tunnelProtocolAuto" role="radio" aria-checked="true" disabled>${t("tunnelProtocolAutoLabel")}</button>
           <button class="secondary agentbridge-oib-radio" id="tunnelProtocolQuic" role="radio" aria-checked="false" disabled>${t("tunnelProtocolQuicLabel")}</button>
           <button class="secondary agentbridge-oib-radio" id="tunnelProtocolHttp2" role="radio" aria-checked="false" disabled>${t("tunnelProtocolHttp2Label")}</button>
         </div>
-      </div>
-      <div class="agentbridge-advanced-section">
-        <h4>${t("openMode")}</h4>
+      </details>
+      <details class="agentbridge-advanced-section" id="openModeSection"${sectionOpen("openModeSection")}>
+        <summary><h4>${t("openMode")}</h4></summary>
         <p class="agentbridge-help">${t("openModeHelp")}</p>
         <div class="agentbridge-controls" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">
           <button class="secondary agentbridge-oib-radio" id="openInternalBrowserAuto" role="radio" aria-checked="true" disabled>${t("smart")}</button>
           <button class="secondary agentbridge-oib-radio" id="openInternalBrowserAll" role="radio" aria-checked="false" disabled>${t("embedAll")}</button>
           <button class="secondary agentbridge-oib-radio" id="openInternalBrowserExternal" role="radio" aria-checked="false" disabled>${t("externalAll")}</button>
         </div>
-      </div>
+      </details>
     </div>
   </details>
   </div>

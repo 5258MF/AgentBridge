@@ -1,49 +1,105 @@
   html { height: 100%; margin: 0; padding: 0; }
-  body { box-sizing: border-box; width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: none; padding: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
+  body { box-sizing: border-box; width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: none; margin: 0; padding: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
   .agentbridge-card h2, .agentbridge-card h3, .agentbridge-advanced-section h4, .agentbridge-setup-step h4 { margin: 0; font-weight: 600; }
-  .agentbridge-hero-description { max-width: 720px; margin: 7px 0 0; color: var(--vscode-descriptionForeground); line-height: 1.4; }
-  .agentbridge-security-note { display: flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.4; }
-  .agentbridge-security-note > span:first-child { color: var(--vscode-editorWarning-foreground); }
+  .agentbridge-hero-description { max-width: 720px; margin: 9px 0 0; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.6; }
+  .agentbridge-security-note { display: flex; align-items: flex-start; gap: 7px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.6; }
+  .agentbridge-security-note svg { flex: none; width: 14px; height: 14px; margin-top: 1px; }
   .agentbridge-open-folder-group { margin-top: 12px; padding: 8px 10px; border: 1px dashed var(--vscode-editorWarning-foreground); border-radius: 4px; }
   .agentbridge-open-folder-hint { color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.4; margin: 0 0 8px 0; }
   .agentbridge-card, .agentbridge-setup { box-sizing: border-box; padding: 13px 15px; margin-bottom: 10px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 6px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); }
-  .agentbridge-hero { padding: 16px; }
-  .agentbridge-card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .agentbridge-hero-actions { margin-top: 14px; }
-  .agentbridge-hero-actions > button { width: auto; min-width: 150px; }
+  .agentbridge-hero { padding: 14px; }
+  .agentbridge-card-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .agentbridge-brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .agentbridge-brand svg { width: 22px; height: 22px; flex: none; color: var(--vscode-descriptionForeground); }
+  .agentbridge-brand h2 { font-size: 15px; color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
+  .agentbridge-hero-status { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; }
+  .agentbridge-hero-status .agentbridge-status-details { min-width: 0; margin: 0; padding-top: 1px; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+  .agentbridge-hero .agentbridge-hero-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px; gap: 6px; margin-top: 14px; }
+  .agentbridge-hero .agentbridge-hero-actions > button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; min-height: 30px; padding: 5px 8px; border-radius: 4px; font-size: 12px; }
+  .agentbridge-hero .agentbridge-hero-actions > .primary { grid-column: 1 / -1; min-height: 32px; font-weight: 500; }
+  .agentbridge-hero-actions svg { width: 14px; height: 14px; flex: none; }
+  .agentbridge-hero .agentbridge-hero-actions > .agentbridge-more-sites-toggle { padding: 5px; background: transparent; color: var(--vscode-descriptionForeground); border-color: var(--vscode-contrastBorder, transparent); }
+  .agentbridge-hero-actions > .agentbridge-more-sites-toggle:hover, .agentbridge-hero-actions > .agentbridge-more-sites-toggle[aria-expanded=true] { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
   .agentbridge-more-sites { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   .agentbridge-more-sites[hidden] { display: none; }
-  .agentbridge-more-sites > button { width: auto; min-width: 140px; }
+  .agentbridge-hero .agentbridge-more-sites > button { width: auto; min-width: 0; flex: 1 1 auto; min-height: 26px; padding: 3px 8px; border-radius: 4px; font-size: 11px; }
   .agentbridge-connection-card, .agentbridge-advanced-card { padding: 0; }
-  .agentbridge-connection-card > summary, .agentbridge-advanced-card > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; cursor: pointer; list-style-position: inside; }
-  .agentbridge-connection-card > summary::marker, .agentbridge-advanced-card > summary::marker { color: var(--vscode-descriptionForeground); }
-  .agentbridge-connection-summary-main { display: flex; min-width: 0; flex: 1 1 auto; align-items: baseline; gap: 10px; }
-  .agentbridge-connection-summary-main h3 { flex: 0 0 auto; }
-  .agentbridge-connection-details { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.4; }
+  .agentbridge-section-heading { display: flex; align-items: center; gap: 9px; padding: 12px 14px; cursor: pointer; list-style: none; }
+  .agentbridge-section-heading::-webkit-details-marker { display: none; }
+  .agentbridge-section-heading:hover { background: var(--vscode-list-hoverBackground, transparent); }
+  .agentbridge-section-icon { display: flex; flex: none; color: var(--vscode-descriptionForeground); }
+  .agentbridge-section-icon svg { width: 18px; height: 18px; }
+  .agentbridge-section-chevron { width: 14px; height: 14px; flex: none; color: var(--vscode-descriptionForeground); transition: transform 120ms ease; }
+  .agentbridge-connection-card[open] .agentbridge-section-chevron, .agentbridge-advanced-card[open] > summary .agentbridge-section-chevron { transform: rotate(90deg); }
+  .agentbridge-section-heading > h3 { flex: 1; min-width: 0; font-size: 13px; color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
+  .agentbridge-connection-summary-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+  .agentbridge-connection-summary-main h3 { font-size: 13px; color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
+  .agentbridge-connection-details { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.5; }
   .agentbridge-connection-body { padding: 2px 14px 14px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-hero button:focus-visible, .agentbridge-connection-card button:focus-visible, .agentbridge-connection-card summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+  .agentbridge-connection-card > summary:focus-visible { outline-offset: -1px; }
+  .agentbridge-connection-card button.secondary, .agentbridge-connection-card button.primary { border-radius: 4px; font-size: 12px; }
+  .agentbridge-connection-card .agentbridge-input { border-radius: 4px; font-size: 12px; }
+  .agentbridge-advanced-card button:focus-visible, .agentbridge-advanced-card summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+  .agentbridge-advanced-card > summary:focus-visible { outline-offset: -1px; }
+  .agentbridge-advanced-card button.secondary, .agentbridge-advanced-card button.primary { border-radius: 4px; font-size: 12px; }
+  .agentbridge-advanced-card .agentbridge-input, .agentbridge-advanced-card .agentbridge-select { border-radius: 4px; font-size: 12px; }
+  .agentbridge-textarea { box-sizing: border-box; width: 100%; resize: vertical; padding: 6px 8px; border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent)); border-radius: 4px; outline: none; background: var(--vscode-input-background); color: var(--vscode-input-foreground); font-family: var(--monaco-monospace-font); font-size: 12px; line-height: 1.5; }
+  .agentbridge-textarea:focus { border-color: var(--vscode-focusBorder); }
+  .agentbridge-field.agentbridge-origins-field { gap: 8px; }
+  .agentbridge-origins-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+  .agentbridge-origins-editor { overflow: hidden; border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, transparent)); border-radius: 5px; background: var(--vscode-input-background); }
+  .agentbridge-origins-editor:focus-within { border-color: var(--vscode-focusBorder); box-shadow: 0 0 0 1px var(--vscode-focusBorder); }
+  .agentbridge-origins-editor .agentbridge-textarea { display: block; min-height: 150px; max-height: 360px; padding: 10px 12px; border: 0; border-radius: 0; background: transparent; font-size: 12px; line-height: 22px; overflow: auto; }
+  .agentbridge-origins-editor .agentbridge-textarea::placeholder { color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground)); opacity: .7; }
+  .agentbridge-origins-editor textarea::-webkit-scrollbar { width: 8px; height: 8px; }
+  .agentbridge-origins-editor textarea::-webkit-scrollbar-track { background: transparent; }
+  .agentbridge-origins-editor textarea::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--vscode-scrollbarSlider-background, color-mix(in srgb, var(--vscode-foreground) 25%, transparent)); }
+  .agentbridge-origins-editor textarea::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 40%, transparent)); }
+  .agentbridge-origins-editor textarea::-webkit-scrollbar-button { display: none; }
+  .agentbridge-origins-editor textarea::-webkit-scrollbar-corner { background: var(--vscode-input-background); }
+  .agentbridge-origins-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent); }
+  .agentbridge-origins-toolbar > span { color: var(--vscode-descriptionForeground); font-size: 10px; }
+  .agentbridge-origins-toolbar > button.primary { min-height: 26px; padding: 3px 9px; }
+  .agentbridge-origins-rules { color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .agentbridge-origins-rules > summary { width: fit-content; cursor: pointer; }
+  .agentbridge-origins-rules > summary:hover { color: var(--vscode-foreground); }
+  .agentbridge-origins-rules .agentbridge-help { margin: 7px 0 0; }
+  .agentbridge-origins-status { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
   .agentbridge-field { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; }
   .agentbridge-label, .agentbridge-url-label { font-size: 12px; font-weight: 600; }
   .agentbridge-input, .agentbridge-select { box-sizing: border-box; width: min(100%, 680px); height: 28px; padding: 3px 8px; border: 1px solid var(--vscode-input-border, transparent); outline: none; background: var(--vscode-input-background); color: var(--vscode-input-foreground); font: inherit; }
   .agentbridge-input:focus, .agentbridge-select:focus { border-color: var(--vscode-focusBorder); }
   .agentbridge-input:disabled, .agentbridge-select:disabled { opacity: .72; }
-  .agentbridge-provider-choices { display: flex; width: min(100%, 680px); flex-direction: column; gap: 8px; }
-  .agentbridge-provider-choice { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 5px; background: var(--vscode-editor-background); color: var(--vscode-foreground); font: inherit; text-align: left; cursor: pointer; }
+  .agentbridge-provider-choices { display: flex; width: min(100%, 680px); flex-direction: column; gap: 6px; }
+  .agentbridge-provider-choice { display: flex; align-items: center; gap: 10px; box-sizing: border-box; width: 100%; padding: 9px 10px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 5px; background: transparent; color: var(--vscode-foreground); font: inherit; text-align: left; cursor: pointer; }
   .agentbridge-provider-choice:hover:not(:disabled) { border-color: var(--vscode-focusBorder); background: var(--vscode-list-hoverBackground, var(--vscode-editor-background)); }
   .agentbridge-provider-choice:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
-  .agentbridge-provider-choice.selected { border-color: var(--vscode-focusBorder); background: var(--vscode-list-activeSelectionBackground, var(--vscode-editor-background)); color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground)); }
+  .agentbridge-provider-choice.selected { border-color: var(--vscode-focusBorder); background: color-mix(in srgb, var(--vscode-focusBorder) 7%, transparent); }
   .agentbridge-provider-choice:disabled { opacity: .65; cursor: default; }
+  .agentbridge-provider-radio { display: flex; align-items: center; justify-content: center; flex: none; width: 14px; height: 14px; border: 1px solid var(--vscode-descriptionForeground); border-radius: 50%; }
+  .agentbridge-provider-choice.selected .agentbridge-provider-radio { border-color: var(--vscode-focusBorder); }
+  .agentbridge-provider-choice.selected .agentbridge-provider-radio::after { width: 6px; height: 6px; border-radius: 50%; background: var(--vscode-focusBorder); content: ''; }
+  .agentbridge-provider-content { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+  .agentbridge-provider-caption { font-size: 11px; line-height: 1.5; color: var(--vscode-descriptionForeground); }
 
   .agentbridge-oib-radio { padding: 4px 10px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 4px; background: transparent; color: var(--vscode-foreground); font: inherit; cursor: pointer; transition: background-color 120ms ease, border-color 120ms ease; }
   .agentbridge-oib-radio[aria-checked="true"] { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: var(--vscode-button-background, transparent); }
   .agentbridge-oib-radio[aria-checked="true"]:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
   .agentbridge-oib-radio[aria-checked="false"]:hover:not(:disabled) { background: var(--vscode-list-hoverBackground, transparent); }
   .agentbridge-oib-radio:disabled { opacity: .55; cursor: default; }
-  .agentbridge-provider-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .agentbridge-provider-title { font-weight: 600; }
-  .agentbridge-provider-badge { flex: 0 0 auto; padding: 2px 7px; border-radius: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 11px; }
-  .agentbridge-provider-summary, .agentbridge-provider-facts { color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.45; }
-  .agentbridge-provider-summary { margin-top: 5px; }
-  .agentbridge-provider-facts { margin: 6px 0 0; padding-left: 18px; }
+  .agentbridge-provider-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 8px; }
+  .agentbridge-provider-title { font-size: 12px; font-weight: 500; }
+  .agentbridge-provider-badge { flex: none; padding: 1px 5px; border: 1px solid var(--vscode-contrastBorder, transparent); border-radius: 4px; background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent); color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.5; }
+  .agentbridge-provider-info { max-width: 680px; margin-top: 5px; }
+  .agentbridge-provider-summary, .agentbridge-provider-facts { color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.6; }
+  .agentbridge-provider-summary { margin: 0 0 7px; }
+  .agentbridge-provider-notes { font-size: 11px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-provider-notes summary { width: fit-content; cursor: pointer; }
+  .agentbridge-provider-notes summary:hover { color: var(--vscode-foreground); }
+  .agentbridge-provider-facts { margin: 7px 0 0; padding-left: 18px; }
+  .agentbridge-provider-facts li + li { margin-top: 4px; }
+  .agentbridge-provider-switch-hint { margin-top: 3px; color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.5; }
   .agentbridge-named-configuration { box-sizing: border-box; width: min(100%, 680px); margin-top: 12px; padding: 12px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 5px; background: var(--vscode-editor-background); }
   .agentbridge-named-configuration h4 { margin: 0 0 4px; font-size: 12px; }
   .agentbridge-named-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
@@ -55,6 +111,12 @@
   .agentbridge-state { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); white-space: nowrap; }
   .agentbridge-state.state-running { color: var(--vscode-testing-iconPassed, var(--vscode-foreground)); }
   .agentbridge-state.state-error { color: var(--vscode-errorForeground); }
+  .agentbridge-hero .agentbridge-state, .agentbridge-connection-card .agentbridge-state, .agentbridge-connection-card > summary .agentbridge-public-health-badge { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 2px 6px; border: 1px solid var(--vscode-contrastBorder, transparent); border-radius: 4px; background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent); color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 400; line-height: 1.5; }
+  .agentbridge-hero .agentbridge-state::before { width: 5px; height: 5px; border-radius: 50%; background: currentColor; content: ''; }
+  .agentbridge-hero .agentbridge-state.state-running, .agentbridge-connection-card .agentbridge-state.state-running, .agentbridge-connection-card > summary .state-healthy { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); background: color-mix(in srgb, var(--vscode-testing-iconPassed, var(--vscode-charts-green)) 10%, transparent); }
+  .agentbridge-hero .agentbridge-state.state-starting, .agentbridge-connection-card .agentbridge-state.state-starting, .agentbridge-connection-card > summary .state-checking { color: var(--vscode-progressBar-background); }
+  .agentbridge-hero .agentbridge-state.state-error, .agentbridge-connection-card .agentbridge-state.state-error, .agentbridge-connection-card > summary .state-unhealthy { color: var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-errorForeground) 8%, transparent); }
+  .agentbridge-connection-card > summary .state-unstable { color: var(--vscode-editorWarning-foreground); background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 8%, transparent); }
   .agentbridge-status-details { margin-top: 7px; }
   .agentbridge-tunnel-state { margin-top: 5px; }
   .agentbridge-tunnel-panel { box-sizing: border-box; width: min(100%, 680px); margin-top: 12px; padding: 10px 12px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; background: var(--vscode-editor-background); }
@@ -86,14 +148,23 @@
   .agentbridge-copy-url:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
   .agentbridge-command-row code { box-sizing: border-box; min-width: 0; width: 0; padding: 6px 8px; border-radius: 3px; background: var(--vscode-textCodeBlock-background); color: var(--vscode-textPreformat-foreground); font-family: var(--monaco-monospace-font); font-size: 12px; white-space: pre-wrap; word-break: break-word; flex: 1 1 0; }
   .agentbridge-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-  .agentbridge-tool { padding: 3px 7px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-family: var(--monaco-monospace-font); font-size: 11px; }
+  .agentbridge-tool { padding: 3px 7px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent); color: var(--vscode-descriptionForeground); font-family: var(--monaco-monospace-font); font-size: 11px; overflow-wrap: anywhere; }
   .agentbridge-tool.bridge-only { border-style: dashed; }
   .agentbridge-advanced-card > summary { cursor: pointer; }
   .agentbridge-advanced-body { padding: 14px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
   .agentbridge-static-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 680px; padding: 8px 10px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; background: var(--vscode-editor-background); }
   .agentbridge-static-value { color: var(--vscode-descriptionForeground); font-family: var(--monaco-monospace-font); font-size: 12px; }
-  .agentbridge-advanced-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
-  .agentbridge-advanced-section h4 { font-size: 12px; }
+  .agentbridge-advanced-section { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-advanced-section > summary { display: flex; align-items: center; gap: 8px; min-height: 28px; list-style: none; cursor: pointer; }
+  .agentbridge-advanced-section > summary::-webkit-details-marker { display: none; }
+  .agentbridge-advanced-section > summary h4 { flex: 1; min-width: 0; font-size: 12px; font-weight: 500; }
+  .agentbridge-advanced-section > summary:hover { color: var(--vscode-textLink-foreground, var(--vscode-foreground)); }
+  .agentbridge-setting-count { flex: none; padding: 2px 6px; border-radius: 4px; background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent); color: var(--vscode-descriptionForeground); font-size: 10px; }
+  .agentbridge-advanced-section > summary::after, .agentbridge-section-arrow { box-sizing: border-box; width: 6px; height: 6px; flex: none; border-right: 1px solid var(--vscode-descriptionForeground); border-top: 1px solid var(--vscode-descriptionForeground); transform: rotate(45deg); content: ''; }
+  .agentbridge-advanced-section[open] > summary::after, .agentbridge-todos[open] .agentbridge-section-arrow { transform: rotate(135deg); }
+  .agentbridge-advanced-body .agentbridge-help { font-size: 11px; line-height: 1.6; }
+  .agentbridge-advanced-body .agentbridge-static-row { align-items: center; flex-direction: row; min-height: 28px; gap: 8px; padding: 0; border: 0; background: transparent; }
+  .agentbridge-advanced-body .agentbridge-static-value { min-width: 0; max-width: 70%; text-align: right; overflow-wrap: anywhere; font-size: 11px; }
   .agentbridge-setup > summary { cursor: pointer; font-weight: 600; }
   .agentbridge-setup-body { padding-top: 10px; }
   .agentbridge-setup-step { margin-top: 14px; }
@@ -124,8 +195,7 @@
   button:disabled { opacity: .5; cursor: default; }
   @media (max-width: 520px) {
     .agentbridge-named-grid { grid-template-columns: minmax(0, 1fr); }
-    .agentbridge-connection-card > summary, .agentbridge-connection-summary-main, .agentbridge-advanced-card > summary, .agentbridge-static-row { align-items: flex-start; flex-direction: column; }
-    .agentbridge-connection-details { white-space: normal; }
+    .agentbridge-static-row { align-items: flex-start; flex-direction: column; }
     .agentbridge-persistent-row { align-items: flex-start; }
   }
   .agentbridge-tabs { display: flex; align-items: center; gap: 2px; margin: 0 12px 10px; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
@@ -134,7 +204,7 @@
   .agentbridge-tab:focus { outline: none; }
   .agentbridge-tab.active { color: var(--vscode-foreground); border-bottom-color: var(--vscode-focusBorder, var(--vscode-button-background)); }
   .agentbridge-session-view { display: flex; flex-direction: column; min-height: 0; flex: 1 1 0; }
-  #configSection { box-sizing: border-box; flex: 1; min-height: 0; padding-bottom: 24px; overflow: auto; }
+  #configSection { box-sizing: border-box; flex: 1; min-height: 0; padding: 0 8px 24px; overflow: auto; }
   .agentbridge-session-todos-region { max-width: 950px; margin: 0 auto; width: 100%; padding: 14px 12px 0; box-sizing: border-box; }
   .agentbridge-session-todos-region:empty { display: none; }
   .agentbridge-session-history-toolbar { box-sizing: border-box; width: 100%; max-width: 950px; min-height: 31px; margin: 0 auto; padding: 4px 12px; display: flex; align-items: center; gap: 10px; }
@@ -151,21 +221,27 @@
   .agentbridge-session-empty strong { color: var(--vscode-foreground); font-weight: 600; }
   .agentbridge-session-empty span { font-size: 12px; }
   .agentbridge-todos { border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 6px; background: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-editor-background)) 78%, transparent); margin-bottom: 10px; }
-  .agentbridge-todos-summary { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 30px; padding: 4px 8px; border-radius: 6px; cursor: pointer; list-style: none; font-size: 12px; }
+  .agentbridge-todos-summary { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto 10px; align-items: center; gap: 7px; min-height: 30px; padding: 7px 10px; border-radius: 6px; cursor: pointer; list-style: none; font-size: 12px; }
   .agentbridge-todos-summary::-webkit-details-marker { display: none; }
   .agentbridge-todos-summary:hover { background: var(--vscode-list-hoverBackground); }
   .agentbridge-todos-count { font-size: 11px; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+  .agentbridge-todos-current { grid-column: 2 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.6; }
+  .agentbridge-todos[open] .agentbridge-todos-current { display: none; }
+  .agentbridge-todos-completion { grid-column: 1 / -1; height: 2px; margin: 0 0 1px; overflow: hidden; border-radius: 2px; background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); }
+  .agentbridge-todos-completion > span { display: block; height: 100%; border-radius: inherit; background: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
   .agentbridge-todos-body { display: flex; flex-direction: column; gap: 1px; padding: 2px 8px 8px 33px; }
-  .agentbridge-todo { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 26px; padding: 2px 5px; border-radius: 4px; font-size: 12px; }
-  .agentbridge-todo.in-progress { background: color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 35%, transparent); }
+  .agentbridge-todo { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 3px 7px; min-height: 26px; padding: 4px 5px; border-radius: 4px; font-size: 12px; }
+  .agentbridge-todo-title { min-width: 0; overflow-wrap: anywhere; }
+  .agentbridge-todo.in_progress { background: color-mix(in srgb, var(--vscode-focusBorder) 7%, transparent); }
   .agentbridge-todo.completed .agentbridge-todo-title { text-decoration: line-through; color: var(--vscode-descriptionForeground); }
   .agentbridge-todo-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--vscode-descriptionForeground); }
   .agentbridge-todo.completed .agentbridge-todo-icon { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
-  .agentbridge-todo.in-progress .agentbridge-todo-icon { color: var(--vscode-progressBar-background); }
-  .agentbridge-todo-progress { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  .agentbridge-todo.in_progress .agentbridge-todo-icon { color: var(--vscode-progressBar-background); }
+  .agentbridge-todo-progress { grid-column: 2 / -1; display: flex; min-width: 0; align-items: center; gap: 6px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-todo-progress .message { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .agentbridge-todo-progress .phase { font-weight: 600; }
   .agentbridge-todo-progress .percent { font-variant-numeric: tabular-nums; }
-  .agentbridge-todo.in-progress .agentbridge-todo-progress .phase, .agentbridge-todo.in-progress .agentbridge-todo-progress .percent { color: var(--vscode-foreground); }
+  .agentbridge-todo.in_progress .agentbridge-todo-progress .phase, .agentbridge-todo.in_progress .agentbridge-todo-progress .percent { flex: none; color: var(--vscode-foreground); }
   .agentbridge-progress-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 28px; padding: 4px 8px; border: 1px solid transparent; border-radius: 4px; font-size: 12px; margin-bottom: 1px; }
   .agentbridge-progress-row:hover { background: var(--vscode-list-hoverBackground); }
   .agentbridge-progress-row .agentbridge-progress-icon { color: var(--vscode-progressBar-background); }
@@ -184,6 +260,7 @@
   .agentbridge-tool-card:not([open]) > .agentbridge-tool-body { display: none; }
   .agentbridge-tool-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--vscode-descriptionForeground); }
   .agentbridge-tool-card.state-running .agentbridge-tool-icon { color: var(--vscode-progressBar-background); }
+  .agentbridge-tool-card.state-completed .agentbridge-tool-icon { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
   .agentbridge-tool-card.state-error .agentbridge-tool-icon, .agentbridge-tool-card.state-error .agentbridge-tool-meta { color: var(--vscode-errorForeground); }
   .agentbridge-tool-labels { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
   .agentbridge-tool-title, .agentbridge-tool-subtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -240,7 +317,7 @@
   .agentbridge-tool-section-label { display: block; margin: 0 0 4px; font-size: 11px; font-weight: 600; color: var(--vscode-descriptionForeground); }
   .agentbridge-tool-section pre { box-sizing: border-box; max-height: 260px; margin: 0; padding: 7px 9px; overflow: auto; border-radius: 4px; background: var(--vscode-textCodeBlock-background); color: var(--vscode-textPreformat-foreground); font-family: var(--monaco-monospace-font); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
   .agentbridge-tool-error { font-size: 12px; color: var(--vscode-errorForeground); white-space: pre-wrap; }
-  .agentbridge-session-footer { flex: none; box-sizing: border-box; padding: 10px 12px 11px; border-top: 1px solid var(--vscode-panel-border, var(--vscode-widget-border)); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+  .agentbridge-session-footer { flex: none; box-sizing: border-box; padding: 8px 12px; border-top: 1px solid var(--vscode-panel-border, var(--vscode-widget-border)); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
   .agentbridge-session-connection-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .agentbridge-session-connection-actions { display: flex; flex: none; align-items: center; gap: 5px; }
   .agentbridge-session-connection-info { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
@@ -252,10 +329,10 @@
   .agentbridge-session-dot.state-starting { background: var(--vscode-progressBar-background); }
   .agentbridge-session-dot.state-error { background: var(--vscode-errorForeground); }
   .agentbridge-session-connection-description, .agentbridge-session-meta, .agentbridge-session-hint { font-size: 11px; line-height: 1.4; color: var(--vscode-descriptionForeground); }
-  .agentbridge-session-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 10px; }
-  .agentbridge-session-stat { display: flex; min-width: 0; flex-direction: column; gap: 3px; padding: 7px 9px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; }
-  .agentbridge-session-stat span { font-size: 11px; color: var(--vscode-descriptionForeground); }
-  .agentbridge-session-stat strong { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .agentbridge-session-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin-top: 8px; }
+  .agentbridge-session-stat { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 7px; border: 1px solid var(--vscode-contrastBorder, transparent); border-radius: 4px; background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent); }
+  .agentbridge-session-stat span { font-size: 10px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-session-stat strong { font-size: 12px; font-weight: 500; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .agentbridge-session-meta { margin-top: 8px; }
   .agentbridge-session-hint { margin-top: 5px; }
   .agentbridge-session-list { margin-top: 8px; padding: 7px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 4px; font-size: 11px; max-height: 120px; overflow-y: auto; }
@@ -278,7 +355,6 @@
     .agentbridge-public-health-row { grid-template-columns: minmax(0, 1fr) auto; }
     .agentbridge-public-health-row .agentbridge-public-health-badge { grid-column: 1; grid-row: 2; justify-self: start; }
     .agentbridge-public-health-check { grid-column: 2; grid-row: 1 / 3; }
-    .agentbridge-session-stats { grid-template-columns: 1fr; }
   }
   .agentbridge-spin { display: inline-block; animation: agentbridge-spin 1s linear infinite; }
   @keyframes agentbridge-spin { to { transform: rotate(360deg); } }
@@ -327,4 +403,12 @@
     .agentbridge-mcp-heading { gap: 6px; }
     .agentbridge-mcp-config-actions button { padding-left: 8px; padding-right: 8px; font-size: 11px; }
   }
-  @media (prefers-reduced-motion: reduce) { .agentbridge-mcp-chevron { transition: none; } }
+  @media (max-width: 340px) {
+    .agentbridge-hero { padding: 12px 11px; }
+    .agentbridge-section-heading, .agentbridge-connection-body, .agentbridge-advanced-body { padding-left: 11px; padding-right: 11px; }
+    .agentbridge-section-heading { gap: 6px; }
+    .agentbridge-hero .agentbridge-hero-actions > button { padding-left: 6px; padding-right: 6px; font-size: 11px; }
+    .agentbridge-provider-choice { padding: 8px; gap: 8px; }
+  }
+  @media (max-width: 300px) { .agentbridge-hero-actions > button:not(.agentbridge-more-sites-toggle) svg { display: none; } }
+  @media (prefers-reduced-motion: reduce) { .agentbridge-mcp-chevron, .agentbridge-section-chevron { transition: none; } }

@@ -19,7 +19,7 @@ export type McpConnectionFactory = (config: McpServerConfig, log: (message: stri
 
 /** The same SDK used by the public Bridge also owns the upstream MCP protocol. */
 export const createMcpConnection: McpConnectionFactory = (config, log) => {
-  const client = new Client({ name: "agentbridge-mcp-client", version: "0.1.16" }, { capabilities: { roots: {} } });
+  const client = new Client({ name: "agentbridge-mcp-client", version: "0.1.17" }, { capabilities: { roots: {} } });
   client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots: config.workspaceRoot ? [{ uri: pathToFileURL(config.workspaceRoot).href, name: path.basename(config.workspaceRoot) }] : [] }));
   const transport = config.type === "stdio"
     ? new StdioClientTransport({ command: config.command!, args: config.args, env: config.env, cwd: config.cwd, stderr: "pipe" })

@@ -12,6 +12,11 @@ const root = path.dirname(testsDir);
 const args = process.argv.slice(2);
 const matchIndex = args.indexOf("--match");
 const match = matchIndex >= 0 ? args[matchIndex + 1] : undefined;
+const concurrencyIndex = args.indexOf("--test-concurrency");
+const concurrency = concurrencyIndex >= 0 ? args[concurrencyIndex + 1] : undefined;
+if (concurrencyIndex >= 0 && (!/^\d+$/.test(concurrency ?? "") || !Number.isSafeInteger(Number(concurrency)) || Number(concurrency) < 1)) {
+  throw new Error("--test-concurrency requires a positive integer.");
+}
 const skipPackage = args.includes("--skip-package");
 const updateCatalog = args.includes("--update-catalog");
 const tempDir = await mkdtemp(path.join(os.tmpdir(), "agentbridge-tests-"));
@@ -98,7 +103,7 @@ try {
   // An empty home, so the developer's own ~/.agents skills and AGENTS.md cannot leak into tests.
   const testHome = path.join(tempDir, "home");
   fs.mkdirSync(testHome, { recursive: true });
-  run(process.execPath, ["--test", ...bundles], {
+  run(process.execPath, ["--test", ...(concurrency ? [`--test-concurrency=${concurrency}`] : []), ...bundles], {
     env: {
       ...process.env,
       HOME: testHome,
