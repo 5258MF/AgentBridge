@@ -1,5 +1,11 @@
 # Change Log
 
+## Unreleased
+
+- **MCP server form** — add local stdio or remote Streamable HTTP servers from the panel, with user/workspace scope, arguments, headers, native secure credential input, and optional environment, working directory, Plan policy, and timeouts. The form appends to the existing configuration and retains drafts after validation or save failures. Duplicate names, invalid configuration, unsaved editor changes, and detected concurrent file edits do not overwrite existing entries.
+
+- **MCP form review fixes** — late operation replies cannot unlock a pending save; invalid native number inputs are rejected and successful saves restore keyboard focus. Configuration writes use a shared process lock, fresh merged capacity checks, directory-alias-aware draft protection, atomic first creation, and metadata-preserving replacement. File links are preserved by refusing form writes and directing users to the configuration editor.
+
 ## 0.1.17 (2026-10-02)
 
 - **Compact panel layout** — the workspace card now emphasizes Start/Stop, with a compact connection toolbar and consistent status badges. Tunnel providers use short selectable rows; the current provider's description and expandable setup requirements replace three fully expanded descriptions. Advanced settings use collapsible groups and show the available tool count; language switches retain expanded groups, including refreshes deferred until drafts are saved, and pause editing Origin/tunnel drafts until the switch finishes. Trusted Origin lists have a larger multiline editor, inline save controls, and expandable formatting rules; long entries stay on one line and scroll within the editor. Folded todos show the current task and completion progress, activity icons reflect call status, and compact connection statistics leave more room for activity history. Section headings match the MCP card, with consistent icons, spacing, and controls across light/dark themes and narrow sidebars.

@@ -3,7 +3,7 @@ import path from "node:path";
 
 export const MCP_CONFIG_FILE = "mcp.json";
 export const MCP_SECRET_PREFIX = "agentbridge.mcp.credential.";
-const MAX_CONFIG_BYTES = 1024 * 1024;
+export const MAX_CONFIG_BYTES = 1024 * 1024;
 const SERVER_NAME = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$/;
 const SECRET_NAME = /^[A-Za-z0-9_.-]{1,80}$/;
 
@@ -40,6 +40,7 @@ export interface McpConfigOptions {
 }
 export interface McpConfiguration {
   entries: McpConfigEntry[];
+  serverCount: number;
   errors: string[];
   paths: string[];
 }
@@ -138,7 +139,7 @@ export async function loadMcpConfiguration(options: McpConfigOptions): Promise<M
   }
   const merged = [...entries.values()].sort((a, b) => a.name.localeCompare(b.name));
   if (merged.length > 32) errors.push("At most 32 external MCP servers are supported per Bridge; additional entries were skipped.");
-  return { entries: merged.slice(0, 32), errors, paths: mcpConfigPaths(options) };
+  return { entries: merged.slice(0, 32), serverCount: merged.length, errors, paths: mcpConfigPaths(options) };
 }
 
 export async function resolveMcpServer(config: McpServerConfig, homeDir: string | undefined, getSecret: (key: string) => Promise<string | undefined>, environment: NodeJS.ProcessEnv = process.env): Promise<{ config: McpServerConfig; secrets: string[] }> {

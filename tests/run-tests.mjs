@@ -55,7 +55,7 @@ try {
 
   const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "terminal-lifecycle.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts", "workspace-roots.test.ts", "todo-format.test.ts", "tool-errors.test.ts", "tool-catalog.test.ts", "server-instructions.test.ts", "path-outside.test.ts", "search-files.test.ts", "read-only-panel.test.ts", "read-only-notice.test.ts", "prompt-tool-names.test.ts", "plan-mode-commands.test.ts", "image-processing.test.ts", "apply-patch-dirs.test.ts", "apply-patch-replace.test.ts", "skills.test.ts", "agents-md.test.ts", "output-retention.test.ts", "connection-prompt.test.ts", "lsp-tool.test.ts"];
   allEntries.push("todo-state.test.ts");
-  allEntries.push("mcp-config.test.ts", "mcp-manager.test.ts", "mcp-transports.test.ts", "mcp-bridge.test.ts");
+  allEntries.push("mcp-config.test.ts", "mcp-config-editor.test.ts", "mcp-manager.test.ts", "mcp-transports.test.ts", "mcp-bridge.test.ts");
   const entries = match ? allEntries.filter((name) => name.replace(/\.test\.ts$/, "") === match) : allEntries;
   if (!entries.length) throw new Error(`No test entry matched ${JSON.stringify(match)}.`);
   const fakeVscode = path.join(testsDir, "helpers", "fake-vscode.ts");
@@ -66,7 +66,13 @@ try {
     name: "agentbridge-test-module-replacement",
     setup(buildApi) {
       buildApi.onResolve({ filter: /^vscode$/ }, () => ({ path: fakeVscode }));
-      buildApi.onResolve({ filter: /^node:child_process$/ }, () => ({ path: fakeChildProcess }));
+      buildApi.onResolve({ filter: /^node:child_process$/ }, (args) => {
+        // Configuration persistence uses real filesystem operations, including Windows ACLs
+        // and subprocess regressions; other process boundaries remain controlled fakes.
+        const importer = args.importer.replace(/\\/g, "/");
+        if (importer.endsWith("/mcp-config-publish.ts") || importer.endsWith("/mcp-config-editor.test.ts")) return { path: "node:child_process", external: true };
+        return { path: fakeChildProcess };
+      });
       buildApi.onResolve({ filter: /^node:http$/ }, () => ({ path: fakeHttp }));
       buildApi.onResolve({ filter: /^node:https$/ }, () => ({ path: fakeHttps }));
     },
@@ -97,6 +103,11 @@ try {
     target: "node20",
     format: "cjs",
     logLevel: "warning",
+  });
+  await build({
+    entryPoints: [path.join(testsDir, "fixtures", "mcp-config-writer.ts")],
+    outfile: path.join(tempDir, "mcp-config-writer.cjs"),
+    bundle: true, packages: "external", platform: "node", target: "node20", format: "cjs", logLevel: "warning",
   });
 
   const bundles = entries.map((entry) => path.join(tempDir, entry.replace(/\.ts$/, ".cjs")));

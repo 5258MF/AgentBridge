@@ -398,6 +398,26 @@
   .agentbridge-mcp-errors, .agentbridge-mcp-error-box { grid-column: 1 / -1; color: var(--vscode-errorForeground); font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
   .agentbridge-mcp-error-box { margin-top: 12px; padding: 9px; border-left: 2px solid var(--vscode-errorForeground); background: var(--vscode-inputValidation-errorBackground, transparent); }
   .agentbridge-mcp-footer { margin: 12px 0 0; padding-top: 9px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.6; }
+  .agentbridge-mcp-form { min-width: 0; margin-top: 14px; padding: 12px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 6px; background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent); }
+  .agentbridge-mcp-form[hidden], .agentbridge-mcp-form [hidden], #mcpFormSavedStatus[hidden] { display: none; }
+  .agentbridge-mcp-form-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); font-size: 12px; }
+  .agentbridge-mcp-form .agentbridge-field { min-width: 0; margin-top: 12px; }
+  .agentbridge-mcp-form .agentbridge-label { font-size: 11px; margin-bottom: 5px; }
+  .agentbridge-mcp-form .agentbridge-help { margin-top: 5px; font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+  .agentbridge-mcp-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 10px; }
+  .agentbridge-mcp-form .agentbridge-input { min-width: 0; max-width: 100%; min-height: 29px; font-size: 12px; }
+  .agentbridge-mcp-form .agentbridge-textarea { min-height: 72px; max-height: 220px; padding: 7px 8px; border-radius: 4px; font-size: 11px; line-height: 1.6; }
+  .agentbridge-mcp-form-credentials { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 12px; }
+  .agentbridge-mcp-form-credentials .agentbridge-help { min-width: 0; flex: 1 1 150px; margin: 0; }
+  .agentbridge-mcp-form-credentials input { flex: 1 1 100%; }
+  .agentbridge-mcp-form-options { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-mcp-form-options > summary { cursor: pointer; color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .agentbridge-mcp-form-options > summary:hover { color: var(--vscode-foreground); }
+  .agentbridge-mcp-form-options > summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 3px; }
+  .agentbridge-mcp-form-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
+  .agentbridge-mcp-form button { min-height: 28px; padding: 4px 10px; border-radius: 4px; font-size: 11px; }
+  .agentbridge-mcp-form .agentbridge-mcp-error-box { margin-top: 12px; }
+  @media (max-width: 380px) { .agentbridge-mcp-form-grid { grid-template-columns: minmax(0, 1fr); } }
   @media (max-width: 340px) {
     .agentbridge-mcp-heading, .agentbridge-mcp-body { padding-left: 11px; padding-right: 11px; }
     .agentbridge-mcp-heading { gap: 6px; }

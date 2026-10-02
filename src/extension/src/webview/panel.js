@@ -29,6 +29,10 @@
   let todoExpanded = false;
   let footerCollapsed = false;
   let externalMcpSignature = '';
+  let mcpFormSaveRequestId = null;
+  let mcpFormFocusPending = false;
+  const mcpWorkspaceAvailable = window.__AB_MCP_WORKSPACE_AVAILABLE__ === true;
+  const mcpFormFields = ['mcpFormName', 'mcpFormScope', 'mcpFormTransport', 'mcpFormCommand', 'mcpFormArgs', 'mcpFormUrl', 'mcpFormHeaders', 'mcpFormCwd', 'mcpFormEnv', 'mcpFormPlanMode', 'mcpFormConnectTimeout', 'mcpFormTimeout'];
   const expandedToolActivities = new Set();
   const sessionScroll = $('sessionSection').querySelector('.agentbridge-session-scroll');
   const timelineEl = $('timeline');
@@ -38,6 +42,91 @@
     busy = true;
     updateControls();
     vscode.postMessage(Object.assign({ type }, fields || {}));
+  }
+
+  function updateMcpForm() {
+    const http = $('mcpFormTransport').value === 'http';
+    $('mcpFormStdioFields').hidden = http;
+    $('mcpFormStdioOptions').hidden = http;
+    $('mcpFormHttpFields').hidden = !http;
+    const workspace = $('mcpFormScope').value === 'workspace';
+    const existing = lastStatus && lastStatus.externalMcp && lastStatus.externalMcp.servers.find((server) => server.name === $('mcpFormName').value.trim());
+    const hint = existing && existing.scope !== $('mcpFormScope').value
+      ? workspace ? 'mcpFormOverrideHint' : 'mcpFormShadowedHint'
+      : workspace ? 'mcpFormWorkspaceHint' : 'mcpFormUserHint';
+    $('mcpFormScopeHint').textContent = t(hint);
+  }
+
+  function resetMcpForm() {
+    for (const id of mcpFormFields) $(id).value = '';
+    $('mcpFormScope').value = mcpWorkspaceAvailable ? 'workspace' : 'user';
+    $('mcpFormTransport').value = 'stdio';
+    $('mcpFormPlanMode').value = 'read-only';
+    $('mcpFormCredentialReference').value = '';
+    $('mcpFormCredentialReference').hidden = true;
+    $('mcpFormOptions').open = false;
+    $('mcpFormError').hidden = true;
+    $('mcpFormError').textContent = '';
+    updateMcpForm();
+  }
+
+  function closeMcpForm() {
+    $('mcpAddServerForm').hidden = true;
+    $('mcpAddServerButton').setAttribute('aria-expanded', 'false');
+    resetMcpForm();
+    vscode.postMessage({ type: 'externalMcpFormDirtyChanged', dirty: false });
+    updateControls();
+    mcpFormFocusPending = $('mcpAddServerButton').disabled;
+    if (!mcpFormFocusPending) $('mcpAddServerButton').focus();
+  }
+
+  function mcpFormMap(text, headers) {
+    const entries = [];
+    const names = new Set();
+    const lines = text.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      if (!line.trim()) continue;
+      const separator = line.indexOf(headers ? ':' : '=');
+      const name = line.slice(0, separator).trim();
+      const key = headers ? name.toLowerCase() : name;
+      const validName = headers ? /^[A-Za-z0-9!#$%&'*+.^_\x60|~-]+$/.test(name) : /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+      if (separator < 1 || !validName || names.has(key)) throw new Error(t('mcpFormMapInvalid', index + 1));
+      names.add(key);
+      entries.push([name, headers ? line.slice(separator + 1).trim() : line.slice(separator + 1)]);
+    }
+    return Object.fromEntries(entries);
+  }
+
+  function buildMcpFormConfig() {
+    const name = $('mcpFormName').value.trim();
+    if (!/^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$/.test(name)) throw new Error(t('mcpFormNameInvalid'));
+    const type = $('mcpFormTransport').value;
+    const config = { type, planMode: $('mcpFormPlanMode').value };
+    if (type === 'http') {
+      config.url = $('mcpFormUrl').value.trim();
+      if (!config.url) throw new Error(t('mcpFormUrlRequired'));
+      const headers = mcpFormMap($('mcpFormHeaders').value, true);
+      if (Object.keys(headers).length) config.headers = headers;
+    } else {
+      config.command = $('mcpFormCommand').value.trim();
+      if (!config.command) throw new Error(t('mcpFormCommandRequired'));
+      const args = $('mcpFormArgs').value.split(/\r?\n/).filter((line) => line.trim());
+      if (args.length) config.args = args;
+      const env = mcpFormMap($('mcpFormEnv').value, false);
+      if (Object.keys(env).length) config.env = env;
+      const cwd = $('mcpFormCwd').value.trim();
+      if (cwd) config.cwd = cwd;
+    }
+    for (const [id, key] of [['mcpFormTimeout', 'timeout'], ['mcpFormConnectTimeout', 'connectTimeout']]) {
+      if ($(id).validity && $(id).validity.badInput) throw new Error(t('mcpFormTimeoutInvalid'));
+      const value = $(id).value.trim();
+      if (!value) continue;
+      const seconds = Number(value);
+      if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 3600) throw new Error(t('mcpFormTimeoutInvalid'));
+      config[key] = seconds;
+    }
+    return { name, scope: $('mcpFormScope').value, config };
   }
 
   function renderExternalMcp(status) {
@@ -875,7 +964,11 @@
 
   function updateControls() {
     const statusLoaded = lastStatus !== null;
-    for (const id of ['mcpUserConfigButton', 'mcpWorkspaceConfigButton', 'mcpReloadButton', 'mcpCredentialButton']) $(id).disabled = !statusLoaded || busy;
+    for (const id of ['mcpUserConfigButton', 'mcpWorkspaceConfigButton', 'mcpReloadButton', 'mcpCredentialButton']) $(id).disabled = !statusLoaded || busy || languageChanging;
+    $('mcpWorkspaceConfigButton').disabled = !statusLoaded || busy || languageChanging || !mcpWorkspaceAvailable;
+    $('mcpAddServerButton').disabled = !statusLoaded || busy || languageChanging || !$('mcpAddServerForm').hidden;
+    for (const id of [...mcpFormFields, 'mcpFormSaveButton', 'mcpFormCancelButton', 'mcpFormCredentialButton']) $(id).disabled = !statusLoaded || busy || languageChanging || mcpFormSaveRequestId !== null;
+    updateMcpForm();
     if (lastStatus) renderExternalMcp(lastStatus);
     const running = lastStatus && lastStatus.state === 'running';
     const starting = lastStatus && lastStatus.state === 'starting';
@@ -917,7 +1010,7 @@
     $('tunnelProtocolAuto').disabled = !statusLoaded || busy;
     $('tunnelProtocolQuic').disabled = !statusLoaded || busy;
     $('tunnelProtocolHttp2').disabled = !statusLoaded || busy;
-    $('languageSelect').disabled = !statusLoaded || tunnelOperationBusy || languageChanging;
+    $('languageSelect').disabled = !statusLoaded || tunnelOperationBusy || languageChanging || !$('mcpAddServerForm').hidden;
     $('trustedBrowserOriginsInput').disabled = !statusLoaded || busy || languageChanging;
     $('trustedBrowserOriginsSaveButton').disabled = !statusLoaded || busy || languageChanging;
     updateSessionStartStopControl(lastStatus);
@@ -1016,15 +1109,56 @@
   }
 
   function resetBusy() {
+    if (mcpFormSaveRequestId !== null) {
+      busy = true;
+      updateControls();
+      return;
+    }
     busy = false;
     installingCloudflared = false;
     updateControls();
+    if (mcpFormFocusPending && !$('mcpAddServerButton').disabled) {
+      mcpFormFocusPending = false;
+      $('mcpAddServerButton').focus();
+    }
   }
 
   $('mcpUserConfigButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternalMcpConfig', scope: 'user' }));
   $('mcpWorkspaceConfigButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternalMcpConfig', scope: 'workspace' }));
   $('mcpReloadButton').addEventListener('click', () => postMcpOperation('reloadExternalMcp'));
   $('mcpCredentialButton').addEventListener('click', () => postMcpOperation('setExternalMcpCredential'));
+  $('mcpAddServerButton').addEventListener('click', () => {
+    if (busy || languageChanging || !lastStatus || !$('mcpAddServerForm').hidden) return;
+    resetMcpForm();
+    $('mcpAddServerForm').hidden = false;
+    $('externalMcpCard').open = true;
+    $('mcpAddServerButton').setAttribute('aria-expanded', 'true');
+    $('mcpFormSavedStatus').hidden = true;
+    vscode.postMessage({ type: 'externalMcpFormDirtyChanged', dirty: true });
+    updateControls();
+    $('mcpFormName').focus();
+  });
+  $('mcpFormCancelButton').addEventListener('click', () => { if (!busy && !languageChanging && mcpFormSaveRequestId === null) closeMcpForm(); });
+  for (const id of ['mcpFormName', 'mcpFormScope', 'mcpFormTransport']) {
+    $(id).addEventListener(id === 'mcpFormName' ? 'input' : 'change', updateMcpForm);
+  }
+  $('mcpFormCredentialButton').addEventListener('click', () => {
+    const name = $('mcpFormName').value.trim();
+    postMcpOperation('setExternalMcpCredential', { forForm: true, suggestedName: /^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$/.test(name) ? name + '_token' : 'mcp_token' });
+  });
+  $('mcpAddServerForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (busy || languageChanging || mcpFormSaveRequestId !== null || $('mcpAddServerForm').hidden || !lastStatus) return;
+    try {
+      const fields = buildMcpFormConfig();
+      mcpFormSaveRequestId = 'mcp-add-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      $('mcpFormError').hidden = true;
+      postMcpOperation('addExternalMcpServer', Object.assign(fields, { requestId: mcpFormSaveRequestId }));
+    } catch (error) {
+      $('mcpFormError').textContent = error instanceof Error ? error.message : t('mcpFormSaveFailed');
+      $('mcpFormError').hidden = false;
+    }
+  });
 
   $('startStopButton').addEventListener('click', toggleBridge);
   $('openFolderButton').addEventListener('click', () => vscode.postMessage({ type: 'openFolder' }));
@@ -1139,6 +1273,11 @@
   $('languageSelect').addEventListener('change', () => {
     const select = $('languageSelect');
     const nextLanguage = select.value;
+    if (!$('mcpAddServerForm').hidden) {
+      select.value = currentLanguagePreference;
+      window.alert(t('mcpFormBeforeLanguageChange'));
+      return;
+    }
     if (namedTunnelInputDirty) {
       select.value = currentLanguagePreference;
       window.alert(t('saveNamedTunnelBeforeLanguageChange'));
@@ -1260,7 +1399,21 @@
 
   window.addEventListener('message', (event) => {
     const message = event.data;
-    if (message && message.type === 'status' && message.status) {
+    if (message && message.type === 'externalMcpServerSaved' && message.requestId === mcpFormSaveRequestId && mcpFormSaveRequestId) {
+      mcpFormSaveRequestId = null;
+      closeMcpForm();
+      $('mcpFormSavedStatus').textContent = t('mcpFormSaved', message.name);
+      $('mcpFormSavedStatus').hidden = false;
+    } else if (message && message.type === 'externalMcpServerSaveFailed' && message.requestId === mcpFormSaveRequestId && mcpFormSaveRequestId) {
+      mcpFormSaveRequestId = null;
+      $('mcpFormError').textContent = message.detail || t('mcpFormSaveFailed');
+      $('mcpFormError').hidden = false;
+    } else if (message && message.type === 'externalMcpCredentialSaved' && message.forForm && !$('mcpAddServerForm').hidden) {
+      const reference = '${secret:' + message.name + '}';
+      $('mcpFormCredentialReference').value = reference;
+      $('mcpFormCredentialReference').hidden = false;
+      if ($('mcpFormTransport').value === 'http' && !$('mcpFormHeaders').value.trim()) $('mcpFormHeaders').value = 'Authorization: Bearer ' + reference;
+    } else if (message && message.type === 'status' && message.status) {
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
     } else if (message && message.type === 'idleSessionsCleared' && message.status) {
       refreshStatus(message.status, message.persistentMode, message.quickTunnelCopied === true);
@@ -1295,6 +1448,19 @@
         }
       }
     } else if (message && message.type === 'operationFinished') {
+      if (message.operation === 'addExternalMcpServer' && mcpFormSaveRequestId) {
+        if (message.requestId !== mcpFormSaveRequestId) return;
+        mcpFormSaveRequestId = null;
+        if (message.succeeded === true) {
+          const name = $('mcpFormName').value.trim();
+          closeMcpForm();
+          $('mcpFormSavedStatus').textContent = t('mcpFormSaved', name);
+          $('mcpFormSavedStatus').hidden = false;
+        } else {
+          $('mcpFormError').textContent = t('mcpFormSaveFailed');
+          $('mcpFormError').hidden = false;
+        }
+      }
       if (message.operation === 'configureNamedTunnel' && message.succeeded === true) {
         setNamedTunnelInputDirty(false);
       }

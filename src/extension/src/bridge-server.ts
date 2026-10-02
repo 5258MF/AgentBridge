@@ -32,7 +32,8 @@ import {
 import { discoverSkills, LOAD_SKILL_TOOL, loadSkill, parseLoadSkillInput, renderLoadSkillDescription } from "./skills.js";
 import { ExternalMcpManager, type ExternalMcpStatus } from "./mcp-manager.js";
 import type { McpConnectionFactory } from "./mcp-client.js";
-import { MCP_SECRET_PREFIX, mcpConfigPaths, validMcpSecretName } from "./mcp-config.js";
+import { MCP_SECRET_PREFIX, loadMcpConfiguration, mcpConfigPaths, validMcpSecretName } from "./mcp-config.js";
+import { addMcpServerConfiguration, canonicalMcpConfigurationPath } from "./mcp-config-editor.js";
 import { formatGetTodosResult, formatSetTodosResult } from "./todo-format.js";
 import { formatToolError, ToolError } from "./tool-errors.js";
 import { asRecord, bridgePresentation, type BridgeActivity, type BridgeActivityPresentation, type BridgeTodo } from "./activity-presentation.js";
@@ -460,6 +461,7 @@ export class BridgeManager implements vscode.Disposable {
   private tunnelChecked = false;
   private activeRequests = 0;
   private readonly activities: BridgeActivity[] = [];
+  private externalMcpConfigUpdateQueue: Promise<void> = Promise.resolve();
   private todos: BridgeTodo[] = [];
   private todoUpdateQueue: Promise<void> = Promise.resolve();
   private readonly externalMcp: ExternalMcpManager;
@@ -3383,6 +3385,7 @@ export class BridgeManager implements vscode.Disposable {
     this.disposed = true;
     await this.stopResources(true);
     await this.todoUpdateQueue;
+    await this.externalMcpConfigUpdateQueue;
     await this.externalMcp.dispose();
   }
 
@@ -3401,14 +3404,48 @@ export class BridgeManager implements vscode.Disposable {
     await this.context.secrets.store(MCP_SECRET_PREFIX + name, value);
     await this.externalMcp.credentialChanged(name);
   }
+  private externalMcpTargetPath(scope: "user" | "workspace"): string {
+    if (scope !== "user" && scope !== "workspace") throw new Error("Invalid MCP configuration scope.");
+    const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
+    if (scope === "workspace" && !roots.length) throw new Error("Open a workspace folder first.");
+    if (scope === "user" && !this.agentsHomeDir) throw new Error("User home directory is unavailable.");
+    return mcpConfigPaths({ workspaceRoots: scope === "workspace" ? [roots[0]!] : [], homeDir: scope === "user" ? this.agentsHomeDir : undefined })[0]!;
+  }
+  async addExternalMcpServer(scope: "user" | "workspace", name: string, config: unknown): Promise<void> {
+    const operation = this.externalMcpConfigUpdateQueue.then(async () => {
+      const file = this.externalMcpTargetPath(scope);
+      const assertEditable = async () => {
+        if (this.disposed) throw new Error("The Bridge has been disposed.");
+        const target = await canonicalMcpConfigurationPath(file);
+        for (const document of vscode.workspace.textDocuments) {
+          if (document.uri.scheme !== "file" || !document.isDirty) continue;
+          const actual = await canonicalMcpConfigurationPath(document.uri.fsPath);
+          const samePath = process.platform === "win32" ? actual.toLowerCase() === target.toLowerCase() : actual === target;
+          if (samePath) throw new Error("Save or discard unsaved edits to mcp.json before adding a server.");
+        }
+      };
+      const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
+      const home = this.agentsHomeDir ?? [...roots].sort()[0]!;
+      await addMcpServerConfiguration(file, name, config, assertEditable, {
+        mutexFile: path.join(home, ".agentbridge", ".mcp-config-save"),
+        beforeCommit: async () => {
+          const latest = await loadMcpConfiguration({ workspaceRoots: roots, homeDir: this.agentsHomeDir });
+          if (latest.serverCount > 32 || (latest.serverCount >= 32 && !latest.entries.some((entry) => entry.name === name))) {
+            throw new Error("At most 32 external MCP servers are supported per Bridge.");
+          }
+        },
+        onCleanupError: (error) => this.output.appendLine(`[mcp-config] Configuration saved; cleanup failed: ${error instanceof Error ? error.message : String(error)}`),
+      });
+      await this.externalMcp.reload();
+    });
+    this.externalMcpConfigUpdateQueue = operation.catch(() => {});
+    return operation;
+  }
   async externalMcpConfigurationPath(scope: "user" | "workspace", serverName?: string): Promise<string> {
     let file = serverName ? this.externalMcp.getStatus().servers.find((server) => server.name === serverName)?.source : undefined;
     if (serverName && !file) throw new Error("Unknown MCP server.");
     if (!file) {
-      const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
-      if (scope === "workspace" && !roots.length) throw new Error("Open a workspace folder first.");
-      if (scope === "user" && !this.agentsHomeDir) throw new Error("User home directory is unavailable.");
-      file = mcpConfigPaths({ workspaceRoots: scope === "workspace" ? [roots[0]!] : [], homeDir: scope === "user" ? this.agentsHomeDir : undefined })[0]!;
+      file = this.externalMcpTargetPath(scope);
     }
     await mkdir(path.dirname(file), { recursive: true });
     try { await writeFile(file, '{\n  "mcpServers": {}\n}\n', { encoding: "utf8", flag: "wx" }); }

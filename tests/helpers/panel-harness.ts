@@ -25,6 +25,7 @@ class FakeClassList {
 
 export class FakeElement {
   value = "";
+  validity = { badInput: false };
   disabled = false;
   textContent = "";
   title = "";
@@ -63,6 +64,7 @@ export class FakeElement {
   }
 
   focus(): void {
+    if (this.disabled) return;
     if (this.owner) this.owner.activeElement = this;
   }
 
@@ -106,7 +108,9 @@ class FakeDocument {
 
   constructor(html: string) {
     for (const match of html.matchAll(/<([a-zA-Z0-9-]+)[^>]*\sid="([^"]+)"[^>]*>/g)) {
-      this.elements.set(match[2], new FakeElement(match[2], match[1], this));
+      const element = new FakeElement(match[2], match[1], this);
+      element.hidden = /\shidden(?:\s|>)/.test(match[0].replace(/"[^"]*"/g, '""'));
+      this.elements.set(match[2], element);
     }
     this.getElementById("languageSelect").value = "auto";
     const textarea = html.match(/<textarea[^>]*id="trustedBrowserOriginsInput"[^>]*>([\s\S]*?)<\/textarea>/);
@@ -148,6 +152,7 @@ function decodeHtml(value: string): string {
 
 export function executePanelHtml(html: string): {
   element(id: string): FakeElement;
+  focusedId(): string;
   posted: any[];
   dispatchMessage(data: any): void;
 } {
@@ -190,6 +195,7 @@ export function executePanelHtml(html: string): {
   for (const script of scripts) vm.runInContext(script, context, { timeout: 2_000 });
   return {
     element: (id: string) => document.getElementById(id),
+    focusedId: () => document.activeElement?.id ?? "",
     posted,
     dispatchMessage(data: any): void {
       for (const listener of windowListeners.get("message") ?? []) listener({ data });

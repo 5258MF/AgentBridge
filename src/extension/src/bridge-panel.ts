@@ -93,6 +93,7 @@ const BUSY_PANEL_MESSAGE_TYPES = new Set([
   "reconnectExternalMcp",
   "setExternalMcpEnabled",
   "setExternalMcpCredential",
+  "addExternalMcpServer",
 ]);
 
 const ADVANCED_SECTION_IDS = new Set([
@@ -107,6 +108,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
   private keepAdvancedSectionsOpenOnLanguageChange: string[] = [];
   private namedTunnelInputDirty = false;
   private trustedBrowserOriginsInputDirty = false;
+  private externalMcpFormDirty = false;
   private pendingLanguageRefresh = false;
   private pendingTrustedBrowserOriginsRefresh = false;
   private trustedBrowserOriginsConfigRevision = 0;
@@ -125,6 +127,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     this.keepAdvancedSectionsOpenOnLanguageChange = [];
     this.namedTunnelInputDirty = false;
     this.trustedBrowserOriginsInputDirty = false;
+    this.externalMcpFormDirty = false;
     this.pendingLanguageRefresh = false;
     this.pendingTrustedBrowserOriginsRefresh = false;
     webviewView.webview.options = {
@@ -136,15 +139,15 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       void this.handleMessage(message, webviewView.webview).then(() => {
         if (message.type !== "installCloudflared" && message.type !== "checkPublicHealth" && message.type !== "clearIdleSessions" && message.type !== "clearActivityHistory" && this.view === webviewView) {
           const operationFinished = BUSY_PANEL_MESSAGE_TYPES.has(message.type);
-          this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? true : undefined);
+          this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? true : undefined, typeof message.requestId === "string" ? message.requestId : undefined);
         }
       }, (error) => {
-        if (!(error instanceof BridgeStartCancelledError)) {
+        if (!(error instanceof BridgeStartCancelledError) && message.type !== "addExternalMcpServer") {
           void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
         }
         if (message.type !== "installCloudflared" && message.type !== "checkPublicHealth" && this.view === webviewView) {
           const operationFinished = BUSY_PANEL_MESSAGE_TYPES.has(message.type);
-          this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? false : undefined);
+          this.pushStatus(operationFinished ? "operationFinished" : "status", operationFinished ? message.type : undefined, operationFinished ? false : undefined, typeof message.requestId === "string" ? message.requestId : undefined);
         }
       });
     });
@@ -166,7 +169,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       if (!event.affectsConfiguration("agentbridge.language")) return;
       const advancedOpen = this.keepAdvancedOpenOnLanguageChange;
       const advancedSectionsOpen = this.keepAdvancedSectionsOpenOnLanguageChange;
-      if (this.namedTunnelInputDirty || this.trustedBrowserOriginsInputDirty) {
+      if (this.namedTunnelInputDirty || this.trustedBrowserOriginsInputDirty || this.externalMcpFormDirty) {
         this.pendingLanguageRefresh = true;
         return;
       }
@@ -190,6 +193,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       this.keepAdvancedSectionsOpenOnLanguageChange = [];
       this.namedTunnelInputDirty = false;
       this.trustedBrowserOriginsInputDirty = false;
+      this.externalMcpFormDirty = false;
       this.pendingLanguageRefresh = false;
       this.pendingTrustedBrowserOriginsRefresh = false;
       this.stopPolling();
@@ -198,7 +202,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
 
   private flushDeferredConfigurationRefresh(sourceWebview: vscode.Webview): void {
     if (this.view?.webview !== sourceWebview) return;
-    if (this.pendingLanguageRefresh && !this.namedTunnelInputDirty && !this.trustedBrowserOriginsInputDirty) {
+    if (this.pendingLanguageRefresh && !this.namedTunnelInputDirty && !this.trustedBrowserOriginsInputDirty && !this.externalMcpFormDirty) {
       const advancedOpen = this.keepAdvancedOpenOnLanguageChange;
       const advancedSectionsOpen = this.keepAdvancedSectionsOpenOnLanguageChange;
       this.keepAdvancedOpenOnLanguageChange = false;
@@ -239,7 +243,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       && this.lastAttemptedQuickTunnelUrl === url;
   }
 
-  private pushStatus(type: "status" | "operationFinished" = "status", operation?: string, succeeded?: boolean): void {
+  private pushStatus(type: "status" | "operationFinished" = "status", operation?: string, succeeded?: boolean, requestId?: string): void {
     if (!this.view) return;
     const status = this.bridge.getStatus();
     if (status.tunnelProvider === "cloudflare" && status.state === "running" && status.publicUrl && status.publicUrl !== this.lastAttemptedQuickTunnelUrl) {
@@ -266,7 +270,7 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     }
     const persistentMode = vscode.workspace.getConfiguration("agentbridge.bridge").get<boolean>("persistentMode", false);
     const quickTunnelCopied = status.publicUrl !== undefined && status.publicUrl === this.lastCopiedQuickTunnelUrl;
-    void this.view.webview.postMessage({ type, status, persistentMode, quickTunnelCopied, operation, succeeded });
+    void this.view.webview.postMessage({ type, status, persistentMode, quickTunnelCopied, operation, succeeded, requestId });
   }
 
   private async handleMessage(message: PanelMessage, sourceWebview: vscode.Webview): Promise<void> {
@@ -300,11 +304,33 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
       }
       case "setExternalMcpCredential": {
         await this.bridgeReady;
-        const name = await vscode.window.showInputBox({ title: t("mcpCredentialName"), prompt: t("mcpCredentialNameHelp"), ignoreFocusOut: true });
+        const suggestedName = typeof message.suggestedName === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(message.suggestedName) ? message.suggestedName : undefined;
+        const name = await vscode.window.showInputBox({ title: t("mcpCredentialName"), prompt: t("mcpCredentialNameHelp"), value: suggestedName, ignoreFocusOut: true });
         if (!name) return;
         const value = await vscode.window.showInputBox({ title: t("mcpCredentialValue"), password: true, ignoreFocusOut: true });
         if (value === undefined || value === "") return;
         await this.bridge.setExternalMcpCredential(name.trim(), value);
+        await sourceWebview.postMessage({ type: "externalMcpCredentialSaved", name: name.trim(), forForm: message.forForm === true });
+        return;
+      }
+      case "addExternalMcpServer": {
+        try {
+          if (message.scope !== "user" && message.scope !== "workspace") throw new Error("Invalid MCP configuration scope.");
+          if (typeof message.name !== "string") throw new Error("MCP server name must be a string.");
+          if (typeof message.requestId !== "string" || !message.requestId || message.requestId.length > 100) throw new Error("Invalid MCP save request.");
+          await this.bridgeReady;
+          await this.bridge.addExternalMcpServer(message.scope, message.name, message.config);
+          await sourceWebview.postMessage({ type: "externalMcpServerSaved", requestId: message.requestId, name: message.name });
+        } catch (error) {
+          await sourceWebview.postMessage({ type: "externalMcpServerSaveFailed", requestId: message.requestId, detail: error instanceof Error ? error.message : "Could not save MCP configuration." });
+          throw error;
+        }
+        return;
+      }
+      case "externalMcpFormDirtyChanged": {
+        if (typeof message.dirty !== "boolean") throw new Error("Invalid MCP form state.");
+        this.externalMcpFormDirty = message.dirty;
+        if (!message.dirty) this.flushDeferredConfigurationRefresh(sourceWebview);
         return;
       }
       case "namedTunnelDirtyChanged": {
@@ -643,6 +669,7 @@ private renderHtml(advancedOpen = false, advancedSectionsOpen: readonly string[]
  <script>
    window.__AB_I18N__ = ${JSON.stringify(dict).replace(/</g, "\\u003c")};
    window.__AB_CAN_AUTO_INSTALL_CLOUDFLARED__ = ${JSON.stringify(CAN_AUTO_INSTALL_CLOUDFLARED)};
+   window.__AB_MCP_WORKSPACE_AVAILABLE__ = ${JSON.stringify(Boolean(vscode.workspace.workspaceFolders?.length))};
    window.__AB_TRUSTED_BROWSER_ORIGINS_REVISION__ = ${JSON.stringify(this.trustedBrowserOriginsConfigRevision)};
  </script>
  <style>
@@ -889,7 +916,8 @@ ${PANEL_CSS}</style>
       <p class="agentbridge-mcp-description">${t("externalMcpHelp")}</p>
       <div class="agentbridge-mcp-toolbar">
         <div class="agentbridge-mcp-config-actions">
-          <button class="primary" id="mcpWorkspaceConfigButton" title="${t("mcpWorkspaceConfig")}">${t("mcpWorkspaceConfig")}</button>
+          <button class="primary" id="mcpAddServerButton" type="button" aria-expanded="false" aria-controls="mcpAddServerForm">${t("mcpAddServer")}</button>
+          <button class="secondary" id="mcpWorkspaceConfigButton" title="${t("mcpWorkspaceConfig")}">${t("mcpWorkspaceConfig")}</button>
           <button class="secondary" id="mcpUserConfigButton" title="${t("mcpUserConfig")}">${t("mcpUserConfig")}</button>
         </div>
         <div class="agentbridge-mcp-utilities">
@@ -897,6 +925,48 @@ ${PANEL_CSS}</style>
           <button class="agentbridge-mcp-icon-button" id="mcpCredentialButton" title="${t("mcpCredentialHint")}" aria-label="${t("mcpCredentialButton")}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="5.5" cy="5.5" r="3"/><path d="m7.7 7.7 5.5 5.5M10 10l1.7-1.7M11.7 11.7l1.7-1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </div>
       </div>
+      <form id="mcpAddServerForm" class="agentbridge-mcp-form" hidden novalidate>
+        <div class="agentbridge-mcp-form-heading"><strong>${t("mcpAddServer")}</strong><span class="agentbridge-mcp-badge">MCP</span></div>
+        <div class="agentbridge-field">
+          <label class="agentbridge-label" for="mcpFormName">${t("mcpFormName")}</label>
+          <input class="agentbridge-input" id="mcpFormName" type="text" maxlength="32" placeholder="my-server" autocomplete="off" spellcheck="false" />
+          <div class="agentbridge-help">${t("mcpFormNameHelp")}</div>
+        </div>
+        <div class="agentbridge-mcp-form-grid">
+          <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormScope">${t("mcpFormScope")}</label><select class="agentbridge-input" id="mcpFormScope"><option value="workspace">${t("mcpWorkspaceConfig")}</option><option value="user">${t("mcpUserConfig")}</option></select></div>
+          <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormTransport">${t("mcpFormTransport")}</label><select class="agentbridge-input" id="mcpFormTransport"><option value="stdio">${t("mcpFormStdio")}</option><option value="http">${t("mcpFormHttp")}</option></select></div>
+        </div>
+        <p class="agentbridge-help" id="mcpFormScopeHint"></p>
+        <div id="mcpFormStdioFields">
+          <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormCommand">${t("mcpFormCommand")}</label><input class="agentbridge-input" id="mcpFormCommand" type="text" placeholder="npx" autocomplete="off" spellcheck="false" /><div class="agentbridge-help">${t("mcpFormCommandHelp")}</div></div>
+          <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormArgs">${t("mcpFormArgs")}</label><textarea class="agentbridge-textarea" id="mcpFormArgs" rows="3" placeholder="-y&#10;@scope/mcp-server" spellcheck="false"></textarea><div class="agentbridge-help">${t("mcpFormArgsHelp")}</div></div>
+        </div>
+        <div id="mcpFormHttpFields" hidden>
+          <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormUrl">${t("mcpFormUrl")}</label><input class="agentbridge-input" id="mcpFormUrl" type="text" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false" /></div>
+          <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormHeaders">${t("mcpFormHeaders")}</label><textarea class="agentbridge-textarea" id="mcpFormHeaders" rows="3" placeholder="Authorization: Bearer &#36;{secret:my-server_token}" spellcheck="false"></textarea><div class="agentbridge-help">${t("mcpFormHeadersHelp")}</div></div>
+        </div>
+        <div class="agentbridge-mcp-form-credentials">
+          <button class="secondary" id="mcpFormCredentialButton" type="button">${t("mcpCredentialButton")}</button>
+          <div class="agentbridge-help">${t("mcpFormCredentialHelp")}</div>
+          <input class="agentbridge-input" id="mcpFormCredentialReference" type="text" readonly aria-label="${t("mcpFormCredentialReference")}" hidden />
+        </div>
+        <details class="agentbridge-mcp-form-options" id="mcpFormOptions">
+          <summary>${t("mcpFormOptions")}</summary>
+          <div id="mcpFormStdioOptions">
+            <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormCwd">${t("mcpFormCwd")}</label><input class="agentbridge-input" id="mcpFormCwd" type="text" placeholder="&#36;{workspaceFolder}" spellcheck="false" /></div>
+            <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormEnv">${t("mcpFormEnv")}</label><textarea class="agentbridge-textarea" id="mcpFormEnv" rows="3" placeholder="SERVICE_TOKEN=&#36;{secret:my-server_token}" spellcheck="false"></textarea><div class="agentbridge-help">${t("mcpFormEnvHelp")}</div></div>
+          </div>
+          <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormPlanMode">${t("mcpFormPlanMode")}</label><select class="agentbridge-input" id="mcpFormPlanMode"><option value="read-only">${t("mcpFormPlanReadOnly")}</option><option value="all">${t("mcpFormPlanAll")}</option><option value="disabled">${t("mcpFormPlanDisabled")}</option></select></div>
+          <div class="agentbridge-mcp-form-grid">
+            <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormConnectTimeout">${t("mcpFormConnectTimeout")}</label><input class="agentbridge-input" id="mcpFormConnectTimeout" type="number" min="0.001" max="3600" step="any" placeholder="10" /></div>
+            <div class="agentbridge-field"><label class="agentbridge-label" for="mcpFormTimeout">${t("mcpFormTimeout")}</label><input class="agentbridge-input" id="mcpFormTimeout" type="number" min="0.001" max="3600" step="any" placeholder="60" /></div>
+          </div>
+        </details>
+        <div id="mcpFormError" class="agentbridge-mcp-error-box" role="alert" hidden></div>
+        <div class="agentbridge-mcp-form-actions"><button class="primary" id="mcpFormSaveButton" type="submit">${t("mcpFormSave")}</button><button class="secondary" id="mcpFormCancelButton" type="button">${t("mcpFormCancel")}</button></div>
+        <p class="agentbridge-help">${t("mcpFormSaveHelp")}</p>
+      </form>
+      <div id="mcpFormSavedStatus" class="agentbridge-help agentbridge-origins-status" role="status" hidden></div>
       <div id="externalMcpErrors" class="agentbridge-mcp-error-box" role="alert" hidden></div>
       <div id="externalMcpEmpty" class="agentbridge-mcp-empty">
         <svg class="agentbridge-mcp-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M9 3v4m6-4v4M7 7h10v5a5 5 0 0 1-10 0V7Zm5 10v4" stroke-linecap="round" stroke-linejoin="round"/></svg>
