@@ -80,6 +80,69 @@ test("Node search applies include globs to scoped directories and individual fil
   assert.deepEqual(await nodeSearch(root, { path: "src/notes.js", include: ["**/*.ts"] }), []);
 });
 
+test("Node include filtering bounds traversal even when no files match", async (t) => {
+  const root = makeFixture(t);
+  for (let index = 0; index < 30; index += 1) write(root, `data/${index}/input.json`);
+  for (const isRegex of [false, true]) {
+    const result = await searchFiles({ pattern: "search-target", is_regex: isRegex, include: ["**/*.ts"], context_lines: 0 }, {
+      workspaceRoots: [root],
+      checkPermission: () => true,
+      config: { maxFallbackEntriesVisited: 4 },
+    });
+    assert.deepEqual(result.matches, []);
+    assert.equal(result.summary.files_scanned, 0);
+    assert.equal(result.summary.truncated, true);
+    assert.deepEqual(result.summary.truncation_reasons, ["MAX_ENTRIES_VISITED"]);
+  }
+});
+
+test("Node traversal does not report truncation when the complete tree fits its budget", async (t) => {
+  const root = makeFixture(t);
+  write(root, "src/a.ts");
+  write(root, "src/b.ts");
+  const result = await searchFiles({ pattern: "search-target", include: ["**/*.ts"], context_lines: 0 }, {
+    workspaceRoots: [root],
+    checkPermission: () => true,
+    config: { maxFallbackEntriesVisited: 3 },
+  });
+  assert.deepEqual(result.matches.map((match) => match.path), ["src/a.ts", "src/b.ts"]);
+  assert.equal(result.summary.truncated, false);
+});
+
+test("Node traversal distinguishes empty pending directories from omitted contents at the exact budget", async (t) => {
+  for (const hasMoreEntries of [false, true]) {
+    const root = makeFixture(t);
+    write(root, "a.ts");
+    fs.mkdirSync(path.join(root, "pending"));
+    if (hasMoreEntries) write(root, "pending/extra.ts");
+    for (const isRegex of [false, true]) {
+      const result = await searchFiles({ pattern: "search-target", is_regex: isRegex, include: ["**/*.ts"], context_lines: 0 }, {
+        workspaceRoots: [root],
+        checkPermission: () => true,
+        config: { maxFallbackEntriesVisited: 2 },
+      });
+      assert.deepEqual(result.matches.map((match) => match.path), ["a.ts"]);
+      assert.equal(result.summary.truncated, hasMoreEntries);
+      assert.deepEqual(result.summary.truncation_reasons, hasMoreEntries ? ["MAX_ENTRIES_VISITED"] : []);
+    }
+  }
+});
+
+test("Node regex results keep many long-line matches within the worker memory limit", { timeout: 30_000 }, async (t) => {
+  const root = makeFixture(t);
+  const source = path.join(root, ".payload");
+  fs.writeFileSync(source, "a".repeat(DEFAULT_SEARCH_FILES_CONFIG.maxFallbackFileBytes));
+  for (let index = 0; index < 64; index += 1) fs.linkSync(source, path.join(root, `long-${index}.txt`));
+  const result = await searchFiles({ pattern: "a", is_regex: true, context_lines: 0, max_results: 64 }, {
+    workspaceRoots: [root],
+    checkPermission: () => true,
+  });
+  assert.equal(result.matches.length, 64);
+  const expectedText = "a".repeat(DEFAULT_SEARCH_FILES_CONFIG.maxLineChars) + " … <line truncated>";
+  assert.ok(result.matches.every((match) => match.line === 1 && match.column === 1 && match.text_truncated && match.text === expectedText));
+  assert.equal(result.summary.truncated, false, "line shortening must not omit otherwise bounded matches");
+});
+
 test("Node regex workers preserve matching, case handling, context, and result limits", async (t) => {
   const root = makeFixture(t);
   write(root, "src/main.ts", "before\r\n  TARGET12\r\ntarget34\r\nafter\r\n");
@@ -145,7 +208,7 @@ test("regex worker concurrency is bounded and cancellation releases slots before
   const root = makeFixture(t);
   write(root, "input.txt");
   const input: RegexSearchInput = {
-    candidates: { files: [path.join(root, "input.txt")], filesScanned: 1, hitLimit: false },
+    candidates: { files: [path.join(root, "input.txt")], filesScanned: 1, hitLimit: false, hitTraversalLimit: false },
     options: {
       pattern: "search-target", isRegex: true, caseSensitive: undefined, scopeRoot: root, scopeRealPath: root,
       scopeDisplay: ".", include: [], exclude: [], contextLines: 0, maxResults: 100, maxMatchesPerFile: 20,

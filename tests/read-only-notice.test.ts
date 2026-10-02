@@ -17,6 +17,7 @@ function makeManager(logLines?: string[]): BridgeManager {
     extension: { packageJSON: { version: "0.1.13" } },
     subscriptions: [],
     secrets: { get: async () => undefined, store: async () => undefined, delete: async () => undefined },
+    workspaceState: vscodeTest.createMemento(),
     globalState: {
       get: <T>(key: string, fallback?: T) => (globalState.has(key) ? globalState.get(key) : fallback) as T,
       update: async (key: string, value: unknown) => { globalState.set(key, value); },

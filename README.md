@@ -20,12 +20,13 @@ Published to the [Visual Studio Marketplace](https://marketplace.visualstudio.co
 
 ## Features
 
-- **15 MCP tools** spanning:
+- **16 MCP tools** spanning:
   - **File system** — `read_files`, `apply_patch`, `search_files`, `find_files`, `list_directory`, `read_image_file`
   - **Terminal** — `run_command`, `get_command_output`, `send_command_input`, `terminate_command`
   - **LSP / diagnostics** — `get_diagnostics`, `lsp`
   - **Skills** — `load_skill`
-  - **Bridge state** — `set_todos`, `report_progress`
+  - **Bridge state** — `get_todos`, `set_todos`, `report_progress`
+  - One current todo list is shared by all connections to a Bridge, saved per workspace, and restored after extension reloads. Use `get_todos` to resume work; `set_todos` replaces the complete list and an empty list clears it.
 - **3 tunnel providers** — Cloudflare Quick Tunnel (default, zero-config), Cloudflare Named Tunnel (stable hostname), ngrok (reserved domain).
 - **Cross-platform cloudflared detection and installation** — one-click Winget installation on Windows and Homebrew installation on macOS; Linux checks PATH, `/usr/bin`, and `/usr/local/bin` while keeping installation manual through Cloudflare's official instructions.
 - **Managed shell support matrix** — PowerShell 5.1 / PowerShell 7+ (Windows), bash (Linux) and zsh (macOS) fully support `run_command` via per-prompt protocol hooks; cmd, sh and fish are rejected up front with a clear error instead of timing out. The syntax hint shown to the AI updates automatically when you switch shells.
@@ -158,7 +159,7 @@ Connecting the ChatGPT web app: see [docs/chatgpt-web-connector.md](docs/chatgpt
 - VS Code 1.95+
 - Node 22+
 - Built and verified on Windows; macOS supports Homebrew installation, while Linux detects an existing cloudflared and provides a manual installation entry point.
-- File search bundles ripgrep on Windows. On macOS/Linux it uses `rg` from PATH when available, otherwise the built-in bounded Node engine (content search: at most 20,000 files and files up to 2 MiB; file discovery: at most 5,000 candidates).
+- File search bundles ripgrep on Windows. On macOS/Linux it uses `rg` from PATH when available, otherwise the built-in bounded Node engine (content search: at most 20,000 files, 100,000 directory entries, and files up to 2 MiB; file discovery: at most 5,000 candidates). The content-search traversal budget includes entries rejected by file filters; exhausted traversal returns `MAX_ENTRIES_VISITED` so incomplete results are explicit.
 - Node fallback regular-expression matching runs in a cancellable worker with a 10-second limit. At most two such searches run concurrently. A timeout returns `SEARCH_TIMEOUT` and suggests narrowing the scope or simplifying the pattern; it does not return an empty match list.
 
 ## License

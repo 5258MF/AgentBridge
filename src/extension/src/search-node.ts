@@ -8,6 +8,7 @@ export interface NodeSearchCandidates {
   files: string[];
   filesScanned: number;
   hitLimit: boolean;
+  hitTraversalLimit: boolean;
 }
 
 export class NodeSearchPatternError extends Error {
@@ -68,6 +69,7 @@ export async function scanNodeSearchFiles(
   const perFile = new Map<string, number>();
   const truncationReasons: EngineResult["truncationReasons"] = new Set();
   if (candidates.hitLimit) truncationReasons.add("MAX_FILES_SCANNED");
+  if (candidates.hitTraversalLimit) truncationReasons.add("MAX_ENTRIES_VISITED");
   let skippedBinaryFiles = 0;
   let skippedLargeFiles = 0;
 
@@ -106,7 +108,10 @@ export async function scanNodeSearchFiles(
         break outer;
       }
       perFile.set(display, count + 1);
-      matches.push({ absolutePath: filePath, displayPath: display, line: index + 1, column: found.column, text: lines[index]! });
+      // Retain one extra character so presentation can still mark shortened lines.
+      // Copy the prefix: a sliced string can otherwise keep the entire file alive.
+      const matchText = Buffer.from(lines[index]!.slice(0, config.maxLineChars + 1), "utf8").toString("utf8");
+      matches.push({ absolutePath: filePath, displayPath: display, line: index + 1, column: found.column, text: matchText });
     }
   }
 

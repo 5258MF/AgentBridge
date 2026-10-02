@@ -712,9 +712,10 @@
     $('toolsContainer').textContent = '';
     for (const tool of status.toolNames) {
       const badge = document.createElement('span');
-      badge.className = 'agentbridge-tool' + (tool === 'report_progress' || tool === 'set_todos' ? ' bridge-only' : '');
+      const bridgeOnly = tool === 'get_todos' || tool === 'set_todos' || tool === 'report_progress';
+      badge.className = 'agentbridge-tool' + (bridgeOnly ? ' bridge-only' : '');
       badge.textContent = tool;
-      if (tool === 'set_todos' || tool === 'report_progress') badge.title = t('bridgeOnlyTool');
+      if (bridgeOnly) badge.title = t('bridgeOnlyTool');
       $('toolsContainer').appendChild(badge);
     }
 

@@ -1,5 +1,11 @@
 # Change Log
 
+## Unreleased
+
+- **Bounded fallback search traversal and match memory** — Node content searches now stream directory entries under a separate 100,000-entry traversal budget, including paths rejected by file filters, and mark incomplete results with `MAX_ENTRIES_VISITED`. Match text is copied under the existing display-line limit before it accumulates in the regex worker, avoiding heap-limit failures on ordinary searches across many long-line files while preserving columns and line-shortening flags.
+
+- **Workspace todo recovery** — new `get_todos` reads the complete current list. All MCP connections to a Bridge share one list, saved in VS Code workspace storage and restored after extension reloads; different workspaces keep separate lists. Updates remain whole-list replacements with stable IDs and three states. Saves are serialized and acknowledged before visible state changes, and storage failures preserve the previous visible list and restore the storage cache. If recovery also fails, the tool reports that saved state could not be confirmed. An empty `set_todos` persists the cleared state; progress reports and activity cleanup do not change todo status. Refresh cached MCP tool lists to discover `get_todos`.
+
 ## 0.1.16 (2026-09-30)
 
 - **Shorter connection prompt** — the prompt copied from the panel is now the lean version: confirm a capability (native MCP, custom HTTPS POST, or command execution) or stop; authentication is in the URL, which must not be written into code or a repository; POST with the JSON/SSE Accept header; initialize, notifications/initialized, tools/list; keep the `Mcp-Session-Id` (in context or a temporary file in the model's own environment), reuse it, and re-initialize only on 404; report the capability used, server, tools, and the key points of the instructions. Before, the panel still copied an older 10-section prompt that treated the session id as a secret not to be stored, so clients opened a new session for every step. `tests/connection-prompt.test.ts` pins the essentials in both languages.

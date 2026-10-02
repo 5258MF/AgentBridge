@@ -4,7 +4,7 @@
 
 This is exactly what MCP clients receive from `tools/list`. In `run_command`, `${RUNTIME_SHELL_DESCRIPTION}` and `${RUNTIME_SHELL_SYNTAX_HINT}` are replaced at runtime with the configured managed shell. In `load_skill`, `${RUNTIME_SKILL_CATALOG}` is replaced with the skills found on this machine.
 
-15 tools, listed in both Plan and Build mode. In Plan mode (read-only), 3 are blocked at call time and `run_command` only runs allowlisted read-only commands.
+16 tools, listed in both Plan and Build mode. In Plan mode (read-only), 3 are blocked at call time and `run_command` only runs allowlisted read-only commands.
 
 | Tool | Plan mode | Required parameters |
 |---|---|---|
@@ -21,6 +21,7 @@ This is exactly what MCP clients receive from `tools/list`. In `run_command`, `$
 | [`get_diagnostics`](#get_diagnostics) | available | (none) |
 | [`lsp`](#lsp) | available | `operation` |
 | [`load_skill`](#load_skill) | available | (none) |
+| [`get_todos`](#get_todos) | available | (none) |
 | [`set_todos`](#set_todos) | available | `todos` |
 | [`report_progress`](#report_progress) | available | `message` |
 
@@ -291,6 +292,19 @@ ${RUNTIME_SKILL_CATALOG}
 | `name` | string | no |  | min length 1; max length 64 | Skill name from the list. Omit to list all skills. |
 | `file` | string | no |  | min length 1 | Optional path of another file inside the skill, relative to the skill directory, e.g. references/api.md. Requires name. |
 
+<a id="get_todos"></a>
+## `get_todos`
+
+```text
+Read the current shared task list for this AgentBridge workspace.
+
+- Use after reconnecting, resuming work, or when earlier todo results are missing from context.
+- All connections to this Bridge share this list; it is restored after extension reloads.
+- Returns the complete ordered list without changing it.
+```
+
+No parameters.
+
 <a id="set_todos"></a>
 ## `set_todos`
 
@@ -298,6 +312,8 @@ ${RUNTIME_SKILL_CATALOG}
 Show your task list for the current job to the user in the AgentBridge panel.
 
 - Send the complete list each time it changes, at most 24 items with at most one in_progress.
+- The list is shared by all connections to this Bridge and saved for this workspace across extension reloads.
+- Use get_todos to recover the current list before continuing work when it is missing from context.
 - Use goal-level items, not one per tool call; use report_progress for what you are doing right now.
 - An empty list clears it. The result echoes the stored list.
 ```

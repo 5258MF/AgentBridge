@@ -17,6 +17,7 @@ function makeContext(): any {
       store: async (key: string, value: string) => { secrets.set(key, value); },
       delete: async (key: string) => { secrets.delete(key); },
     },
+    workspaceState: vscodeTest.createMemento(),
     globalState: {
       get: <T>(key: string, fallback?: T) => (globalState.has(key) ? globalState.get(key) : fallback) as T,
       update: async (key: string, value: unknown) => { globalState.set(key, value); },

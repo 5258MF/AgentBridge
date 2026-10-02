@@ -20,12 +20,13 @@
 
 ## 核心特性
 
-- **15 个 MCP 工具**，覆盖：
+- **16 个 MCP 工具**，覆盖：
   - **文件系统** — `read_files`、`apply_patch`、`search_files`、`find_files`、`list_directory`、`read_image_file`
   - **终端** — `run_command`、`get_command_output`、`send_command_input`、`terminate_command`
   - **LSP / 诊断** — `get_diagnostics`、`lsp`
   - **Skills** — `load_skill`
-  - **Bridge 状态** — `set_todos`、`report_progress`
+  - **Bridge 状态** — `get_todos`、`set_todos`、`report_progress`
+  - 每个工作区保存一份当前 todo 清单，同一 Bridge 的所有连接共用，重载扩展后自动恢复。通过 `get_todos` 读取后继续任务；`set_todos` 整体替换清单，空清单用于清除。
 - **3 种公共隧道供应商** — Cloudflare Quick Tunnel（默认，零配置）、Cloudflare Named Tunnel（固定主机名）、ngrok（保留域名）。
 - **跨平台 cloudflared 检测与安装** — Windows 可用 Winget 一键安装，macOS 可用 Homebrew 一键安装；Linux 检测 PATH、`/usr/bin` 与 `/usr/local/bin`，安装仍按 Cloudflare 官方说明手动完成。
 - **托管 shell 支持矩阵** — Windows PowerShell 5.1 / PowerShell 7+（Windows）、bash（Linux）、zsh（macOS）通过每提示符协议钩子完整支持 `run_command`；cmd/sh/fish 会被直接拒绝并返回明确错误，而不是挂到超时。切换 shell 时 AI 看到的运行时语法提示自动更新。
@@ -158,7 +159,7 @@ ChatGPT 网页版连接见 [docs/chatgpt-web-connector.md](docs/chatgpt-web-conn
 - VS Code 1.95+
 - Node 22+
 - Windows 上构建验证；macOS 支持 Homebrew 安装，Linux 支持检测现有 cloudflared 并提供手动安装入口。
-- 文件搜索在 Windows 上内置 ripgrep；macOS/Linux 优先使用 PATH 中的 `rg`，缺失时使用内置的有界 Node 引擎（内容搜索最多扫描 20,000 个文件且单文件不超过 2 MiB；文件发现最多收集 5,000 个候选）。
+- 文件搜索在 Windows 上内置 ripgrep；macOS/Linux 优先使用 PATH 中的 `rg`，缺失时使用内置的有界 Node 引擎（内容搜索最多扫描 20,000 个文件、检查 100,000 个目录项，且单文件不超过 2 MiB；文件发现最多收集 5,000 个候选）。内容搜索的遍历预算也统计被文件筛选排除的目录项；达到上限时返回 `MAX_ENTRIES_VISITED`，明确标记结果不完整。
 - Node 回退引擎的正则匹配在可取消的独立线程中运行，限时 10 秒，最多同时运行两个此类搜索。超时返回 `SEARCH_TIMEOUT`，提示缩小范围或简化表达式，不会被误认为没有匹配结果。
 
 ## 许可协议

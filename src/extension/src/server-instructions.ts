@@ -1,5 +1,5 @@
 // Model-facing text owned by the bridge server: MCP server instructions, Plan mode guidance and
-// notices, the READ_ONLY_MODE block errors, and the set_todos/report_progress tool definitions.
+// notices, the READ_ONLY_MODE block errors, and the todo/progress tool definitions.
 // load_skill is defined in skills.ts.
 import { FILE_TOOL_DEFINITIONS } from "./file-tool-registry.js";
 import { BRIDGE_EXCLUDED_TOOL_NAMES, IDE_TOOL_DEFINITIONS } from "./ide-tool-definitions.js";
@@ -13,8 +13,7 @@ export const MAX_TODOS = 24;
  * Server instructions, one entry per line after the intro. In Plan mode (read-only mode),
  * lines that depend on a blocked tool are dropped (or replaced by readOnlyText) and the Plan
  * mode section is placed right after the intro, so the instructions never recommend a tool the
- * session cannot use. Normal mode renders byte-for-byte the previous fixed text;
- * tests/server-instructions.test.ts pins both variants.
+ * session cannot use. tests/server-instructions.test.ts pins both variants.
  */
 interface InstructionLine {
   readonly text: string;
@@ -38,10 +37,13 @@ const INSTRUCTION_LINES: readonly InstructionLine[] = [
   { text: "- run_command for builds and tests", readOnlyText: "- run_command for allowlisted read-only commands, tests, and builds" },
   { text: "- terminate_command for a hard stop when cooperative Ctrl+C does not stop a command", requires: ["terminate_command"] },
   { text: "- load_skill to load a skill whose description matches the task" },
+  { text: "- get_todos to read the current shared task list when resuming work or recovering context" },
   { text: "- set_todos to maintain the complete task list for multi-step work" },
   { text: "- report_progress to report transient progress for the current task" },
   { text: "" },
   { text: "Task coordination:" },
+  { text: "- This workspace has one current task list shared by all Bridge connections and restored after extension reloads." },
+  { text: "- Call get_todos after reconnecting or when the current task list is missing from context; use the user's request to decide whether to continue it or replace it for a new task." },
   { text: "- Use set_todos for multi-step work, significant replanning, or validation workflows." },
   { text: "- Send the complete ordered todo list whenever task state changes." },
   { text: "- Keep at most one todo in_progress." },
@@ -65,12 +67,30 @@ const INSTRUCTION_LINES: readonly InstructionLine[] = [
   { text: "- Failed tool results start with a stable UPPER_SNAKE_CASE error code (for example INVALID_ARGUMENT, STALE_FILE, UNKNOWN_COMMAND_ID, READ_ONLY_MODE), sometimes followed by a Hint line. Use the code to choose a recovery instead of retrying blindly." },
 ];
 
+export const GET_TODOS_TOOL = {
+  name: "get_todos",
+  description: [
+    "Read the current shared task list for this AgentBridge workspace.",
+    "",
+    "- Use after reconnecting, resuming work, or when earlier todo results are missing from context.",
+    "- All connections to this Bridge share this list; it is restored after extension reloads.",
+    "- Returns the complete ordered list without changing it.",
+  ].join("\n"),
+  inputSchema: {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  },
+} as const;
+
 export const SET_TODOS_TOOL = {
   name: "set_todos",
   description: [
     "Show your task list for the current job to the user in the AgentBridge panel.",
     "",
     `- Send the complete list each time it changes, at most ${MAX_TODOS} items with at most one in_progress.`,
+    "- The list is shared by all connections to this Bridge and saved for this workspace across extension reloads.",
+    "- Use get_todos to recover the current list before continuing work when it is missing from context.",
     "- Use goal-level items, not one per tool call; use report_progress for what you are doing right now.",
     "- An empty list clears it. The result echoes the stored list.",
   ].join("\n"),
@@ -130,6 +150,7 @@ export const BRIDGE_TOOL_DEFINITIONS = [
       inputSchema: tool.inputSchema,
     })),
   LOAD_SKILL_TOOL,
+  GET_TODOS_TOOL,
   SET_TODOS_TOOL,
   REPORT_PROGRESS_TOOL,
 ] as const;

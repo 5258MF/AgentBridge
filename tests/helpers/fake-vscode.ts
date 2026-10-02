@@ -30,6 +30,17 @@ function emitConfigurationChange(key: string): void {
 }
 
 export const vscodeTest = {
+  createMemento() {
+    const values = new Map<string, unknown>();
+    return {
+      get: <T>(key: string, fallback?: T) => (values.has(key) ? values.get(key) : fallback) as T,
+      update: async (key: string, value: unknown) => {
+        if (value === undefined) values.delete(key);
+        else values.set(key, JSON.parse(JSON.stringify(value)));
+      },
+      keys: () => [...values.keys()],
+    };
+  },
   errors,
   warnings,
   information,

@@ -29,7 +29,7 @@ import {
   resolveTouchedPath,
 } from "./agents-md.js";
 import { discoverSkills, LOAD_SKILL_TOOL, loadSkill, parseLoadSkillInput, renderLoadSkillDescription } from "./skills.js";
-import { formatSetTodosResult } from "./todo-format.js";
+import { formatGetTodosResult, formatSetTodosResult } from "./todo-format.js";
 import { formatToolError, ToolError } from "./tool-errors.js";
 import { asRecord, bridgePresentation, type BridgeActivity, type BridgeActivityPresentation, type BridgeTodo } from "./activity-presentation.js";
 import { BoundedInMemoryEventStore, constantTimeStringEqual, readJsonBody, readTrustedBrowserOrigins, validateMcpOrigin, writeJsonError } from "./http-helpers.js";
@@ -39,6 +39,7 @@ import {
   buildReadOnlyTransitionNotice,
   buildRepeatCallReminder,
   buildServerInstructions,
+  GET_TODOS_TOOL,
   MAX_TODOS,
   planModeBlockError,
   REPEAT_REMINDER_COUNTS,
@@ -81,6 +82,8 @@ function isPublicIpv4Address(value: string): boolean {
   return true;
 }
 const ROUTE_TOKEN_SECRET = "agentbridge.bridge.routeToken";
+/** workspaceState keeps one shared list per VS Code workspace, independent of MCP sessions. */
+const TODOS_STATE_KEY = "agentbridge.bridge.todos";
 const NGROK_DOMAIN_SETTING = "bridge.ngrokDomain";
 const NGROK_DOMAIN_STATE_KEY = "agentbridge.bridge.ngrokDomain";
 const CLOUDFLARE_NAMED_DOMAIN_SETTING = "bridge.cloudflareNamedDomain";
@@ -452,6 +455,7 @@ export class BridgeManager implements vscode.Disposable {
   private activeRequests = 0;
   private readonly activities: BridgeActivity[] = [];
   private todos: BridgeTodo[] = [];
+  private todoUpdateQueue: Promise<void> = Promise.resolve();
   private nextActivityId = 1;
   private revision = 0;
   private toolCalls = 0;
@@ -501,7 +505,16 @@ export class BridgeManager implements vscode.Disposable {
     private readonly context: vscode.ExtensionContext,
     private readonly output: vscode.OutputChannel,
     private readonly ideToolBroker: IdeToolBroker,
-  ) {}
+  ) {
+    const savedTodos = this.context.workspaceState.get<unknown>(TODOS_STATE_KEY);
+    if (savedTodos !== undefined) {
+      try {
+        this.todos = this.parseTodos(savedTodos);
+      } catch (error) {
+        this.output.appendLine(`[bridge-todos] Ignoring invalid saved workspace todo state: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
 
   private isTunnelProcessAlive(): boolean {
     const child = this.tunnelProcess;
@@ -2944,12 +2957,19 @@ export class BridgeManager implements vscode.Disposable {
         isError: true,
       };
     }
-    if (toolName === SET_TODOS_TOOL.name || toolName === REPORT_PROGRESS_TOOL.name) {
+    if (toolName === GET_TODOS_TOOL.name || toolName === SET_TODOS_TOOL.name || toolName === REPORT_PROGRESS_TOOL.name) {
       // Validation failures must come back as tool errors (isError) the model can correct,
       // not escape as JSON-RPC protocol errors.
       try {
+        if (toolName === GET_TODOS_TOOL.name) {
+          if (Object.keys(args).length) throw new Error("get_todos does not accept arguments.");
+          return {
+            content: [{ type: "text", text: formatGetTodosResult(this.todos) }],
+            structuredContent: { todos: this.todos.map((todo) => ({ ...todo })) },
+          };
+        }
         return toolName === SET_TODOS_TOOL.name
-          ? this.handleSetTodos(args)
+          ? await this.handleSetTodos(args)
           : this.handleReportProgress(args, extra.sessionId);
       } catch (error) {
         return { isError: true, content: [{ type: "text" as const, text: formatToolError(error, "INVALID_ARGUMENT") }] };
@@ -3135,13 +3155,12 @@ export class BridgeManager implements vscode.Disposable {
     return { content: [{ type: "text", text: linkedTodo ? `Progress reported to AgentBridge for todo ${linkedTodo.id}.` : "Progress reported to AgentBridge." }] };
   }
 
-  private handleSetTodos(value: unknown): { content: Array<{ type: "text"; text: string }> } {
-    const input = asRecord(value);
-    if (!Array.isArray(input.todos)) throw new Error("set_todos.todos must be an array.");
-    if (input.todos.length > MAX_TODOS) throw new Error(`set_todos.todos must contain at most ${MAX_TODOS} items.`);
+  private parseTodos(value: unknown): BridgeTodo[] {
+    if (!Array.isArray(value)) throw new Error("set_todos.todos must be an array.");
+    if (value.length > MAX_TODOS) throw new Error(`set_todos.todos must contain at most ${MAX_TODOS} items.`);
 
     const seen = new Set<string>();
-    const todos: BridgeTodo[] = input.todos.map((raw, index) => {
+    const todos: BridgeTodo[] = value.map((raw, index) => {
       const item = asRecord(raw);
       const id = typeof item.id === "string" ? item.id.trim() : "";
       const title = typeof item.title === "string" ? item.title.trim() : "";
@@ -3159,15 +3178,42 @@ export class BridgeManager implements vscode.Disposable {
     if (todos.filter((todo) => todo.status === "in_progress").length > 1) {
       throw new Error("set_todos supports at most one in_progress todo.");
     }
+    return todos;
+  }
 
-    this.todos = todos;
-    this.revision += 1;
-    const completed = todos.filter((todo) => todo.status === "completed").length;
-    const current = todos.find((todo) => todo.status === "in_progress");
-    this.output.appendLine(todos.length
-      ? `[bridge-todos] ${completed}/${todos.length} completed${current ? ` · current: [${current.id}] ${current.title}` : ""}`
-      : "[bridge-todos] cleared");
-    return { content: [{ type: "text", text: formatSetTodosResult(todos) }] };
+  private async handleSetTodos(value: unknown): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+    const todos = this.parseTodos(asRecord(value).todos);
+    // Serialize writes so slower storage acknowledgements cannot restore an older list.
+    // Commit memory only after storage succeeds; failed saves keep the previous list intact.
+    const update = this.todoUpdateQueue.then(async () => {
+      try {
+        await this.context.workspaceState.update(TODOS_STATE_KEY, todos);
+      } catch (error) {
+        // Memento changes its cache before saving, even if the save then rejects.
+        // Restore the last accepted list so a later write cannot persist this failed update.
+        let rollbackFailed = false;
+        try {
+          await this.context.workspaceState.update(TODOS_STATE_KEY, this.todos);
+        } catch (rollbackError) {
+          rollbackFailed = true;
+          this.output.appendLine(`[bridge-todos] Could not confirm todo storage recovery: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+        }
+        const hint = rollbackFailed
+          ? "The visible list is unchanged, but saved state could not be confirmed. Resolve the storage error and retry set_todos."
+          : "The previous list has been restored. Retry set_todos after resolving the storage error.";
+        throw new ToolError("TODO_SAVE_FAILED", `Could not save the workspace todo list: ${error instanceof Error ? error.message : String(error)}`, hint);
+      }
+      this.todos = todos;
+      this.revision += 1;
+      const completed = todos.filter((todo) => todo.status === "completed").length;
+      const current = todos.find((todo) => todo.status === "in_progress");
+      this.output.appendLine(todos.length
+        ? `[bridge-todos] ${completed}/${todos.length} completed${current ? ` · current: [${current.id}] ${current.title}` : ""}`
+        : "[bridge-todos] cleared");
+      return { content: [{ type: "text" as const, text: formatSetTodosResult(todos) }] };
+    });
+    this.todoUpdateQueue = update.then(() => undefined, () => undefined);
+    return update;
   }
 
   private workspaceRoots(): string[] {
@@ -3289,6 +3335,7 @@ export class BridgeManager implements vscode.Disposable {
   async disposeAsync(): Promise<void> {
     this.disposed = true;
     await this.stopResources(true);
+    await this.todoUpdateQueue;
   }
 
   dispose(): void {

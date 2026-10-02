@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatSetTodosResult, type TodoLike } from "../src/extension/src/todo-format.js";
+import { formatGetTodosResult, formatSetTodosResult, type TodoLike } from "../src/extension/src/todo-format.js";
 
 const MARKER = "Current todo list (authoritative; send the complete list to set_todos to change it):\n";
 
@@ -35,4 +35,15 @@ test("set_todos result echoes only id/title/status and escapes special character
 
 test("clearing todos reports an explicit empty list", () => {
   assert.equal(formatSetTodosResult([]), "Todo state cleared in AgentBridge. Current todo list: []");
+});
+
+test("get_todos returns the complete ordered list without claiming to update it", () => {
+  const todos: TodoLike[] = [
+    { id: "a", title: "Read code", status: "completed" },
+    { id: "b", title: "Patch handler", status: "in_progress" },
+  ];
+  const text = formatGetTodosResult(todos);
+  assert.match(text, /^Current todo state in AgentBridge: 1\/2 completed; current todo b: Patch handler\./);
+  assert.deepEqual(parseList(text), todos);
+  assert.equal(formatGetTodosResult([]), "Current todo list in AgentBridge: []");
 });

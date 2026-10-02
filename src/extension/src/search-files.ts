@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { opendir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { rgPath as bundledRipgrepPath } from "@vscode/ripgrep";
-import { scanNodeSearchFiles } from "./search-node.js";
+import { scanNodeSearchFiles, type NodeSearchCandidates } from "./search-node.js";
 import { RegexSearchError, runRegexSearch, SEARCH_REGEX_TIMEOUT_MS } from "./search-regex-runner.js";
 
 export interface SearchFilesInput {
@@ -41,6 +42,7 @@ export interface SearchFilesConfig {
   maxFallbackFileBytes: number;
   maxContextCacheBytes: number;
   maxFallbackFilesScanned: number;
+  maxFallbackEntriesVisited: number;
   regexTimeoutMs: number;
   binaryProbeBytes: number;
   ripgrepPath?: string;
@@ -60,6 +62,7 @@ export const DEFAULT_SEARCH_FILES_CONFIG: SearchFilesConfig = {
   maxFallbackFileBytes: 2 * 1024 * 1024,
   maxContextCacheBytes: 16 * 1024 * 1024,
   maxFallbackFilesScanned: 20_000,
+  maxFallbackEntriesVisited: 100_000,
   regexTimeoutMs: SEARCH_REGEX_TIMEOUT_MS,
   binaryProbeBytes: 8 * 1024,
   commonExcludes: [
@@ -114,6 +117,7 @@ export type SearchTruncationReason =
   | "OUTPUT_BYTE_BUDGET"
   | "OUTPUT_TOKEN_BUDGET"
   | "MAX_FILES_SCANNED"
+  | "MAX_ENTRIES_VISITED"
   | "CONTEXT_CACHE_BYTE_BUDGET";
 
 export interface SearchFilesResult {
@@ -357,7 +361,7 @@ async function collectCandidateFiles(
   options: NormalizedOptions,
   config: SearchFilesConfig,
   signal?: AbortSignal,
-): Promise<{ files: string[]; filesScanned: number; hitLimit: boolean }> {
+): Promise<NodeSearchCandidates> {
   const scopeStat = await stat(options.scopeRealPath);
   if (!scopeStat.isFile() && !scopeStat.isDirectory()) {
     throw new SearchToolError("NOT_A_FILE_OR_DIRECTORY", "Search path is not a regular file or directory.");
@@ -365,21 +369,35 @@ async function collectCandidateFiles(
 
   if (scopeStat.isFile()) {
     const relative = displayPath(options.scopeRoot, options.scopeRealPath);
-    return { files: shouldIncludePath(relative, options, config) ? [options.scopeRealPath] : [], filesScanned: 1, hitLimit: false };
+    return { files: shouldIncludePath(relative, options, config) ? [options.scopeRealPath] : [], filesScanned: 1, hitLimit: false, hitTraversalLimit: false };
   }
 
   const gitignore = options.noIgnore ? [] : await loadRootGitignore(options.scopeRoot);
   const files: string[] = [];
   let filesScanned = 0;
   let hitLimit = false;
+  let entriesVisited = 0;
+  let hitTraversalLimit = false;
   const stack = [options.scopeRealPath];
 
   while (stack.length > 0) {
     if (signal?.aborted) throw new DOMException("Search was cancelled.", "AbortError");
+    const remainingEntries = config.maxFallbackEntriesVisited - entriesVisited;
     const directory = stack.pop()!;
-    let entries;
+    const entries: Dirent[] = [];
     try {
-      entries = await readdir(directory, { withFileTypes: true });
+      // Stream a bounded batch so a huge directory cannot allocate or sort an unlimited list.
+      const handle = await opendir(directory);
+      for await (const entry of handle) {
+        if (signal?.aborted) throw new DOMException("Search was cancelled.", "AbortError");
+        // At an exact boundary, empty queued directories do not omit any entries.
+        if (entries.length >= remainingEntries) {
+          hitTraversalLimit = true;
+          break;
+        }
+        entries.push(entry);
+        entriesVisited += 1;
+      }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "EACCES" || code === "EPERM") continue;
@@ -404,11 +422,11 @@ async function collectCandidateFiles(
       }
       files.push(absolute);
     }
-    if (hitLimit) break;
+    if (hitLimit || hitTraversalLimit) break;
   }
 
   files.sort((a, b) => displayPath(options.scopeRoot, a).localeCompare(displayPath(options.scopeRoot, b)));
-  return { files, filesScanned: Math.min(filesScanned, config.maxFallbackFilesScanned), hitLimit };
+  return { files, filesScanned: Math.min(filesScanned, config.maxFallbackFilesScanned), hitLimit, hitTraversalLimit };
 }
 
 async function searchWithNode(
