@@ -55,6 +55,32 @@ export function activate(context: vscode.ExtensionContext): void {
   const bridge = new BridgeManager(context, output, ideToolBroker);
   activeBridge = bridge;
   const bridgeReady = bridge.initialize();
+  let mcpReloadTimer: ReturnType<typeof setTimeout> | undefined;
+  let mcpWatchers: vscode.FileSystemWatcher[] = [];
+  const reloadMcp = () => {
+    if (mcpReloadTimer) clearTimeout(mcpReloadTimer);
+    mcpReloadTimer = setTimeout(() => {
+      mcpReloadTimer = undefined;
+      void bridgeReady.then(() => bridge.reloadExternalMcp()).catch(() => output.appendLine("[mcp] Could not reload external MCP configuration."));
+    }, 250);
+  };
+  const watchMcp = () => {
+    for (const watcher of mcpWatchers) watcher.dispose();
+    const bases = [vscode.Uri.file(os.homedir()), ...(vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri)];
+    mcpWatchers = bases.map((base) => {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(base, ".agentbridge/mcp.json"));
+      watcher.onDidCreate(reloadMcp);
+      watcher.onDidChange(reloadMcp);
+      watcher.onDidDelete(reloadMcp);
+      return watcher;
+    });
+  };
+  watchMcp();
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { watchMcp(); reloadMcp(); }),
+    vscode.workspace.onDidGrantWorkspaceTrust(reloadMcp),
+    { dispose: () => { if (mcpReloadTimer) clearTimeout(mcpReloadTimer); for (const watcher of mcpWatchers) watcher.dispose(); } },
+  );
   // ~/.agentbridge/skills, so users see where AgentBridge-only skills go. Never blocks activation.
   void ensureAgentBridgeHome(os.homedir()).then((home) => {
     if (home.created) output.appendLine(`[agentbridge-home] created ${home.skillsDir}`);

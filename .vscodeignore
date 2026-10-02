@@ -1,5 +1,7 @@
 # Don't ship dev-time source, configs, private scripts, or build's dev side artifacts
 .vscode/**
+.agentbridge/**
+.agents/**
 .vscode-test/**
 .vscode-test-web/**
 src/**

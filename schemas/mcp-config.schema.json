@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentBridge MCP servers",
+  "type": "object",
+  "required": ["mcpServers"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "mcpServers": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": { "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$" },
+      "additionalProperties": { "$ref": "#/definitions/server" }
+    }
+  },
+  "definitions": {
+    "strings": { "type": "object", "maxProperties": 256, "additionalProperties": { "type": "string", "maxLength": 16384 } },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [{ "required": ["command"] }, { "required": ["url"] }],
+      "allOf": [
+        {
+          "if": { "required": ["command"] },
+          "then": { "properties": { "type": { "const": "stdio" } }, "not": { "required": ["headers"] } }
+        },
+        {
+          "if": { "required": ["url"] },
+          "then": {
+            "properties": { "type": { "enum": ["http", "streamable-http"] } },
+            "not": { "anyOf": [{ "required": ["args"] }, { "required": ["env"] }, { "required": ["cwd"] }] }
+          }
+        }
+      ],
+      "properties": {
+        "type": { "enum": ["stdio", "http", "streamable-http"], "description": "Optional; inferred from command or url." },
+        "command": { "type": "string", "minLength": 1, "pattern": "\\S", "maxLength": 16384, "description": "One executable, not a shell command string. Use args for its arguments." },
+        "args": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 16384 }, "description": "Stdio arguments. Supports ${workspaceFolder}, ${userHome}, ${ENV_NAME} and ${secret:name}." },
+        "env": { "$ref": "#/definitions/strings", "description": "Explicit stdio environment variables. Values can reference environment variables or stored credentials." },
+        "cwd": { "type": "string", "minLength": 1, "pattern": "\\S", "maxLength": 16384, "description": "Stdio working directory. Relative paths resolve from the workspace folder." },
+        "url": { "type": "string", "minLength": 1, "pattern": "\\S", "maxLength": 16384, "description": "Streamable HTTP endpoint. Supports environment variables. Legacy SSE and embedded URL credentials are not supported." },
+        "headers": { "$ref": "#/definitions/strings", "description": "HTTP headers, e.g. Authorization: Bearer ${secret:docs_token}." },
+        "enabled": { "type": "boolean", "default": true },
+        "timeout": { "type": "number", "exclusiveMinimum": 0, "maximum": 3600, "default": 60, "description": "Hard timeout per tool call in seconds; progress does not extend it." },
+        "connectTimeout": { "type": "number", "exclusiveMinimum": 0, "maximum": 3600, "default": 10, "description": "Timeout for connection and initial tool discovery in seconds." },
+        "planMode": { "enum": ["read-only", "all", "disabled"], "default": "read-only", "description": "read-only permits tools declaring readOnlyHint=true; all permits all configured tools; disabled blocks this server in Plan mode. Server annotations are claims, not verification." },
+        "tools": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 16384 }, "description": "Optional allowlist of exact upstream tool names. Omit for all tools; [] exposes none." },
+        "description": { "type": "string", "minLength": 1, "pattern": "\\S", "maxLength": 16384, "description": "Optional server description prepended to its tools." }
+      }
+    }
+  }
+}

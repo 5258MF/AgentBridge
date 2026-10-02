@@ -20,6 +20,7 @@
 
 ## 核心特性
 
+- **外部 MCP 服务器** — 在 `~/.agentbridge/mcp.json` 或 `<工作区>/.agentbridge/mcp.json` 配置本地 stdio 服务或远程 Streamable HTTP 地址，工具会加上服务器名前缀，通过现有 Bridge 地址提供给网页 AI。面板支持编辑配置、保存凭据、查看连接状态、启用／禁用和重连；工作区配置覆盖用户配置中的同名服务。见 [配置说明与示例](docs/mcp.md)。
 - **16 个 MCP 工具**，覆盖：
   - **文件系统** — `read_files`、`apply_patch`、`search_files`、`find_files`、`list_directory`、`read_image_file`
   - **终端** — `run_command`、`get_command_output`、`send_command_input`、`terminate_command`

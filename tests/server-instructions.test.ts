@@ -31,7 +31,9 @@ function flush(): Promise<void> {
 }
 
 test("normal-mode server instructions include shared todo recovery guidance", () => {
-  assert.equal(buildServerInstructions(false), NORMAL_MODE_INSTRUCTIONS);
+  assert.equal(buildServerInstructions(false), NORMAL_MODE_INSTRUCTIONS
+    .replace("Tool guidance:\n", "Tool guidance:\n- External MCP tools, when configured, are prefixed by their server name. Follow that server's instructions for its tools. A failed external tool call is not automatically retried; check its result before deciding to repeat an action.\n")
+    .replace("- Failed tool results", "- Failed built-in tool results"));
 });
 
 test("Plan mode instructions lead with the Plan mode section and never recommend blocked tools", () => {
@@ -45,6 +47,7 @@ test("Plan mode instructions lead with the Plan mode section and never recommend
   assert.match(readOnly, /Offer 2-4 concrete options with a recommended default/);
   assert.match(readOnly, /present one complete plan in your reply that leaves no decisions to the implementer/);
   assert.match(readOnly, /Do not ask whether to proceed/);
+  assert.match(readOnly, /External MCP tools follow the local user's per-server Plan policy/);
   for (const blocked of READ_ONLY_BLOCKED_TOOL_NAMES) {
     assert.ok(readOnly.includes(blocked), `read-only section must name ${blocked}`);
   }

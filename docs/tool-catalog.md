@@ -2,7 +2,7 @@
 
 <!-- Generated from the tool definitions by `npm run tool-catalog`. Do not edit by hand: tests/tool-catalog.test.ts fails when this file is stale. -->
 
-This is exactly what MCP clients receive from `tools/list`. In `run_command`, `${RUNTIME_SHELL_DESCRIPTION}` and `${RUNTIME_SHELL_SYNTAX_HINT}` are replaced at runtime with the configured managed shell. In `load_skill`, `${RUNTIME_SKILL_CATALOG}` is replaced with the skills found on this machine.
+This catalog lists AgentBridge's built-in tools. Configured [external MCP servers](mcp.md) add namespaced tools to `tools/list` at runtime. In `run_command`, `${RUNTIME_SHELL_DESCRIPTION}` and `${RUNTIME_SHELL_SYNTAX_HINT}` are replaced at runtime with the configured managed shell. In `load_skill`, `${RUNTIME_SKILL_CATALOG}` is replaced with the skills found on this machine.
 
 16 tools, listed in both Plan and Build mode. In Plan mode (read-only), 3 are blocked at call time and `run_command` only runs allowlisted read-only commands.
 

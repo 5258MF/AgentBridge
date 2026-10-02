@@ -61,6 +61,12 @@
     "onView:agentbridge.bridge.panel"
   ],
   "contributes": {
+    "jsonValidation": [
+      {
+        "fileMatch": ["**/.agentbridge/mcp.json"],
+        "url": "./schemas/mcp-config.schema.json"
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {

@@ -282,3 +282,49 @@
   }
   .agentbridge-spin { display: inline-block; animation: agentbridge-spin 1s linear infinite; }
   @keyframes agentbridge-spin { to { transform: rotate(360deg); } }
+  .agentbridge-mcp-card { padding: 0; }
+  .agentbridge-mcp-heading { display: flex; align-items: center; gap: 9px; padding: 12px 14px; cursor: pointer; list-style: none; }
+  .agentbridge-mcp-heading::-webkit-details-marker { display: none; }
+  .agentbridge-mcp-heading:hover { background: var(--vscode-list-hoverBackground, transparent); }
+  .agentbridge-mcp-heading:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .agentbridge-mcp-heading h3 { flex: 1; min-width: 0; font-size: 13px; color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
+  .agentbridge-mcp-heading-icon { display: flex; flex: none; color: var(--vscode-descriptionForeground); }
+  .agentbridge-mcp-heading-icon svg { width: 18px; height: 18px; }
+  .agentbridge-mcp-chevron { width: 14px; height: 14px; flex: none; color: var(--vscode-descriptionForeground); transition: transform 120ms ease; }
+  .agentbridge-mcp-card[open] .agentbridge-mcp-chevron { transform: rotate(90deg); }
+  .agentbridge-mcp-body { padding: 12px 14px 10px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); }
+  .agentbridge-mcp-description { margin: 0 0 12px; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.5; }
+  .agentbridge-mcp-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+  .agentbridge-mcp-config-actions { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+  .agentbridge-mcp-config-actions button { min-height: 28px; padding: 4px 10px; border-radius: 4px; font-size: 12px; white-space: nowrap; }
+  .agentbridge-mcp-utilities { display: flex; gap: 3px; }
+  .agentbridge-mcp-icon-button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 5px; border: 1px solid var(--vscode-contrastBorder, transparent); border-radius: 4px; color: var(--vscode-descriptionForeground); background: transparent; cursor: pointer; }
+  .agentbridge-mcp-icon-button svg { width: 16px; height: 16px; }
+  .agentbridge-mcp-icon-button:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
+  .agentbridge-mcp-card button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+  .agentbridge-mcp-badge { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 2px 6px; border: 1px solid var(--vscode-contrastBorder, transparent); border-radius: 4px; color: var(--vscode-descriptionForeground); background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent); font-size: 10px; font-weight: 400; line-height: 1.5; white-space: nowrap; }
+  .agentbridge-mcp-badge.state-connected { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); background: color-mix(in srgb, var(--vscode-testing-iconPassed, var(--vscode-charts-green)) 10%, transparent); }
+  .agentbridge-mcp-badge.state-error, .agentbridge-mcp-badge.state-invalid, .agentbridge-mcp-badge.state-untrusted { color: var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-errorForeground) 8%, transparent); }
+  .agentbridge-mcp-badge.state-connecting, .agentbridge-mcp-badge.state-reconnecting { color: var(--vscode-progressBar-background); }
+  .agentbridge-mcp-empty { display: flex; flex-direction: column; align-items: center; gap: 7px; margin-top: 14px; padding: 18px 12px; border: 1px dashed var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 5px; text-align: center; }
+  .agentbridge-mcp-empty[hidden], .agentbridge-mcp-error-box[hidden] { display: none; }
+  .agentbridge-mcp-empty-icon { width: 25px; height: 25px; margin-bottom: 2px; color: var(--vscode-descriptionForeground); }
+  .agentbridge-mcp-empty strong { color: var(--vscode-editor-foreground, var(--vscode-foreground)); font-size: 12px; font-weight: 500; }
+  .agentbridge-mcp-empty p { max-width: 270px; margin: 0; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.6; }
+  .agentbridge-mcp-list { display: flex; flex-direction: column; gap: 8px; }
+  .agentbridge-mcp-list:empty { display: none; }
+  .agentbridge-mcp-server { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 8px; margin-top: 12px; padding: 10px; border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); border-radius: 5px; }
+  .agentbridge-mcp-server + .agentbridge-mcp-server { margin-top: 0; }
+  .agentbridge-mcp-server > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-editor-foreground, var(--vscode-foreground)); font-size: 12px; font-weight: 600; }
+  .agentbridge-mcp-server-meta { grid-column: 1 / -1; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+  .agentbridge-mcp-server .agentbridge-controls { grid-column: 1 / -1; margin-top: 3px; gap: 6px; }
+  .agentbridge-mcp-server button { min-height: 24px; padding: 2px 8px; font-size: 11px; border-radius: 3px; }
+  .agentbridge-mcp-errors, .agentbridge-mcp-error-box { grid-column: 1 / -1; color: var(--vscode-errorForeground); font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .agentbridge-mcp-error-box { margin-top: 12px; padding: 9px; border-left: 2px solid var(--vscode-errorForeground); background: var(--vscode-inputValidation-errorBackground, transparent); }
+  .agentbridge-mcp-footer { margin: 12px 0 0; padding-top: 9px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border)); color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.6; }
+  @media (max-width: 340px) {
+    .agentbridge-mcp-heading, .agentbridge-mcp-body { padding-left: 11px; padding-right: 11px; }
+    .agentbridge-mcp-heading { gap: 6px; }
+    .agentbridge-mcp-config-actions button { padding-left: 8px; padding-right: 8px; font-size: 11px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .agentbridge-mcp-chevron { transition: none; } }

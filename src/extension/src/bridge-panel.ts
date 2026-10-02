@@ -89,6 +89,10 @@ const BUSY_PANEL_MESSAGE_TYPES = new Set([
   "rotateEndpoint",
   "setLanguage",
   "setTrustedBrowserOrigins",
+  "reloadExternalMcp",
+  "reconnectExternalMcp",
+  "setExternalMcpEnabled",
+  "setExternalMcpCredential",
 ]);
 
 export class BridgePanelProvider implements vscode.WebviewViewProvider {
@@ -253,6 +257,40 @@ export class BridgePanelProvider implements vscode.WebviewViewProvider {
     switch (message.type) {
       case "refresh":
         return;
+      case "reloadExternalMcp":
+        await this.bridgeReady;
+        await this.bridge.reloadExternalMcp();
+        return;
+      case "reconnectExternalMcp": {
+        if (typeof message.name !== "string") throw new Error("MCP server name must be a string.");
+        await this.bridgeReady;
+        await this.bridge.reconnectExternalMcp(message.name);
+        return;
+      }
+      case "setExternalMcpEnabled": {
+        if (typeof message.name !== "string" || typeof message.enabled !== "boolean") throw new Error("Invalid MCP server enabled state.");
+        await this.bridgeReady;
+        await this.bridge.setExternalMcpEnabled(message.name, message.enabled);
+        return;
+      }
+      case "openExternalMcpConfig": {
+        if (message.scope !== "user" && message.scope !== "workspace") throw new Error("Invalid MCP configuration scope.");
+        if (message.name !== undefined && typeof message.name !== "string") throw new Error("Invalid MCP server name.");
+        await this.bridgeReady;
+        const file = await this.bridge.externalMcpConfigurationPath(message.scope, message.name as string | undefined);
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+        await vscode.window.showTextDocument(document);
+        return;
+      }
+      case "setExternalMcpCredential": {
+        await this.bridgeReady;
+        const name = await vscode.window.showInputBox({ title: t("mcpCredentialName"), prompt: t("mcpCredentialNameHelp"), ignoreFocusOut: true });
+        if (!name) return;
+        const value = await vscode.window.showInputBox({ title: t("mcpCredentialValue"), password: true, ignoreFocusOut: true });
+        if (value === undefined || value === "") return;
+        await this.bridge.setExternalMcpCredential(name.trim(), value);
+        return;
+      }
       case "namedTunnelDirtyChanged": {
         if (typeof message.dirty !== "boolean") throw new Error("Named Tunnel dirty state must be a boolean.");
         this.namedTunnelInputDirty = message.dirty;
@@ -815,6 +853,36 @@ ${PANEL_CSS}</style>
           <span class="agentbridge-switch-track"></span>
         </button>
       </div>
+    </div>
+  </details>
+
+  <details class="agentbridge-card agentbridge-mcp-card" id="externalMcpCard">
+    <summary class="agentbridge-mcp-heading">
+      <span class="agentbridge-mcp-heading-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="3" width="16" height="7" rx="2"/><rect x="4" y="14" width="16" height="7" rx="2"/><path d="M8 6.5h.01M8 17.5h.01M12 6.5h4M12 17.5h4" stroke-linecap="round"/></svg></span>
+      <h3>${t("externalMcpServers")}</h3>
+      <span id="externalMcpSummaryState" class="agentbridge-mcp-badge">${t("mcpNotConfigured")}</span>
+      <svg class="agentbridge-mcp-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg>
+    </summary>
+    <div class="agentbridge-mcp-body">
+      <p class="agentbridge-mcp-description">${t("externalMcpHelp")}</p>
+      <div class="agentbridge-mcp-toolbar">
+        <div class="agentbridge-mcp-config-actions">
+          <button class="primary" id="mcpWorkspaceConfigButton" title="${t("mcpWorkspaceConfig")}">${t("mcpWorkspaceConfig")}</button>
+          <button class="secondary" id="mcpUserConfigButton" title="${t("mcpUserConfig")}">${t("mcpUserConfig")}</button>
+        </div>
+        <div class="agentbridge-mcp-utilities">
+          <button class="agentbridge-mcp-icon-button" id="mcpReloadButton" title="${t("mcpReloadHint")}" aria-label="${t("mcpReload")}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M13 5a5.4 5.4 0 1 0 .2 5M13 2v3h-3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button class="agentbridge-mcp-icon-button" id="mcpCredentialButton" title="${t("mcpCredentialHint")}" aria-label="${t("mcpCredentialButton")}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="5.5" cy="5.5" r="3"/><path d="m7.7 7.7 5.5 5.5M10 10l1.7-1.7M11.7 11.7l1.7-1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </div>
+      <div id="externalMcpErrors" class="agentbridge-mcp-error-box" role="alert" hidden></div>
+      <div id="externalMcpEmpty" class="agentbridge-mcp-empty">
+        <svg class="agentbridge-mcp-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M9 3v4m6-4v4M7 7h10v5a5 5 0 0 1-10 0V7Zm5 10v4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <strong>${t("mcpEmptyTitle")}</strong>
+        <p>${t("mcpNoServers")}</p>
+      </div>
+      <div id="externalMcpList" class="agentbridge-mcp-list"></div>
+      <p class="agentbridge-mcp-footer" title="${t("externalMcpRefreshHint")}">${t("mcpConfigHint")}</p>
     </div>
   </details>
 

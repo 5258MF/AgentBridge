@@ -55,6 +55,7 @@ const INSTRUCTION_LINES: readonly InstructionLine[] = [
   { text: "- Send an empty todo list when the task state should be cleared." },
   { text: "" },
   { text: "Tool guidance:" },
+  { text: "- External MCP tools, when configured, are prefixed by their server name. Follow that server's instructions for its tools. A failed external tool call is not automatically retried; check its result before deciding to repeat an action." },
   { text: "- Before starting a task, check the skills listed in the load_skill description; if one matches, load it and follow it." },
   { text: "- Prefer semantic navigation over broad text search when locating code symbols." },
   { text: "- Do not assume an empty LSP result means a symbol does not exist." },
@@ -64,7 +65,7 @@ const INSTRUCTION_LINES: readonly InstructionLine[] = [
   { text: "- Run diagnostics and relevant tests after meaningful edits.", requires: ["apply_patch"] },
   { text: "- Report meaningful progress periodically during long work, but avoid progress updates for every tool call." },
   { text: "- To wait for a running command, call get_command_output with wait_ms instead of polling it repeatedly or running sleep commands." },
-  { text: "- Failed tool results start with a stable UPPER_SNAKE_CASE error code (for example INVALID_ARGUMENT, STALE_FILE, UNKNOWN_COMMAND_ID, READ_ONLY_MODE), sometimes followed by a Hint line. Use the code to choose a recovery instead of retrying blindly." },
+  { text: "- Failed built-in tool results start with a stable UPPER_SNAKE_CASE error code (for example INVALID_ARGUMENT, STALE_FILE, UNKNOWN_COMMAND_ID, READ_ONLY_MODE), sometimes followed by a Hint line. Use the code to choose a recovery instead of retrying blindly." },
 ];
 
 export const GET_TODOS_TOOL = {
@@ -188,6 +189,7 @@ export function buildPlanModeGuidance(): string {
   return [
     `Plan mode is ACTIVE: the user wants a plan before any changes are made. ${formatNameList([...READ_ONLY_BLOCKED_TOOL_NAMES])} are disabled and fail with READ_ONLY_MODE.`,
     `- ${PLAN_MODE_COMMAND_TOOL_NAME} only runs allowlisted read-only commands: ${PLAN_MODE_COMMAND_SUMMARY}. Anything else, including redirection, command substitution, and script blocks, fails with READ_ONLY_MODE.`,
+    "- External MCP tools follow the local user's per-server Plan policy: by default only tools marked read-only by their server are allowed; the user can allow all or disable all of that server's tools in Plan mode. Do not use an external tool to work around other Plan mode limits.",
     "- Do not work around these limits with other commands. Plan mode ends only when the user switches to Build mode in the AgentBridge panel; requests in chat do not end it. If the user asks you to make changes while Plan mode is active, plan them instead and tell the user to switch to Build mode.",
     "- Explore first: read the relevant code, configuration, and tests, and check the current state with read-only commands. Do not ask the user anything you can find out yourself.",
     "- Then ask about preferences and tradeoffs you cannot discover. Offer 2-4 concrete options with a recommended default; if the user does not choose, use the default and record it as an assumption.",

@@ -28,9 +28,75 @@
   let lastRevision = -1;
   let todoExpanded = false;
   let footerCollapsed = false;
+  let externalMcpSignature = '';
   const expandedToolActivities = new Set();
   const sessionScroll = $('sessionSection').querySelector('.agentbridge-session-scroll');
   const timelineEl = $('timeline');
+
+  function postMcpOperation(type, fields) {
+    if (busy) return;
+    busy = true;
+    updateControls();
+    vscode.postMessage(Object.assign({ type }, fields || {}));
+  }
+
+  function renderExternalMcp(status) {
+    const data = status.externalMcp || { servers: [], errors: [] };
+    const signature = JSON.stringify([data, busy, status.state]);
+    if (signature === externalMcpSignature) return;
+    externalMcpSignature = signature;
+    const errors = data.errors || [];
+    $('externalMcpErrors').textContent = errors.join('\n');
+    $('externalMcpErrors').hidden = !errors.length;
+    $('externalMcpEmpty').hidden = !!data.servers.length;
+    const connected = data.servers.filter((server) => server.state === 'connected').length;
+    const pending = data.servers.some((server) => ['connecting', 'reconnecting'].includes(server.state));
+    const failed = errors.length || data.servers.some((server) => ['error', 'invalid', 'untrusted'].includes(server.state));
+    const badge = $('externalMcpSummaryState');
+    badge.className = 'agentbridge-mcp-badge' + (failed ? ' state-error' : pending ? ' state-connecting' : connected ? ' state-connected' : '');
+    badge.textContent = failed ? t('mcpNeedsAttention') : pending ? t('mcpStateConnecting') : connected ? t('mcpConnectedCount', connected) : data.servers.length ? t('mcpServerCount', data.servers.length) : t('mcpNotConfigured');
+    const list = $('externalMcpList');
+    list.textContent = '';
+    const states = { stopped: 'mcpStateStopped', disabled: 'mcpStateDisabled', connecting: 'mcpStateConnecting', connected: 'mcpStateConnected', reconnecting: 'mcpStateReconnecting', error: 'mcpStateError', invalid: 'mcpStateInvalid', untrusted: 'mcpStateUntrusted' };
+    for (const server of data.servers) {
+      const row = document.createElement('div');
+      row.className = 'agentbridge-mcp-server state-' + server.state;
+      const heading = document.createElement('strong');
+      heading.textContent = server.name;
+      heading.title = server.name;
+      row.appendChild(heading);
+      const state = document.createElement('span');
+      state.className = 'agentbridge-mcp-badge state-' + server.state;
+      state.textContent = t(states[server.state] || 'mcpStateError');
+      row.appendChild(state);
+      const summary = document.createElement('div');
+      summary.className = 'agentbridge-mcp-server-meta';
+      summary.textContent = [server.transport || '', t('mcpToolCount', server.toolCount), t(server.scope === 'workspace' ? 'mcpWorkspaceConfig' : 'mcpUserConfig')].filter(Boolean).join(' · ');
+      summary.title = server.source;
+      row.appendChild(summary);
+      if (server.error) {
+        const error = document.createElement('div');
+        error.className = 'agentbridge-mcp-errors';
+        error.textContent = server.error;
+        row.appendChild(error);
+      }
+      const controls = document.createElement('div');
+      controls.className = 'agentbridge-controls';
+      const button = (label, callback, disabled) => {
+        const el = document.createElement('button');
+        el.className = 'secondary';
+        el.textContent = t(label);
+        el.disabled = busy || disabled;
+        el.addEventListener('click', callback);
+        controls.appendChild(el);
+      };
+      button('mcpEdit', () => vscode.postMessage({ type: 'openExternalMcpConfig', scope: server.scope, name: server.name }), false);
+      button(server.enabled ? 'mcpDisable' : 'mcpEnable', () => postMcpOperation('setExternalMcpEnabled', { name: server.name, enabled: !server.enabled }), server.state === 'invalid');
+      button('mcpReconnect', () => postMcpOperation('reconnectExternalMcp', { name: server.name }), !server.enabled || server.state === 'invalid' || server.state === 'untrusted' || !['running', 'starting'].includes(status.state));
+      row.appendChild(controls);
+      list.appendChild(row);
+    }
+  }
 
   function setNamedTunnelInputDirty(dirty) {
     if (namedTunnelInputDirty === dirty) return;
@@ -716,6 +782,7 @@
       badge.className = 'agentbridge-tool' + (bridgeOnly ? ' bridge-only' : '');
       badge.textContent = tool;
       if (bridgeOnly) badge.title = t('bridgeOnlyTool');
+      else if (tool.startsWith('mcp__')) badge.title = t('externalMcpTool');
       $('toolsContainer').appendChild(badge);
     }
 
@@ -795,6 +862,8 @@
 
   function updateControls() {
     const statusLoaded = lastStatus !== null;
+    for (const id of ['mcpUserConfigButton', 'mcpWorkspaceConfigButton', 'mcpReloadButton', 'mcpCredentialButton']) $(id).disabled = !statusLoaded || busy;
+    if (lastStatus) renderExternalMcp(lastStatus);
     const running = lastStatus && lastStatus.state === 'running';
     const starting = lastStatus && lastStatus.state === 'starting';
     const isNgrok = lastStatus && lastStatus.tunnelProvider === 'ngrok';
@@ -938,6 +1007,11 @@
     installingCloudflared = false;
     updateControls();
   }
+
+  $('mcpUserConfigButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternalMcpConfig', scope: 'user' }));
+  $('mcpWorkspaceConfigButton').addEventListener('click', () => vscode.postMessage({ type: 'openExternalMcpConfig', scope: 'workspace' }));
+  $('mcpReloadButton').addEventListener('click', () => postMcpOperation('reloadExternalMcp'));
+  $('mcpCredentialButton').addEventListener('click', () => postMcpOperation('setExternalMcpCredential'));
 
   $('startStopButton').addEventListener('click', toggleBridge);
   $('openFolderButton').addEventListener('click', () => vscode.postMessage({ type: 'openFolder' }));

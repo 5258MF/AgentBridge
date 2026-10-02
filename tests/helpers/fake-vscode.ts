@@ -4,6 +4,10 @@ type ConfigChangeListener = (event: { affectsConfiguration(section: string): boo
 
 const config = new Map<string, unknown>();
 const configListeners = new Set<ConfigChangeListener>();
+const workspaceFolderListeners = new Set<() => void>();
+const trustListeners = new Set<() => void>();
+const fileWatchers = new Set<{ listeners: Set<() => void> }>();
+let trustedWorkspace = true;
 let updateHandler: ((input: { key: string; value: unknown; apply(): void }) => Promise<void>) | undefined;
 
 const errors: string[] = [];
@@ -30,6 +34,9 @@ function emitConfigurationChange(key: string): void {
 }
 
 export const vscodeTest = {
+  setTrust(trusted: boolean): void { trustedWorkspace = trusted; if (trusted) for (const listener of trustListeners) listener(); },
+  fireMcpConfigChange(): void { for (const watcher of fileWatchers) for (const listener of watcher.listeners) listener(); },
+  fireWorkspaceFoldersChange(): void { for (const listener of workspaceFolderListeners) listener(); },
   createMemento() {
     const values = new Map<string, unknown>();
     return {
@@ -47,6 +54,10 @@ export const vscodeTest = {
   reset(): void {
     config.clear();
     configListeners.clear();
+    workspaceFolderListeners.clear();
+    trustListeners.clear();
+    fileWatchers.clear();
+    trustedWorkspace = true;
     updateHandler = undefined;
     errors.length = 0;
     warnings.length = 0;
@@ -166,6 +177,15 @@ export const Uri = {
 };
 
 export const workspace = {
+  get isTrusted() { return trustedWorkspace; },
+  onDidGrantWorkspaceTrust(listener: () => void) { trustListeners.add(listener); return { dispose: () => trustListeners.delete(listener) }; },
+  onDidChangeWorkspaceFolders(listener: () => void) { workspaceFolderListeners.add(listener); return { dispose: () => workspaceFolderListeners.delete(listener) }; },
+  createFileSystemWatcher(_pattern: unknown) {
+    const watcher = { listeners: new Set<() => void>() };
+    fileWatchers.add(watcher);
+    const add = (listener: () => void) => { watcher.listeners.add(listener); return { dispose: () => watcher.listeners.delete(listener) }; };
+    return { onDidCreate: add, onDidChange: add, onDidDelete: add, dispose: () => fileWatchers.delete(watcher) };
+  },
   workspaceFolders: [{ uri: { fsPath: process.cwd() } }],
   getConfiguration(section = "") {
     return {

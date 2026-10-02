@@ -5,6 +5,7 @@ import { isIPv4 } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { mkdir, writeFile } from "node:fs/promises";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, type CallToolResult, isInitializeRequest, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -29,6 +30,9 @@ import {
   resolveTouchedPath,
 } from "./agents-md.js";
 import { discoverSkills, LOAD_SKILL_TOOL, loadSkill, parseLoadSkillInput, renderLoadSkillDescription } from "./skills.js";
+import { ExternalMcpManager, type ExternalMcpStatus } from "./mcp-manager.js";
+import type { McpConnectionFactory } from "./mcp-client.js";
+import { MCP_SECRET_PREFIX, mcpConfigPaths, validMcpSecretName } from "./mcp-config.js";
 import { formatGetTodosResult, formatSetTodosResult } from "./todo-format.js";
 import { formatToolError, ToolError } from "./tool-errors.js";
 import { asRecord, bridgePresentation, type BridgeActivity, type BridgeActivityPresentation, type BridgeTodo } from "./activity-presentation.js";
@@ -278,6 +282,7 @@ export interface BridgeStatus {
   readonly publicHealthError?: string;
   readonly toolNames: string[];
   readonly toolCount: number;
+  readonly externalMcp: ExternalMcpStatus;
   readonly activeRequests: number;
   readonly connected: boolean;
   readonly revision: number;
@@ -362,6 +367,7 @@ interface McpSession {
   agentsMdBaselinePending?: boolean;
   /** AGENTS.md files already delivered to this session, by agentsFileKey, with the text sent. */
   agentsMdSent?: Map<string, AgentsFile>;
+  externalMcpInstructionsSent?: Map<string, string>;
   /** Tool name and arguments of the previous call, and how many identical calls in a row. */
   lastCallSignature?: string;
   repeatCount?: number;
@@ -456,6 +462,8 @@ export class BridgeManager implements vscode.Disposable {
   private readonly activities: BridgeActivity[] = [];
   private todos: BridgeTodo[] = [];
   private todoUpdateQueue: Promise<void> = Promise.resolve();
+  private readonly externalMcp: ExternalMcpManager;
+  private externalMcpToolSignature = "[]";
   private nextActivityId = 1;
   private revision = 0;
   private toolCalls = 0;
@@ -505,7 +513,26 @@ export class BridgeManager implements vscode.Disposable {
     private readonly context: vscode.ExtensionContext,
     private readonly output: vscode.OutputChannel,
     private readonly ideToolBroker: IdeToolBroker,
+    options: { mcpFactory?: McpConnectionFactory } = {},
   ) {
+    this.externalMcp = new ExternalMcpManager({
+      discovery: () => ({ workspaceRoots: vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [], homeDir: this.agentsHomeDir }),
+      getSecret: async (key) => this.context.secrets.get(key),
+      isTrusted: () => vscode.workspace.isTrusted !== false,
+      state: this.context.workspaceState,
+      factory: options.mcpFactory,
+      log: (message) => this.output.appendLine(message),
+      onChange: () => {
+        this.revision += 1;
+        const signature = JSON.stringify(this.externalMcp.getTools());
+        if (signature === this.externalMcpToolSignature) return;
+        this.externalMcpToolSignature = signature;
+        if (this.disposed || this.stoppingResources) return;
+        for (const session of this.sessions.values()) {
+          if (typeof session.server.sendToolListChanged === "function") void session.server.sendToolListChanged().catch(() => undefined);
+        }
+      },
+    });
     const savedTodos = this.context.workspaceState.get<unknown>(TODOS_STATE_KEY);
     if (savedTodos !== undefined) {
       try {
@@ -535,6 +562,7 @@ export class BridgeManager implements vscode.Disposable {
     await this.restorePersistedDomain();
     await this.restorePersistedNamedDomain();
     this.domain = this.configuredDomainForProvider(this.tunnelProvider);
+    await this.externalMcp.reload();
   }
 
   getStatus(): BridgeStatus {
@@ -565,7 +593,7 @@ export class BridgeManager implements vscode.Disposable {
     }
     const localUrl = this.localPort && this.routeToken ? `http://127.0.0.1:${this.localPort}/mcp/${this.routeToken}` : undefined;
     const publicUrl = this.domain && this.routeToken ? `https://${this.domain}/mcp/${this.routeToken}` : undefined;
-    const visibleToolNames = BRIDGE_TOOL_DEFINITIONS.map((tool) => tool.name);
+    const visibleToolNames: string[] = [...BRIDGE_TOOL_DEFINITIONS.map((tool) => tool.name), ...this.externalMcp.getTools().map((tool) => tool.name)];
     return {
       state: this.state,
       transport: "streamable-http",
@@ -599,6 +627,7 @@ export class BridgeManager implements vscode.Disposable {
       publicHealthError: this.publicHealthError,
       toolNames: visibleToolNames,
       toolCount: visibleToolNames.length,
+      externalMcp: this.externalMcp.getStatus(),
       activeRequests: this.activeRequests,
       connected: this.sessions.size > 0,
       revision: this.revision,
@@ -1386,6 +1415,11 @@ export class BridgeManager implements vscode.Disposable {
     this.localPort = address.port;
     this.sessionPruneTimer = setInterval(() => this.pruneSessions(), SESSION_PRUNE_INTERVAL_MS);
     this.sessionPruneTimer.unref?.();
+    await this.externalMcp.start();
+    if (this.httpServer !== server || this.tunnelGeneration !== ownerGeneration || this.disposed || this.stoppingResources) {
+      await this.externalMcp.stop();
+      throw new BridgeStartCancelledError();
+    }
   }
 
   private closeHttpServer(server: HttpServer): Promise<void> {
@@ -2685,7 +2719,7 @@ export class BridgeManager implements vscode.Disposable {
     const packageVersion = String(this.context.extension.packageJSON.version ?? "").trim() || "0.0.0";
     const server = new McpServer(
       { name: "agentbridge", version: packageVersion },
-      { capabilities: { tools: {}, logging: {} }, instructions },
+      { capabilities: { tools: { listChanged: true }, logging: {} }, instructions },
     );
     let transport!: StreamableHTTPServerTransport;
     transport = new StreamableHTTPServerTransport({
@@ -2719,16 +2753,12 @@ export class BridgeManager implements vscode.Disposable {
       },
     });
 
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: await this.listToolsForClient() }));
+    server.setRequestHandler(ListToolsRequestSchema, async (_request, extra) => ({ tools: await this.listToolsForClient(extra.signal) }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const toolName = request.params.name;
       const result = await this.handleToolCall(toolName, request.params.arguments ?? {}, { signal: extra.signal, sessionId: transport.sessionId ?? undefined });
-      return {
-        content: result.content,
-        isError: result.isError,
-        structuredContent: result.structuredContent as Record<string, unknown> | undefined,
-      } as CallToolResult;
+      return result;
     });
 
     transport.onclose = () => {
@@ -2743,7 +2773,8 @@ export class BridgeManager implements vscode.Disposable {
    * The tools/list result: the same tools in Plan and Build mode (see setReadOnlyMode), with the
    * managed shell filled into run_command and the skills found right now into load_skill.
    */
-  private async listToolsForClient(): Promise<Array<{ name: string; description: string; inputSchema: object }>> {
+  private async listToolsForClient(signal?: AbortSignal): Promise<Array<{ name: string; description?: string; inputSchema: object }>> {
+    await this.externalMcp.waitForDiscovery(signal);
     const shell = getManagedShellChoice();
     let skillsDescription: string;
     try {
@@ -2754,7 +2785,7 @@ export class BridgeManager implements vscode.Disposable {
       this.output.appendLine(`[bridge-skills] discovery failed: ${error instanceof Error ? error.message : String(error)}`);
       skillsDescription = renderLoadSkillDescription([]);
     }
-    return BRIDGE_TOOL_DEFINITIONS.map((tool) => ({
+    return [...BRIDGE_TOOL_DEFINITIONS.map((tool) => ({
       name: tool.name,
       description: tool.name === LOAD_SKILL_TOOL.name
         ? skillsDescription
@@ -2762,7 +2793,7 @@ export class BridgeManager implements vscode.Disposable {
           .replace("${RUNTIME_SHELL_DESCRIPTION}", shell.description)
           .replace("${RUNTIME_SHELL_SYNTAX_HINT}", shell.syntaxHint),
       inputSchema: tool.inputSchema,
-    }));
+    })), ...this.externalMcp.getTools()];
   }
 
   /**
@@ -2889,11 +2920,18 @@ export class BridgeManager implements vscode.Disposable {
     toolName: string,
     args: Record<string, unknown>,
     extra: { signal?: AbortSignal; sessionId?: string },
-  ): Promise<{ content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean; structuredContent?: Record<string, unknown> }> {
+  ): Promise<CallToolResult> {
     const session = extra.sessionId ? this.sessions.get(extra.sessionId) : undefined;
     const modeNotice = this.takeReadOnlyTransitionNotice(extra.sessionId);
     const agentsNotice = this.takeAgentsBaseline(session) ?? this.takeAgentsChanges(session);
     let result = await this.executeToolCall(toolName, args, extra);
+    const externalInstructions = this.externalMcp.instructionsForTool(toolName);
+    let externalNotice: string | undefined;
+    if (session && externalInstructions && session.externalMcpInstructionsSent?.get(externalInstructions.server) !== externalInstructions.key) {
+      session.externalMcpInstructionsSent ??= new Map();
+      session.externalMcpInstructionsSent.set(externalInstructions.server, externalInstructions.key);
+      externalNotice = `[MCP server ${externalInstructions.server} instructions — applies to this server's tools]\n${externalInstructions.text}`;
+    }
 
     const trailing: string[] = [];
     if (!result.isError) {
@@ -2908,8 +2946,9 @@ export class BridgeManager implements vscode.Disposable {
     if (trailing.length) result = { ...result, content: [...result.content, ...trailing.map((text) => ({ type: "text" as const, text }))] };
 
     // The mode notice already ends with "The result of this call follows."
-    const notice = agentsNotice
-      ? `${agentsNotice}\n\n${modeNotice ?? "The result of this call follows."}`
+    const contextNotice = [agentsNotice, externalNotice].filter(Boolean).join("\n\n");
+    const notice = contextNotice
+      ? `${contextNotice}\n\n${modeNotice ?? "The result of this call follows."}`
       : modeNotice;
     if (!notice) return result;
     const [first, ...rest] = result.content;
@@ -2942,7 +2981,7 @@ export class BridgeManager implements vscode.Disposable {
     toolName: string,
     args: Record<string, unknown>,
     extra: { signal?: AbortSignal; sessionId?: string },
-  ): Promise<{ content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean; structuredContent?: Record<string, unknown> }> {
+  ): Promise<CallToolResult> {
     const planModeBlock = this.readOnlyMode ? planModeBlockError(toolName, args) : undefined;
     if (planModeBlock) {
       const activityId = this.pushActivity({
@@ -2984,6 +3023,12 @@ export class BridgeManager implements vscode.Disposable {
     });
     const startedAt = Date.now();
     try {
+      if (this.externalMcp.hasTool(toolName)) {
+        const result = await this.externalMcp.callTool(toolName, args, extra.signal, this.readOnlyMode);
+        const text = result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
+        this.finishActivity(activityId, result.isError ? "error" : "completed", Date.now() - startedAt, result.isError ? text : undefined, bridgePresentation(toolName, args, text, result.structuredContent, result.isError));
+        return result;
+      }
       if (isFileToolName(toolName)) {
         const result = await invokeFileTool(toolName, args, {
           workspaceRoots: this.workspaceRoots(),
@@ -3297,6 +3342,7 @@ export class BridgeManager implements vscode.Disposable {
   private async performStopResources(): Promise<void> {
     this.stoppingResources = true;
     this.tunnelGeneration += 1;
+    const externalMcpStopped = this.externalMcp.stop();
     this.resetPublicHealthMonitor();
     this.tunnelRecoveryAbort?.abort();
     this.tunnelRecoveryAbort = undefined;
@@ -3330,17 +3376,44 @@ export class BridgeManager implements vscode.Disposable {
     this.activeRequests = 0;
     this.localPort = undefined;
     if (this.tunnelProvider === "cloudflare") this.domain = "";
+    await externalMcpStopped;
   }
 
   async disposeAsync(): Promise<void> {
     this.disposed = true;
     await this.stopResources(true);
     await this.todoUpdateQueue;
+    await this.externalMcp.dispose();
   }
 
   dispose(): void {
     this.disposed = true;
     void this.stopResources(true);
+    void this.externalMcp.dispose();
+  }
+
+  async reloadExternalMcp(): Promise<void> { await this.externalMcp.reload(); }
+  async reconnectExternalMcp(name: string): Promise<void> { await this.externalMcp.reconnect(name); }
+  async setExternalMcpEnabled(name: string, enabled: boolean): Promise<void> { await this.externalMcp.setEnabled(name, enabled); }
+  async setExternalMcpCredential(name: string, value: string): Promise<void> {
+    if (!validMcpSecretName(name)) throw new Error("Invalid MCP credential name.");
+    if (!value) throw new Error("MCP credential value cannot be empty.");
+    await this.context.secrets.store(MCP_SECRET_PREFIX + name, value);
+    await this.externalMcp.credentialChanged(name);
+  }
+  async externalMcpConfigurationPath(scope: "user" | "workspace", serverName?: string): Promise<string> {
+    let file = serverName ? this.externalMcp.getStatus().servers.find((server) => server.name === serverName)?.source : undefined;
+    if (serverName && !file) throw new Error("Unknown MCP server.");
+    if (!file) {
+      const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
+      if (scope === "workspace" && !roots.length) throw new Error("Open a workspace folder first.");
+      if (scope === "user" && !this.agentsHomeDir) throw new Error("User home directory is unavailable.");
+      file = mcpConfigPaths({ workspaceRoots: scope === "workspace" ? [roots[0]!] : [], homeDir: scope === "user" ? this.agentsHomeDir : undefined })[0]!;
+    }
+    await mkdir(path.dirname(file), { recursive: true });
+    try { await writeFile(file, '{\n  "mcpServers": {}\n}\n', { encoding: "utf8", flag: "wx" }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    return file;
   }
 }
 
