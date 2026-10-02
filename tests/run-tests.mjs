@@ -48,7 +48,7 @@ try {
   console.log("[test] TypeScript checking test sources...");
   run(process.execPath, [path.join(root, "node_modules", "typescript", "bin", "tsc"), "-p", path.join("tests", "tsconfig.json"), "--noEmit"]);
 
-  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "terminal-lifecycle.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts", "workspace-roots.test.ts", "todo-format.test.ts", "tool-errors.test.ts", "tool-catalog.test.ts", "server-instructions.test.ts", "path-outside.test.ts", "read-only-panel.test.ts", "read-only-notice.test.ts", "prompt-tool-names.test.ts", "plan-mode-commands.test.ts", "image-processing.test.ts", "apply-patch-dirs.test.ts", "apply-patch-replace.test.ts", "skills.test.ts", "agents-md.test.ts", "output-retention.test.ts", "connection-prompt.test.ts", "lsp-tool.test.ts"];
+  const allEntries = ["origin.test.ts", "trusted-origins-panel.test.ts", "session-management.test.ts", "terminal-lifecycle.test.ts", "bridge-start-command.test.ts", "tunnel-lifecycle.test.ts", "workspace-roots.test.ts", "todo-format.test.ts", "tool-errors.test.ts", "tool-catalog.test.ts", "server-instructions.test.ts", "path-outside.test.ts", "search-files.test.ts", "read-only-panel.test.ts", "read-only-notice.test.ts", "prompt-tool-names.test.ts", "plan-mode-commands.test.ts", "image-processing.test.ts", "apply-patch-dirs.test.ts", "apply-patch-replace.test.ts", "skills.test.ts", "agents-md.test.ts", "output-retention.test.ts", "connection-prompt.test.ts", "lsp-tool.test.ts"];
   const entries = match ? allEntries.filter((name) => name.replace(/\.test\.ts$/, "") === match) : allEntries;
   if (!entries.length) throw new Error(`No test entry matched ${JSON.stringify(match)}.`);
   const fakeVscode = path.join(testsDir, "helpers", "fake-vscode.ts");
@@ -79,6 +79,17 @@ try {
     sourcemap: false,
     logLevel: "warning",
     plugins: [moduleReplacement, webviewTextPlugin],
+  });
+
+  // The regex regressions use the real worker, beside each test bundle as in dist/.
+  await build({
+    entryPoints: [path.join(root, "src/extension/src/search-regex-worker.ts")],
+    outfile: path.join(tempDir, "search-regex-worker.js"),
+    bundle: true,
+    platform: "node",
+    target: "node20",
+    format: "cjs",
+    logLevel: "warning",
   });
 
   const bundles = entries.map((entry) => path.join(tempDir, entry.replace(/\.ts$/, ".cjs")));
@@ -138,6 +149,7 @@ try {
           "package.json",
           "dist/extension.js",
           "dist/image-worker.js",
+          "dist/search-regex-worker.js",
           "dist/photon_rs_bg.wasm",
           "dist/photon-node-LICENSE.md",
           "media/icon.png",

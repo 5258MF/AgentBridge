@@ -159,6 +159,7 @@ Connecting the ChatGPT web app: see [docs/chatgpt-web-connector.md](docs/chatgpt
 - Node 22+
 - Built and verified on Windows; macOS supports Homebrew installation, while Linux detects an existing cloudflared and provides a manual installation entry point.
 - File search bundles ripgrep on Windows. On macOS/Linux it uses `rg` from PATH when available, otherwise the built-in bounded Node engine (content search: at most 20,000 files and files up to 2 MiB; file discovery: at most 5,000 candidates).
+- Node fallback regular-expression matching runs in a cancellable worker with a 10-second limit. At most two such searches run concurrently. A timeout returns `SEARCH_TIMEOUT` and suggests narrowing the scope or simplifying the pattern; it does not return an empty match list.
 
 ## License
 

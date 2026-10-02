@@ -1,6 +1,7 @@
 // AgentBridge build script: produces CJS bundles for VS Code.
 //   dist/extension.js          AgentBridge extension (external vscode)
 //   dist/image-worker.js       read_image_file decode/resize worker (Photon)
+//   dist/search-regex-worker.js bounded Node fallback regular-expression search
 //   dist/photon_rs_bg.wasm     Photon WebAssembly module, loaded by the worker
 //                              from its own directory (__dirname)
 // Windows loads the bundled rg.exe from runtime/bin/. Other platforms use a
@@ -70,16 +71,24 @@ const workerConfig = {
   logLevel: "info",
 };
 
+const regexWorkerConfig = {
+  ...workerConfig,
+  entryPoints: [path.join(root, "src/extension/src/search-regex-worker.ts")],
+  outfile: path.join(root, "dist/search-regex-worker.js"),
+};
+
 copyPhotonAssets();
 
 if (watch) {
   const ctx = await context(config);
   const workerCtx = await context(workerConfig);
-  await Promise.all([ctx.watch(), workerCtx.watch()]);
+  const regexWorkerCtx = await context(regexWorkerConfig);
+  await Promise.all([ctx.watch(), workerCtx.watch(), regexWorkerCtx.watch()]);
   console.log("[build] watching for changes...");
 } else {
   await build(config);
   await build(workerConfig);
+  await build(regexWorkerConfig);
   // The panel script is inlined as text (webviewTextPlugin), so esbuild never parses it.
   // Check its syntax here instead of finding out in the webview.
   transformSync(fs.readFileSync(webviewAssetPath("panel.js"), "utf8"), { loader: "js" });
@@ -87,5 +96,5 @@ if (watch) {
   if (bundle.includes("photon_rs_bg.wasm")) {
     throw new Error("[build] Photon must not be bundled into dist/extension.js");
   }
-  console.log("[build] done: dist/extension.js (webview script syntax OK), dist/image-worker.js, dist/photon_rs_bg.wasm");
+  console.log("[build] done: dist/extension.js (webview script syntax OK), dist/image-worker.js, dist/search-regex-worker.js, dist/photon_rs_bg.wasm");
 }

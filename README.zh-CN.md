@@ -159,6 +159,7 @@ ChatGPT 网页版连接见 [docs/chatgpt-web-connector.md](docs/chatgpt-web-conn
 - Node 22+
 - Windows 上构建验证；macOS 支持 Homebrew 安装，Linux 支持检测现有 cloudflared 并提供手动安装入口。
 - 文件搜索在 Windows 上内置 ripgrep；macOS/Linux 优先使用 PATH 中的 `rg`，缺失时使用内置的有界 Node 引擎（内容搜索最多扫描 20,000 个文件且单文件不超过 2 MiB；文件发现最多收集 5,000 个候选）。
+- Node 回退引擎的正则匹配在可取消的独立线程中运行，限时 10 秒，最多同时运行两个此类搜索。超时返回 `SEARCH_TIMEOUT`，提示缩小范围或简化表达式，不会被误认为没有匹配结果。
 
 ## 许可协议
 

@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
-import { open, readdir, readFile, realpath, stat } from "node:fs/promises";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { rgPath as bundledRipgrepPath } from "@vscode/ripgrep";
+import { scanNodeSearchFiles } from "./search-node.js";
+import { RegexSearchError, runRegexSearch, SEARCH_REGEX_TIMEOUT_MS } from "./search-regex-runner.js";
 
 export interface SearchFilesInput {
   pattern: string;
@@ -39,6 +41,7 @@ export interface SearchFilesConfig {
   maxFallbackFileBytes: number;
   maxContextCacheBytes: number;
   maxFallbackFilesScanned: number;
+  regexTimeoutMs: number;
   binaryProbeBytes: number;
   ripgrepPath?: string;
   commonExcludes: string[];
@@ -57,6 +60,7 @@ export const DEFAULT_SEARCH_FILES_CONFIG: SearchFilesConfig = {
   maxFallbackFileBytes: 2 * 1024 * 1024,
   maxContextCacheBytes: 16 * 1024 * 1024,
   maxFallbackFilesScanned: 20_000,
+  regexTimeoutMs: SEARCH_REGEX_TIMEOUT_MS,
   binaryProbeBytes: 8 * 1024,
   commonExcludes: [
     "**/.git/**",
@@ -84,6 +88,8 @@ export type SearchFilesErrorCode =
   | "INVALID_PATTERN"
   | "INVALID_ARGUMENT"
   | "ABORTED"
+  | "SEARCH_TIMEOUT"
+  | "SEARCH_BUSY"
   | "IO_ERROR";
 
 export interface SearchContextLine {
@@ -152,7 +158,7 @@ interface RawMatch {
   text: string;
 }
 
-interface EngineResult {
+export interface EngineResult {
   engine: "ripgrep" | "node";
   matches: RawMatch[];
   filesScanned: number | null;
@@ -161,7 +167,7 @@ interface EngineResult {
   truncationReasons: Set<SearchTruncationReason>;
 }
 
-interface NormalizedOptions {
+export interface NormalizedOptions {
   pattern: string;
   scopeDisplay: string;
   scopeRealPath: string;
@@ -233,10 +239,6 @@ function clampInteger(value: number | undefined, fallback: number, min: number, 
   return Math.min(value, max);
 }
 
-function smartCaseSensitive(pattern: string): boolean {
-  return /[A-Z]/.test(pattern);
-}
-
 function normalizeInput(input: SearchFilesInput, config: SearchFilesConfig): Omit<NormalizedOptions, "scopeRealPath" | "scopeRoot"> {
   if (typeof input.pattern !== "string" || input.pattern.length === 0) {
     throw new SearchToolError("INVALID_ARGUMENT", "pattern must be a non-empty string.");
@@ -296,35 +298,22 @@ function matchesAnyGlob(relativePath: string, patterns: string[]): boolean {
   });
 }
 
-function shouldIncludePath(relativePath: string, options: NormalizedOptions, config: SearchFilesConfig): boolean {
+function shouldIncludePath(
+  relativePath: string,
+  options: NormalizedOptions,
+  config: SearchFilesConfig,
+  isDirectory = false,
+): boolean {
   const normalized = relativePath.split(path.sep).join("/");
   if (!options.includeHidden) {
     const segments = normalized.split("/");
     if (segments.some((segment) => segment.startsWith(".") && segment !== "." && segment !== "..")) return false;
   }
   if (!options.noIgnore && matchesAnyGlob(normalized, config.commonExcludes)) return false;
-  if (options.include.length > 0 && !matchesAnyGlob(normalized, options.include)) return false;
+  // Include globs select files; a directory can contain matches even if its own name does not match.
+  if (!isDirectory && options.include.length > 0 && !matchesAnyGlob(normalized, options.include)) return false;
   if (options.exclude.length > 0 && matchesAnyGlob(normalized, options.exclude)) return false;
   return true;
-}
-
-async function appearsBinary(filePath: string, probeBytes: number): Promise<boolean> {
-  const handle = await open(filePath, "r");
-  try {
-    const buffer = Buffer.allocUnsafe(probeBytes);
-    const { bytesRead } = await handle.read(buffer, 0, probeBytes, 0);
-    if (bytesRead === 0) return false;
-    let suspicious = 0;
-    for (let index = 0; index < bytesRead; index += 1) {
-      const byte = buffer[index]!;
-      if (byte === 0) return true;
-      const allowedControl = byte === 9 || byte === 10 || byte === 13;
-      if ((byte < 32 && !allowedControl) || byte === 127) suspicious += 1;
-    }
-    return suspicious / bytesRead > 0.1;
-  } finally {
-    await handle.close();
-  }
 }
 
 async function loadRootGitignore(root: string): Promise<string[]> {
@@ -364,31 +353,6 @@ function ignoredByRootGitignore(relativePath: string, patterns: string[]): boole
   return ignored;
 }
 
-function compileFallbackMatcher(options: NormalizedOptions): (line: string) => { matched: boolean; column: number } {
-  const sensitive = options.caseSensitive ?? smartCaseSensitive(options.pattern);
-  if (options.isRegex) {
-    const flags = sensitive ? "" : "i";
-    let regex: RegExp;
-    try {
-      regex = new RegExp(options.pattern, flags);
-    } catch (error) {
-      throw new SearchToolError("INVALID_PATTERN", `Invalid regular expression: ${(error as Error).message}`);
-    }
-    return (line) => {
-      regex.lastIndex = 0;
-      const match = regex.exec(line);
-      return match ? { matched: true, column: match.index + 1 } : { matched: false, column: 0 };
-    };
-  }
-
-  const needle = sensitive ? options.pattern : options.pattern.toLocaleLowerCase();
-  return (line) => {
-    const haystack = sensitive ? line : line.toLocaleLowerCase();
-    const index = haystack.indexOf(needle);
-    return index >= 0 ? { matched: true, column: index + 1 } : { matched: false, column: 0 };
-  };
-}
-
 async function collectCandidateFiles(
   options: NormalizedOptions,
   config: SearchFilesConfig,
@@ -426,7 +390,7 @@ async function collectCandidateFiles(
     for (const entry of entries) {
       const absolute = path.join(directory, entry.name);
       const relative = displayPath(options.scopeRoot, absolute);
-      if (!shouldIncludePath(relative, options, config)) continue;
+      if (!shouldIncludePath(relative, options, config, entry.isDirectory())) continue;
       if (!options.noIgnore && ignoredByRootGitignore(relative, gitignore)) continue;
       if (entry.isDirectory()) {
         stack.push(absolute);
@@ -454,69 +418,17 @@ async function searchWithNode(
   checkPermission?: SearchFilesContext["checkPermission"],
 ): Promise<EngineResult> {
   const candidateResult = await collectCandidateFiles(options, config, signal);
-  const matcher = compileFallbackMatcher(options);
-  const matches: RawMatch[] = [];
-  const perFile = new Map<string, number>();
-  const truncationReasons = new Set<SearchTruncationReason>();
-  if (candidateResult.hitLimit) truncationReasons.add("MAX_FILES_SCANNED");
-  let skippedBinaryFiles = 0;
-  let skippedLargeFiles = 0;
-
-  outer: for (const filePath of candidateResult.files) {
-    if (signal?.aborted) throw new DOMException("Search was cancelled.", "AbortError");
-    if (checkPermission && !(await checkPermission(filePath))) continue;
-
-    const fileStat = await stat(filePath);
-    if (fileStat.size > config.maxFallbackFileBytes) {
-      skippedLargeFiles += 1;
-      continue;
+  if (!options.isRegex) return scanNodeSearchFiles(candidateResult, options, config, signal, checkPermission);
+  // Permission callbacks stay in the host and are never serialized into the worker.
+  if (checkPermission) {
+    const allowed: string[] = [];
+    for (const filePath of candidateResult.files) {
+      if (signal?.aborted) throw new DOMException("Search was cancelled.", "AbortError");
+      if (await checkPermission(filePath)) allowed.push(filePath);
     }
-    if (await appearsBinary(filePath, config.binaryProbeBytes)) {
-      skippedBinaryFiles += 1;
-      continue;
-    }
-
-    let text: string;
-    try {
-      text = await readFile(filePath, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EACCES") continue;
-      throw error;
-    }
-    const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
-    const display = displayPath(options.scopeRoot, filePath);
-
-    for (let index = 0; index < lines.length; index += 1) {
-      const found = matcher(lines[index]!);
-      if (!found.matched) continue;
-      const count = perFile.get(display) ?? 0;
-      if (count >= options.maxMatchesPerFile) {
-        truncationReasons.add("MAX_MATCHES_PER_FILE");
-        continue;
-      }
-      if (matches.length >= options.maxResults) {
-        truncationReasons.add("MAX_RESULTS");
-        break outer;
-      }
-      perFile.set(display, count + 1);
-      matches.push({
-        absolutePath: filePath,
-        displayPath: display,
-        line: index + 1,
-        column: found.column,
-        text: lines[index]!,
-      });
-    }
+    candidateResult.files = allowed;
   }
-
-  return {
-    engine: "node",
-    matches,
-    filesScanned: candidateResult.filesScanned,
-    skippedBinaryFiles,
-    skippedLargeFiles,
-    truncationReasons,
-  };
+  return runRegexSearch({ candidates: candidateResult, options, config }, signal);
 }
 
 function ripgrepCandidates(config: SearchFilesConfig): string[] {
@@ -801,6 +713,7 @@ function applyOutputBudget(matches: SearchMatch[], config: SearchFilesConfig, re
 
 function normalizeError(error: unknown): never {
   if (error instanceof SearchToolError) throw error;
+  if (error instanceof RegexSearchError) throw new SearchToolError(error.code, error.message);
   if ((error as Error)?.name === "AbortError") {
     throw new SearchToolError("ABORTED", "Search was cancelled.");
   }
